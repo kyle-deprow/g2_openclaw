@@ -534,6 +534,8 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             scenario_dir = run_dir / "scenarios" / scenario.scenario_id
             _require_empty_directory(scenario_dir, "scenario directory")
             target_path, result_path, trades_path, daily_path = _scenario_outputs(scenario_dir)
+            target_dir = target_path.parent
+            _require_empty_directory(target_dir, "scenario targets stage")
             from .containment import rewrite_targets_argv
 
             validate_targets_argv(
@@ -548,12 +550,10 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 scenario.targets_argv,
                 shared_python=pins.shared_python,
                 worktree=worktree,
-                run_dir=scenario_dir,
+                run_dir=target_dir,
                 panel=panel,
                 receipt=receipt,
             )
-            target_dir = target_path.parent
-            _require_empty_directory(target_dir, "scenario targets stage")
             target_plan = stage_plan(
                 pins,
                 str(job["job_id"]),

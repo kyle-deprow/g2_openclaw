@@ -34,6 +34,7 @@ from typer.testing import CliRunner
 
 from tests.gateway.research.conftest import review, verified_review
 from tests.gateway.research.conftest import run_plan as fixture_run_plan
+from tests.gateway.research.test_admission import _admit, _document, _payload
 from tests.gateway.research.test_readiness import configure_real_readiness
 
 
@@ -77,6 +78,17 @@ def _insert_verified(store: ResearchStore, attempt_id: str, kind: str) -> None:
             (attempt_id, kind, payload, digest),
         )
         conn.commit()
+
+
+def _install_dispatch_admission(
+    store: ResearchStore, attempt: Attempt, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_set_digest = hashlib.sha256(
+        store.evaluation_spec_set(attempt.hypothesis_id).to_json().encode()
+    ).hexdigest()
+    decision = _admit(_document(_payload()), evaluation_spec_set_sha256=spec_set_digest)
+    store.insert_admission_decision(attempt.attempt_id, decision)
+    monkeypatch.setattr(research_cli, "_admission_for_hypothesis", lambda *_args: decision)
 
 
 def _queue(store: ResearchStore, attempt_id: str, *, job_id: str = "job-queue-test") -> Attempt:
@@ -162,6 +174,7 @@ def test_queue_replay_is_idempotent_and_conflicting_payload_refused(
     first = _queue(store, attempt.attempt_id)
     second = _queue(store, attempt.attempt_id)
     assert second == first
+    plan = RunPlan.from_json(store.evidence(attempt.attempt_id, "run_plan"))
     with pytest.raises(StoreConflict):
         store.queue_run_request(
             attempt.attempt_id,
@@ -169,6 +182,7 @@ def test_queue_replay_is_idempotent_and_conflicting_payload_refused(
             store.root / "other-run",
             31,
             256,
+            run_plan=plan,
         )
 
 
@@ -217,10 +231,11 @@ def test_competing_queue_requests_have_one_winner(
 
 
 def test_dispatch_requires_owner_and_explicit_host_native_gates(
-    campaign: tuple[ResearchStore, Path, Any],
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     _insert_verified(store, attempt.attempt_id, "host_execution")
     _insert_verified(store, attempt.attempt_id, "native_execution")
@@ -238,11 +253,37 @@ def test_dispatch_requires_owner_and_explicit_host_native_gates(
     assert row is not None and row["state"] == JobState.EXITED.value
 
 
+def test_dispatch_rejects_new_launch_without_admission_evidence(
+    campaign: tuple[ResearchStore, Path, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A directly-created legacy attempt must not reach a fresh worker launch."""
+    store, source, hypothesis = campaign
+    attempt = _ready(store, source, hypothesis)
+    _queue(store, attempt.attempt_id)
+    _insert_verified(store, attempt.attempt_id, "host_execution")
+    _insert_verified(store, attempt.attempt_id, "native_execution")
+    configure_real_readiness(store, store.root.parent, monkeypatch)
+    monkeypatch.setattr(research_cli, "launch", lambda *_a, **_k: pytest.fail("spawn"))
+
+    store.acquire_owner_lock()
+    try:
+        result = research_cli._dispatch_queued_job(store)
+    finally:
+        store.release_owner_lock()
+
+    assert result is not None and result.startswith("ADMISSION_")
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.REVIEW_PASSED
+    row = store.job_for(attempt.attempt_id)
+    assert row is not None and row["state"] == "ADMISSION_REFUSED"
+
+
 def test_budget_gate_is_explicit_when_host_and_native_are_verified(
     campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     _insert_verified(store, attempt.attempt_id, "host_execution")
     _insert_verified(store, attempt.attempt_id, "native_execution")
@@ -278,6 +319,7 @@ def test_dispatch_claims_once_with_injected_worker_boundary(
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     _insert_verified(store, attempt.attempt_id, "host_execution")
     _insert_verified(store, attempt.attempt_id, "native_execution")
@@ -351,6 +393,8 @@ def test_running_cancel_reports_already_completed_outcome_honestly(
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text('{"compliant":true}', encoding="utf-8")
     result_digest = hashlib.sha256(result_path.read_bytes()).hexdigest()
+    plan = RunPlan.from_json(store.evidence(attempt.attempt_id, "run_plan"))
+    plan_digest = hashlib.sha256(plan.to_json().encode()).hexdigest()
     terminal = run_dir / "terminal.json"
     evidence = run_dir / "run-evidence.json"
     evidence.write_text(
@@ -360,6 +404,8 @@ def test_running_cancel_reports_already_completed_outcome_honestly(
                 "status": "succeeded",
                 "job_id": payload["job_id"],
                 "attempt_id": attempt.attempt_id,
+                "run_plan_sha256": plan_digest,
+                "evaluation_spec_set_sha256": plan.evaluation_spec_set_sha256,
                 "primary_scenario_id": "s000",
                 "scenarios": {
                     "s000": {

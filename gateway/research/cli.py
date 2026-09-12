@@ -792,6 +792,12 @@ def _terminal_outcome(
         or (origin is None and status in {"cancelled", "cancelling"})
     ):
         return _host_terminal_outcome(attempt_id, attempt, terminal)
+    try:
+        stored_plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
+    except (StoreConflict, TypeError, ValueError, json.JSONDecodeError):
+        return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
+    expected_plan_digest = hashlib.sha256(stored_plan.to_json().encode()).hexdigest()
+    expected_job_id = attempt.run_job_id
     result_path = Path(
         str(
             store.root
@@ -820,6 +826,14 @@ def _terminal_outcome(
         try:
             loaded = json.loads(result_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
+                if (
+                    loaded.get("attempt_id") != attempt_id
+                    or loaded.get("job_id") != expected_job_id
+                    or loaded.get("run_plan_sha256") != expected_plan_digest
+                    or loaded.get("evaluation_spec_set_sha256")
+                    != stored_plan.evaluation_spec_set_sha256
+                ):
+                    return _run_evidence_mismatch_outcome(attempt_id, attempt, terminal)
                 if result_path.name == "run-evidence.json":
                     primary_result_valid = False
                     scenarios = loaded.get("scenarios")
@@ -1025,9 +1039,15 @@ def _admission_execution_ready(store: ResearchStore, attempt_id: str) -> str | N
     try:
         store.evidence(attempt_id, "admission_decision")
     except ValueError:
-        # Preserve older directly-created test/driver attempts; the CLI
-        # admission path always persists this evidence at attempt-open.
-        return None
+        reason = "ADMISSION_EVIDENCE_MISSING"
+        store.record_admission_failure(
+            attempt.hypothesis_id,
+            reason,
+            "admission decision evidence is required for a new launch",
+            attempt_id=attempt_id,
+        )
+        _release_admission_pending(store, attempt_id, reason)
+        return reason
     except StoreConflict as exc:
         reason = "ADMISSION_EVIDENCE_INVALID"
         store.record_admission_failure(

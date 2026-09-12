@@ -25,9 +25,26 @@ from gateway.research.wake import compose_wake
 from typer.testing import CliRunner
 
 from tests.gateway.research.conftest import review, run_plan, verified_review
+from tests.gateway.research.test_admission import _admit, _document, _payload
 from tests.gateway.research.test_readiness import configure_real_readiness
 
 runner = CliRunner()
+
+
+def _install_dispatch_admission(
+    store: ResearchStore, attempt: Attempt, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_set_digest = hashlib.sha256(
+        store.evaluation_spec_set(attempt.hypothesis_id).to_json().encode()
+    ).hexdigest()
+    decision = _admit(_document(_payload()), evaluation_spec_set_sha256=spec_set_digest)
+    store.insert_admission_decision(attempt.attempt_id, decision)
+    monkeypatch.setattr(research_cli, "_admission_for_hypothesis", lambda *_args: decision)
+
+
+def _run_plan_bindings(store: ResearchStore, attempt_id: str) -> tuple[str, str]:
+    plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
+    return hashlib.sha256(plan.to_json().encode()).hexdigest(), plan.evaluation_spec_set_sha256
 
 
 def _fake_worker_evidence(
@@ -36,6 +53,8 @@ def _fake_worker_evidence(
     job_id: str,
     attempt_id: str,
     status: str,
+    run_plan_sha256: str,
+    evaluation_spec_set_sha256: str,
     result_path: Path | None = None,
 ) -> None:
     scenarios: dict[str, object] = {}
@@ -49,6 +68,8 @@ def _fake_worker_evidence(
         "status": status,
         "job_id": job_id,
         "attempt_id": attempt_id,
+        "run_plan_sha256": run_plan_sha256,
+        "evaluation_spec_set_sha256": evaluation_spec_set_sha256,
         "primary_scenario_id": "s000",
         "scenarios": scenarios,
         "completed_scenarios": [],
@@ -342,11 +363,88 @@ def test_terminal_outcome_rejects_tampered_primary_result_digest(
     assert outcome.status == "run_evidence_mismatch"
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("attempt_id", "H0001-A999"),
+        ("job_id", "job-embedded-evil"),
+        ("run_plan_sha256", "0" * 64),
+        ("evaluation_spec_set_sha256", "f" * 64),
+    ],
+)
+def test_terminal_outcome_rejects_embedded_binding_mismatch(
+    campaign: tuple[ResearchStore, Path, Any], field: str, value: str
+) -> None:
+    """A consistent file digest cannot authenticate mismatched run bindings."""
+    store, source, hypothesis = campaign
+    attempt = _ready(store, source, hypothesis)
+    _queue(store, attempt.attempt_id, job_id="job-embedded-binding")
+    plan = RunPlan.from_json(store.evidence(attempt.attempt_id, "run_plan"))
+    plan_digest = hashlib.sha256(plan.to_json().encode()).hexdigest()
+    result_path = (
+        store.root
+        / "hypotheses"
+        / hypothesis.hypothesis_id
+        / "attempts"
+        / attempt.attempt_id
+        / "run"
+        / "scenarios"
+        / "s000"
+        / "evaluator-stage"
+        / "out"
+        / "result.json"
+    )
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text('{"compliant":true}', encoding="utf-8")
+    evidence: dict[str, object] = {
+        "contract": "research-run-evidence-v1",
+        "status": "succeeded",
+        "job_id": "job-embedded-binding",
+        "attempt_id": attempt.attempt_id,
+        "run_plan_sha256": plan_digest,
+        "evaluation_spec_set_sha256": plan.evaluation_spec_set_sha256,
+        "primary_scenario_id": "s000",
+        "scenarios": {
+            "s000": {
+                "status": "succeeded",
+                "result_path": str(result_path),
+                "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+            }
+        },
+        "completed_scenarios": ["s000"],
+    }
+    evidence_path = result_path.parents[4] / "run-evidence.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    terminal: dict[str, object] = {
+        "attempt_id": attempt.attempt_id,
+        "job_id": "job-embedded-binding",
+        "worker_pid": 4242,
+        "worker_starttime": 77,
+        "status": "succeeded",
+        "run_plan_sha256": plan_digest,
+        "evaluation_spec_set_sha256": plan.evaluation_spec_set_sha256,
+        "run_evidence_sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+        "started_at": "2026-01-01T00:00:00Z",
+        "finished_at": "2026-01-01T00:00:01Z",
+    }
+
+    baseline = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+    assert baseline.status == "succeeded"
+
+    evidence[field] = value
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    terminal["run_evidence_sha256"] = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == "run_evidence_mismatch"
+
+
 def test_host_dispatch_revalidates_dirty_source_after_queue(
     campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
     configure_real_readiness(store, store.root.parent, monkeypatch)
@@ -370,6 +468,7 @@ def test_host_dispatch_runtime_pin_change_is_terminal_before_worker(
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
     configure_real_readiness(store, store.root.parent, monkeypatch)
@@ -400,6 +499,7 @@ def test_serve_once_dispatches_queue_while_wake_is_pending(
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
     configure_real_readiness(store, store.root.parent, monkeypatch)
@@ -429,6 +529,7 @@ def test_reserved_job_recovers_identity_without_duplicate_launch(
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     store.acquire_owner_lock()
     try:
@@ -463,9 +564,11 @@ def test_terminal_worker_failure_is_not_replaced_by_late_cancel(
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
     configure_real_readiness(store, store.root.parent, monkeypatch)
+    plan_digest, spec_set_digest = _run_plan_bindings(store, attempt.attempt_id)
 
     def fake_launch(attempt_dir: Path, *_a: object, **kwargs: object) -> JobRecord:
         run_dir = attempt_dir / "run"
@@ -475,6 +578,8 @@ def test_terminal_worker_failure_is_not_replaced_by_late_cancel(
             job_id=str(kwargs["job_id"]),
             attempt_id=attempt.attempt_id,
             status="source_mutated",
+            run_plan_sha256=plan_digest,
+            evaluation_spec_set_sha256=spec_set_digest,
         )
         return JobRecord(str(kwargs["job_id"]), attempt.attempt_id, 0, 0, str(run_dir))
 
@@ -494,9 +599,11 @@ def test_dispatch_success_finishes_store_and_wakes_astra(
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
     configure_real_readiness(store, store.root.parent, monkeypatch)
+    plan_digest, spec_set_digest = _run_plan_bindings(store, attempt.attempt_id)
 
     def fake_launch(attempt_dir: Path, *_a: object, **kwargs: object) -> JobRecord:
         run_dir = attempt_dir / "run"
@@ -522,6 +629,8 @@ def test_dispatch_success_finishes_store_and_wakes_astra(
             job_id=str(kwargs["job_id"]),
             attempt_id=attempt.attempt_id,
             status="succeeded",
+            run_plan_sha256=plan_digest,
+            evaluation_spec_set_sha256=spec_set_digest,
             result_path=result_path,
         )
         return JobRecord(str(kwargs["job_id"]), attempt.attempt_id, 0, 0, str(run_dir))
@@ -547,6 +656,7 @@ def test_dispatch_success_without_evaluator_exit_stays_failed(
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
     configure_real_readiness(store, store.root.parent, monkeypatch)
@@ -577,6 +687,7 @@ def test_stale_reject_after_cancel_keeps_canonical_terminal(
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     cancelled = False
 
@@ -613,6 +724,7 @@ def test_running_job_is_not_duplicated_when_owner_turn_is_pending(
 ) -> None:
     store, source, hypothesis = campaign
     attempt = _ready(store, source, hypothesis)
+    _install_dispatch_admission(store, attempt, monkeypatch)
     _queue(store, attempt.attempt_id)
     _verified(store, attempt.attempt_id)
     configure_real_readiness(store, store.root.parent, monkeypatch)

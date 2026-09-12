@@ -11,7 +11,7 @@ from typing import cast
 
 import pytest
 from gateway.research import jobs, worker
-from gateway.research.containment import StagePlan
+from gateway.research.containment import StagePlan, rewrite_targets_argv, stage_plan
 from gateway.research.contracts import AnalysisPlan, RunPlan, RunScenario
 
 run = worker._run
@@ -160,6 +160,114 @@ def test_worker_timeout_writes_terminal(tmp_path: Path, monkeypatch: pytest.Monk
     run(job)
     terminal = json.loads((Path(str(job["run_dir"])) / "terminal.json").read_text(encoding="utf-8"))
     assert terminal["status"] == "timed_out"
+
+
+def test_worker_rewrites_target_output_for_generated_stage_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real rewrite and bwrap argv must agree on the target stage root."""
+    job, _evaluator, _eval_spec, _digest = _job(tmp_path)
+    run_dir = Path(str(job["run_dir"]))
+    artifact_digests = job["artifact_digests"]
+    assert isinstance(artifact_digests, dict)
+    target_commands: list[tuple[str, ...]] = []
+
+    def fake_stage(plan: StagePlan, _cwd: Path, out: Path, _deadline: float) -> tuple[int, bool]:
+        if plan.stage.startswith("validate"):
+            out.write_text(
+                json.dumps(
+                    {
+                        "verdict": "PASS",
+                        "spec_sha256_semantic": "a" * 64,
+                        "spec_sha256_raw": artifact_digests["evaluation_spec"],
+                        "panel_sha256": artifact_digests["panel"],
+                        "receipt_sha256": artifact_digests["receipt"],
+                        "universe_file_sha256": job["universe_sha256"],
+                        "dividends_sha256": artifact_digests["dividends"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        elif plan.stage == "targets-s000":
+            target_commands.append(plan.argv)
+            target = run_dir / "scenarios" / "s000" / "targets-stage" / "targets.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}", encoding="utf-8")
+        elif plan.stage == "evaluate-s000":
+            output = run_dir / "scenarios" / "s000" / "evaluator-stage" / "out"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "result.json").write_text(
+                json.dumps(
+                    {
+                        "evaluator_version": "research-evaluator-v2",
+                        "spec_sha256": "a" * 64,
+                        "dividends_sha256": artifact_digests["dividends"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output / "trades.parquet").write_bytes(b"trades")
+            (output / "daily.parquet").write_bytes(b"daily")
+        else:
+            (run_dir / "analysis-stage" / "analysis" / "result.json").write_text(
+                "{}", encoding="utf-8"
+            )
+        return 0, False
+
+    monkeypatch.setattr(worker, "_stage", fake_stage)
+    outcome = run(job)
+
+    assert outcome["status"] == "succeeded"
+    assert len(target_commands) == 1
+    command = target_commands[0]
+    target_dir = run_dir / "scenarios" / "s000" / "targets-stage"
+    triples = [tuple(command[index : index + 3]) for index in range(len(command) - 2)]
+    assert ("--bind", str(target_dir), "/stage") in triples
+    assert "/stage/targets.json" in command
+    assert "/stage/targets-stage/targets.json" not in command
+
+
+def test_real_target_fixture_executes_inside_containment_boundary(tmp_path: Path) -> None:
+    """Execute the fixture target through the real rewrite, bwrap, and stage scope."""
+    job, _evaluator, _eval_spec, _digest = _job(tmp_path)
+    run_dir = Path(str(job["run_dir"]))
+    worktree = Path(str(job["worktree"]))
+    artifact_paths = job["artifact_paths"]
+    assert isinstance(artifact_paths, dict)
+    target_dir = run_dir / "scenarios" / "s000" / "targets-stage"
+    target_dir.mkdir(parents=True)
+    raw_targets = job["targets_argv"]
+    assert isinstance(raw_targets, list)
+    max_rss = job["max_rss_mb"]
+    assert isinstance(max_rss, int)
+    pins = worker._pins_from_job(job)
+    rewritten = rewrite_targets_argv(
+        tuple(raw_targets),
+        shared_python=pins.shared_python,
+        worktree=worktree,
+        run_dir=target_dir,
+        panel=Path(str(artifact_paths["panel"])),
+        receipt=Path(str(artifact_paths["receipt"])),
+    )
+    plan = stage_plan(
+        pins,
+        str(job["job_id"]),
+        "targets-s000",
+        max_rss,
+        rewritten,
+        panel=Path(str(artifact_paths["panel"])),
+        receipt=Path(str(artifact_paths["receipt"])),
+        worktree=worktree,
+        targets_stage=target_dir,
+    )
+
+    exit_code, timed_out = worker._stage(
+        plan, run_dir, run_dir / "logs" / "real-target.out", time.monotonic() + 10
+    )
+
+    assert exit_code == 0
+    assert not timed_out
+    assert (target_dir / "targets.json").read_text(encoding="utf-8") == "{}"
 
 
 def test_worker_rechecks_frozen_inputs_between_stages(
