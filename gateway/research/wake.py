@@ -13,7 +13,7 @@ from typing import Protocol
 
 from gateway.openclaw_client import OpenClawClient, OpenClawTransportError
 
-from .contracts import AttemptState, HypothesisState
+from .contracts import AttemptDecision, AttemptState, HypothesisState
 from .review_evidence import REVIEW_EFFORT
 from .store import ResearchStore
 
@@ -126,17 +126,38 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
     attempts = store.attempts_for(frozen.hypothesis_id)
     attempt = next((item for item in attempts if item.state != AttemptState.CLOSED), None)
     if attempt is None:
+        if attempts and attempts[-1].decision == AttemptDecision.FINISH.value:
+            last_attempt = attempts[-1]
+            return WakePlan(
+                frozen.hypothesis_id,
+                None,
+                frozen.state.value,
+                f"Astra: decide whether to finish or abandon {frozen.hypothesis_id} with `gateway-cli research hypothesis-decide {frozen.hypothesis_id} --root ROOT --decision FINISHED|ABANDONED --reason TEXT`; do not reopen another attempt.",
+                _key(
+                    frozen.hypothesis_id,
+                    last_attempt.attempt_id,
+                    "HYPOTHESIS_DECISION",
+                    resume_seq,
+                ),
+                resume_seq,
+            )
         refusal = store.latest_admission_refusal(frozen.hypothesis_id)
         refusal_suffix = ""
         if refusal is not None:
             reason, detail = refusal
             refusal_suffix = f" admission_refusal={reason}: {detail or 'typed admission refused'}."
+        pending_key = _key(
+            frozen.hypothesis_id,
+            attempts[-1].attempt_id if attempts else None,
+            "ATTEMPT_OPEN" if attempts else frozen.state.value,
+            resume_seq,
+        )
         return WakePlan(
             frozen.hypothesis_id,
             None,
             frozen.state.value,
             f"Astra: open an attempt for {frozen.hypothesis_id} with `gateway-cli research attempt-open {frozen.hypothesis_id} --root ROOT --worktree PATH`.{refusal_suffix}",
-            _key(frozen.hypothesis_id, None, frozen.state.value, resume_seq),
+            pending_key,
             resume_seq,
         )
     state = attempt.state.value

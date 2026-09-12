@@ -3,7 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from gateway.research.contracts import AttemptDecision, AttemptState, HypothesisSpec
+from gateway.research.contracts import (
+    AttemptDecision,
+    AttemptState,
+    HypothesisDecision,
+    HypothesisSpec,
+)
 from gateway.research.machine import queue_run, start_run
 from gateway.research.store import ResearchStore
 from gateway.research.wake import (
@@ -261,3 +266,146 @@ def test_wake_compose_terminal_states_requests_close_decision(
     running = start_run(queued, "job-x", "2026-01-01T00:00:00Z")
     store.set_state(running, event="run_started")
     assert compose_wake(store) is None
+
+
+def test_wake_after_finished_attempt_requests_hypothesis_decision(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, source, hypothesis = campaign
+    store.freeze(hypothesis.hypothesis_id)
+    attempt = store.open_attempt(hypothesis.hypothesis_id, source)
+    impl = implementation(attempt.attempt_id, "a" * 40)
+    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
+    verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
+    store.close_attempt(attempt.attempt_id, AttemptDecision.FINISH, "finished")
+
+    plan = compose_wake(store)
+
+    assert plan is not None
+    assert plan.attempt_id is None
+    assert "hypothesis-decide H0001" in plan.message
+    assert "--decision FINISHED|ABANDONED" in plan.message
+    assert "attempt-open H0001" not in plan.message
+
+
+def test_wake_after_retry_requests_next_attempt(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, source, hypothesis = campaign
+    store.freeze(hypothesis.hypothesis_id)
+    attempt = store.open_attempt(hypothesis.hypothesis_id, source)
+    impl = implementation(attempt.attempt_id, "a" * 40)
+    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
+    verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
+    store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
+
+    plan = compose_wake(store)
+
+    assert plan is not None
+    assert plan.attempt_id is None
+    assert "attempt-open H0001" in plan.message
+
+
+def test_wake_after_pause_remains_quiet(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, source, hypothesis = campaign
+    store.freeze(hypothesis.hypothesis_id)
+    attempt = store.open_attempt(hypothesis.hypothesis_id, source)
+    impl = implementation(attempt.attempt_id, "a" * 40)
+    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
+    verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
+    store.close_attempt(attempt.attempt_id, AttemptDecision.PAUSE, "pause")
+
+    assert store.campaign()[0] == "PAUSED"
+    assert compose_wake(store) is None
+
+
+def test_wake_preserves_draft_fresh_frozen_and_decided_paths(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, hypothesis = campaign
+
+    draft = compose_wake(store)
+    assert draft is not None
+    assert draft.state == "DRAFT"
+    store.freeze(hypothesis.hypothesis_id)
+    fresh = compose_wake(store)
+    assert fresh is not None
+    assert fresh.state == "FROZEN"
+    assert "attempt-open H0001" in fresh.message
+
+    store.decide_hypothesis(hypothesis.hypothesis_id, HypothesisDecision.FINISHED, "done")
+    next_plan = compose_wake(store)
+    assert next_plan is not None
+    assert next_plan.state == "ALL_DECIDED"
+    assert next_plan.hypothesis_id == "H0002"
+
+
+def test_wake_identity_changes_across_retry_and_finish_without_rewriting_unknown_ack(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, source, hypothesis = campaign
+    store.freeze(hypothesis.hypothesis_id)
+    initial = compose_wake(store)
+    assert initial is not None
+
+    class UncertainOnce(Sender):
+        def send(self, message: str, session_key: str, idempotency_key: str) -> str:
+            self.calls.append((message, session_key, idempotency_key))
+            if len(self.calls) == 1:
+                raise WakeUncertain("transport timeout after acceptance")
+            return "run-1"
+
+    sender = UncertainOnce()
+    with pytest.raises(WakeUncertain):
+        deliver(store, sender, initial, "owner")
+    assert deliver(store, sender, initial, "owner") == "run-1"
+    assert [call[2] for call in sender.calls] == [initial.pending_key, initial.pending_key]
+
+    first = store.open_attempt(hypothesis.hypothesis_id, source)
+    impl = implementation(first.attempt_id, "a" * 40)
+    store.submit_implementation(first.attempt_id, impl, run_plan=run_plan(store, first, impl))
+    verified_review(store, review(first.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
+    store.close_attempt(first.attempt_id, AttemptDecision.RETRY, "retry")
+    retry = compose_wake(store)
+    assert retry is not None
+    assert retry.pending_key != initial.pending_key
+    assert deliver(store, sender, retry, "owner") == "run-1"
+
+    second = store.open_attempt(hypothesis.hypothesis_id, source)
+    impl = implementation(second.attempt_id, "b" * 40)
+    store.submit_implementation(second.attempt_id, impl, run_plan=run_plan(store, second, impl))
+    verified_review(store, review(second.attempt_id, "b" * 40, hypothesis.spec_sha256, "FAIL"))
+    store.close_attempt(second.attempt_id, AttemptDecision.FINISH, "finished")
+    finish = compose_wake(store)
+    assert finish is not None
+    assert finish.pending_key not in {initial.pending_key, retry.pending_key}
+    assert deliver(store, sender, finish, "owner") == "run-1"
+    calls_after_finish = len(sender.calls)
+    assert deliver(store, sender, finish, "owner") is None
+    assert len(sender.calls) == calls_after_finish
+
+
+def test_wake_uses_highest_numbered_closed_attempt_decision(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, source, hypothesis = campaign
+    store.freeze(hypothesis.hypothesis_id)
+    first = store.open_attempt(hypothesis.hypothesis_id, source)
+    impl = implementation(first.attempt_id, "a" * 40)
+    store.submit_implementation(first.attempt_id, impl, run_plan=run_plan(store, first, impl))
+    verified_review(store, review(first.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
+    store.close_attempt(first.attempt_id, AttemptDecision.FINISH, "finished")
+
+    second = store.open_attempt(hypothesis.hypothesis_id, source)
+    impl = implementation(second.attempt_id, "b" * 40)
+    store.submit_implementation(second.attempt_id, impl, run_plan=run_plan(store, second, impl))
+    verified_review(store, review(second.attempt_id, "b" * 40, hypothesis.spec_sha256, "FAIL"))
+    store.close_attempt(second.attempt_id, AttemptDecision.RETRY, "retry")
+
+    plan = compose_wake(store)
+
+    assert plan is not None
+    assert "attempt-open H0001" in plan.message
+    assert "hypothesis-decide H0001" not in plan.message
