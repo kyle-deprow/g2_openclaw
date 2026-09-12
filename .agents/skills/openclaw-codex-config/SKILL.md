@@ -95,11 +95,21 @@ or model.
 - The repo uses Codex OAuth, not `OPENAI_API_KEY`. OpenClaw still labels these
   model refs as `openai/*` because that is the provider namespace for Codex
   app-server models.
-- Agent-scoped Codex compaction can read the selected agent's local
-  `openclaw-agent.sqlite` auth tables directly. After logging in on `main`,
-  run `bash scripts/push-openclaw-config.sh`; the push script syncs the
-  portable OpenClaw OAuth profile rows into every managed OpenAI/Codex agent
-  store. Do not replace this with API-key fallback.
+- Auth is agent-scoped but effective auth state may inherit usage state from
+  the shared store. Use supported agent-scoped `openclaw models --agent AGENT
+  status --json` to inspect the effective source; JSON is required for that
+  source detail, while plain output is summary-only. Never assume a successful
+  OAuth login proves inference availability. A generic unusable/cooldown status
+  can represent the provider's `subscription_limit`, so inspect the
+  provider's current allowance before any recovery.
+- Never blanket-call `clearAuthProfileCooldown`, edit auth SQLite state, copy
+  tokens, switch accounts, or add a provider/runtime fallback. The supported
+  native runtime WHAM reconciliation clears a stale subscription block only
+  after a fresh provider-available response and its credential/generation
+  guards pass. A local-ownership overlay can otherwise make reconciliation a
+  guarded no-op when the block is in shared state; stop and escalate to the
+  operator with a protected backup rather than retrying or importing internal
+  module helpers as a public CLI.
 - Astra (`openai/gpt-6-astra`) and Luna (`openai/gpt-5.6-luna`) are native
   OpenAI/Codex routes. Reviewer-only Opus is an explicit Claude Code ACP
   exception, not an OpenAI OAuth model; do not add it to the OpenAI provider
