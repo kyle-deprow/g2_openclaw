@@ -137,6 +137,12 @@ class CancelOutcome:
 CancelTransport = Callable[[str, str], Awaitable[Mapping[str, object]]]
 
 
+@dataclass(frozen=True, slots=True)
+class _TrackedSource:
+    files: tuple[tuple[str, bytes], ...]
+    excluded: tuple[str, ...]
+
+
 def _read_bounded(path: Path, limit: int, label: str) -> bytes:
     if not path.is_absolute() or path.is_symlink():
         raise BundleError(f"{label} must be an absolute non-symlink file")
@@ -169,10 +175,20 @@ def _read_bounded(path: Path, limit: int, label: str) -> bytes:
         os.close(descriptor)
 
 
-def _safe_source_path(value: str) -> str:
+def _source_path(value: str) -> str:
     path = PurePosixPath(value)
-    if path.is_absolute() or not value or any(part in {"", ".", ".."} for part in path.parts):
+    if (
+        path.is_absolute()
+        or not value
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
         raise BundleError("bundle source contains an unsafe path")
+    return "/".join(path.parts)
+
+
+def _is_blocked_source_path(value: str) -> bool:
+    path = PurePosixPath(value)
     blocked_names = {
         ".aws",
         ".env",
@@ -197,8 +213,15 @@ def _safe_source_path(value: str) -> str:
             or lowered.endswith(tuple(blocked_suffixes))
             or lowered.endswith(".ipynb")
         ):
-            raise BundleError("bundle source contains a data or credential path")
-    return "/".join(path.parts)
+            return True
+    return False
+
+
+def _safe_source_path(value: str) -> str:
+    normalized = _source_path(value)
+    if _is_blocked_source_path(normalized):
+        raise BundleError("bundle source contains a data or credential path")
+    return normalized
 
 
 def _git(worktree: Path, *args: str, max_bytes: int = MAX_BUNDLE_BYTES) -> bytes:
@@ -215,26 +238,54 @@ def _git(worktree: Path, *args: str, max_bytes: int = MAX_BUNDLE_BYTES) -> bytes
     return result.stdout
 
 
-def _tracked_source(worktree: Path, commit: str) -> list[tuple[str, bytes]]:
-    if not worktree.is_absolute() or not worktree.is_dir() or worktree.is_symlink():
-        raise BundleError("committed review source worktree is missing or unsafe")
+def _tree_entries(worktree: Path, commit: str) -> dict[str, tuple[str, str, str]]:
     raw = _git(worktree, "ls-tree", "-r", "-z", commit)
-    files: list[tuple[str, bytes]] = []
+    entries: dict[str, tuple[str, str, str]] = {}
     for entry in raw.split(b"\0"):
         if not entry:
             continue
         header, separator, raw_path = entry.partition(b"\t")
-        if separator == b"" or len(header.split()) < 2:
+        fields = header.split()
+        if separator == b"" or len(fields) != 3:
             raise BundleError("committed source tree is malformed")
-        mode = header.split()[0].decode("ascii", errors="strict")
-        if mode != "100644" and mode != "100755":
+        try:
+            mode, entry_type, blob_sha = (field.decode("ascii") for field in fields)
+            path = _source_path(raw_path.decode("utf-8", errors="strict"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise BundleError("committed source tree is malformed") from exc
+        if path in entries:
+            raise BundleError("committed source tree contains a duplicate path")
+        entries[path] = (mode, entry_type, blob_sha)
+    return entries
+
+
+def _excluded_bytes(excluded: tuple[str, ...]) -> bytes:
+    if not excluded:
+        return b""
+    return ("\n".join(excluded) + "\n").encode("utf-8")
+
+
+def _tracked_source(worktree: Path, commit: str, base_commit: str) -> _TrackedSource:
+    if not worktree.is_absolute() or not worktree.is_dir() or worktree.is_symlink():
+        raise BundleError("committed review source worktree is missing or unsafe")
+    current = _tree_entries(worktree, commit)
+    baseline = _tree_entries(worktree, base_commit)
+    files: list[tuple[str, bytes]] = []
+    excluded: list[str] = []
+    for path in sorted(current):
+        mode, entry_type, blob_sha = current[path]
+        if mode not in {"100644", "100755"} or entry_type != "blob":
             raise BundleError("review source contains a symlink or unsupported entry")
-        path = _safe_source_path(raw_path.decode("utf-8", errors="strict"))
+        if _is_blocked_source_path(path):
+            if mode != "100644" or baseline.get(path) != ("100644", "blob", blob_sha):
+                raise BundleError("bundle source contains a changed data or credential path")
+            excluded.append(f"{blob_sha}\t{path}")
+            continue
         content = _git(worktree, "show", f"{commit}:{path}", max_bytes=MAX_BUNDLE_FILE_BYTES)
         files.append((path, content))
     if not files:
         raise BundleError("review source commit has no tracked files")
-    return files
+    return _TrackedSource(tuple(files), tuple(sorted(excluded)))
 
 
 def _bundle_digest(root: Path) -> str:
@@ -333,7 +384,7 @@ def build_review_bundle(
     if not isinstance(test_path, str) or not test_path:
         raise BundleError("implementation has no bounded test evidence path")
     test_bytes = _read_bounded(Path(test_path), MAX_TEST_EVIDENCE_BYTES, "test evidence")
-    tracked = _tracked_source(source, attempt.commit)
+    tracked = _tracked_source(source, attempt.commit, hypothesis.base_commit)
     diff = _git_diff(source, hypothesis.base_commit, attempt.commit)
     if len(diff) > MAX_BUNDLE_BYTES:
         raise BundleError("implementation diff exceeds the bundle limit")
@@ -342,6 +393,11 @@ def build_review_bundle(
         f"with verdict, attempt_id={attempt.attempt_id}, commit={attempt.commit}, "
         f"spec_sha256={hypothesis.spec_sha256}, and findings."
     )
+    if tracked.excluded and instructions is None:
+        text += (
+            " The source/EXCLUDED file records unchanged frozen-baseline paths "
+            "omitted from source/."
+        )
     instruction_bytes = text.encode("utf-8")
     if len(instruction_bytes) > MAX_BUNDLE_FILE_BYTES:
         raise BundleError("review instructions exceed the bundle file limit")
@@ -374,7 +430,9 @@ def build_review_bundle(
         (temporary / "test-evidence").write_bytes(test_bytes)
         (temporary / "instructions.md").write_bytes(instruction_bytes)
         (temporary / "source" / "COMMIT").write_text(attempt.commit + "\n", encoding="utf-8")
-        for relative, content in tracked:
+        if tracked.excluded:
+            (temporary / "source" / "EXCLUDED").write_bytes(_excluded_bytes(tracked.excluded))
+        for relative, content in tracked.files:
             destination = temporary / "source" / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(content)
@@ -419,9 +477,11 @@ def _validate_bundle(
     )
     if commit_marker != attempt.commit:
         raise BundleError("bundle source commit does not match the attempt")
-    source_files = _tracked_source(Path(attempt.worktree_path), attempt.commit)
+    tracked = _tracked_source(Path(attempt.worktree_path), attempt.commit, hypothesis.base_commit)
     expected = {"COMMIT": (attempt.commit + "\n").encode()}
-    for relative, content in source_files:
+    if tracked.excluded:
+        expected["EXCLUDED"] = _excluded_bytes(tracked.excluded)
+    for relative, content in tracked.files:
         expected[relative] = content
     actual: dict[str, bytes] = {}
     for path in (root / "source").rglob("*"):

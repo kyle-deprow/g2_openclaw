@@ -60,6 +60,13 @@ def _setup(
     return store, source, hypothesis, attempt.attempt_id, bundle
 
 
+def _commit_source(source: Path, message: str) -> None:
+    source.chmod(0o755)
+    subprocess.run(["git", "add", "-A"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-qm", message], cwd=source, check=True)
+    source.chmod(0o555)
+
+
 def _host_fixture(
     store: ResearchStore,
     attempt_id: str,
@@ -220,6 +227,200 @@ def test_reservation_builds_actual_read_only_bundle_and_ack_replays(
     )
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["effort"] == "high"
+
+
+@pytest.mark.parametrize(
+    "campaign",
+    [((".env.example", "EXAMPLE=1\n"), ("data/README.md", "fixture data docs\n"))],
+    indirect=True,
+)
+def test_reservation_excludes_unchanged_blocked_baseline_files(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    source = campaign[1]
+    source.chmod(0o755)
+    (source / "tracked.txt").write_text("changed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-qm", "implementation"], cwd=source, check=True)
+    source.chmod(0o555)
+    store, source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+
+    reservation = reserve_review(store, attempt_id, bundle, "owner")
+
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    expected = sorted(
+        subprocess.check_output(
+            ["git", "rev-parse", f"{commit}:{path}"], cwd=source, text=True
+        ).strip()
+        + "\t"
+        + path
+        for path in (".env.example", "data/README.md")
+    )
+    assert (bundle / "source" / "EXCLUDED").read_text() == "\n".join(expected) + "\n"
+    assert not (bundle / "source" / ".env.example").exists()
+    assert not (bundle / "source" / "data").exists()
+    assert ".env.example" not in (bundle / "diff.patch").read_text()
+    assert "data/README.md" not in (bundle / "diff.patch").read_text()
+    assert (
+        reserve_review(store, attempt_id, bundle, "owner").bundle_sha256
+        == reservation.bundle_sha256
+    )
+    acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
+    core, sessions, projects = _host_fixture(store, attempt_id, bundle, tmp_path)
+    assert (
+        collect_review(store, attempt_id, core, sessions, projects).state
+        == AttemptState.REVIEW_PASSED
+    )
+
+
+def test_reservation_ignores_untracked_blocked_file(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    source = campaign[1]
+    source.chmod(0o755)
+    (source / ".env").write_text("LIVE=not-committed\n", encoding="utf-8")
+    source.chmod(0o555)
+
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+
+    reserve_review(store, attempt_id, bundle, "owner")
+
+    assert not (bundle / "source" / ".env").exists()
+    assert not (bundle / "source" / "EXCLUDED").exists()
+
+
+@pytest.mark.parametrize(
+    "campaign",
+    [((".env.example", "EXAMPLE=1\n"), ("data/README.md", "fixture data docs\n"))],
+    indirect=True,
+)
+def test_changed_blocked_baseline_file_fails_closed(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    source = campaign[1]
+    source.chmod(0o755)
+    (source / ".env.example").write_text("LIVE_SECRET=changed\n", encoding="utf-8")
+    _commit_source(source, "change blocked baseline")
+
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+
+    with pytest.raises(BundleError, match="changed data or credential path"):
+        reserve_review(store, attempt_id, bundle, "owner")
+    assert not bundle.exists()
+    with pytest.raises(ValueError):
+        store.evidence(attempt_id, "review_reservation")
+
+
+def test_added_blocked_files_fail_closed(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    source = campaign[1]
+    source.chmod(0o755)
+    (source / ".env").write_text("LIVE_SECRET=added\n", encoding="utf-8")
+    (source / "data").mkdir()
+    (source / "data" / "dump.db").write_bytes(b"not a database")
+    (source / "secrets").mkdir()
+    (source / "secrets" / "token.pem").write_text("private", encoding="utf-8")
+    _commit_source(source, "add blocked files")
+
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+
+    with pytest.raises(BundleError, match="changed data or credential path"):
+        reserve_review(store, attempt_id, bundle, "owner")
+    assert not bundle.exists()
+
+
+def test_moved_implementation_into_blocked_directory_fails_closed(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    source = campaign[1]
+    source.chmod(0o755)
+    (source / "data").mkdir()
+    subprocess.run(["git", "mv", "tracked.txt", "data/implementation.py"], cwd=source, check=True)
+    _commit_source(source, "move implementation into data")
+
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+
+    with pytest.raises(BundleError, match="changed data or credential path"):
+        reserve_review(store, attempt_id, bundle, "owner")
+    assert not bundle.exists()
+
+
+@pytest.mark.parametrize(
+    "campaign",
+    [((".env.example", "EXAMPLE=1\n"),)],
+    indirect=True,
+)
+def test_executable_blocked_baseline_file_fails_closed(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    source = campaign[1]
+    source.chmod(0o755)
+    (source / ".env.example").chmod(0o755)
+    _commit_source(source, "make blocked baseline executable")
+
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+
+    with pytest.raises(BundleError, match="changed data or credential path"):
+        reserve_review(store, attempt_id, bundle, "owner")
+    assert not bundle.exists()
+
+
+def test_added_symlink_fails_closed(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    source = campaign[1]
+    source.chmod(0o755)
+    (source / "link").symlink_to("tracked.txt")
+    _commit_source(source, "add symlink")
+
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+
+    with pytest.raises(BundleError, match="symlink or unsupported entry"):
+        reserve_review(store, attempt_id, bundle, "owner")
+    assert not bundle.exists()
+
+
+@pytest.mark.parametrize(
+    "campaign",
+    [((".env.example", "EXAMPLE=1\n"), ("data/README.md", "fixture data docs\n"))],
+    indirect=True,
+)
+def test_excluded_metadata_tampering_is_rejected(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    reserve_review(store, attempt_id, bundle, "owner")
+    bundle.chmod(0o755)
+    excluded = bundle / "source" / "EXCLUDED"
+    excluded.chmod(0o644)
+    excluded.write_text("tampered\n", encoding="utf-8")
+
+    with pytest.raises(BundleError):
+        reserve_review(store, attempt_id, bundle, "owner")
+
+
+@pytest.mark.parametrize(
+    "campaign",
+    [((".env.example", "EXAMPLE=1\n"), ("data/README.md", "fixture data docs\n"))],
+    indirect=True,
+)
+def test_planted_blocked_bundle_file_is_rejected(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    reserve_review(store, attempt_id, bundle, "owner")
+    bundle.chmod(0o755)
+    source_dir = bundle / "source"
+    source_dir.chmod(0o755)
+    planted = source_dir / ".env.example"
+    planted.write_text("PLANTED=1\n", encoding="utf-8")
+    planted.chmod(0o444)
+    source_dir.chmod(0o555)
+    bundle.chmod(0o555)
+
+    with pytest.raises(BundleError, match="data or credential path"):
+        reserve_review(store, attempt_id, bundle, "owner")
 
 
 def test_reservation_accepts_nested_tracked_source_directories(

@@ -15,7 +15,9 @@ from gateway.research.store import ResearchStore
 
 
 @pytest.fixture
-def campaign(tmp_path: Path) -> tuple[ResearchStore, Path, HypothesisSpec]:
+def campaign(
+    tmp_path: Path, request: pytest.FixtureRequest
+) -> tuple[ResearchStore, Path, HypothesisSpec]:
     root = tmp_path / "driver"
     source = tmp_path / "source"
     source.mkdir()
@@ -23,6 +25,10 @@ def campaign(tmp_path: Path) -> tuple[ResearchStore, Path, HypothesisSpec]:
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=source, check=True)
     subprocess.run(["git", "config", "user.name", "Research Tests"], cwd=source, check=True)
     (source / "tracked.txt").write_text("tracked", encoding="utf-8")
+    for relative, content in getattr(request, "param", ()):
+        path = source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
     subprocess.run(["git", "add", "."], cwd=source, check=True)
     subprocess.run(["git", "commit", "-qm", "fixture"], cwd=source, check=True)
     spec = tmp_path / "spec.json"
