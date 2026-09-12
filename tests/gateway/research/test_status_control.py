@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import sqlite3
 import sys
@@ -10,14 +11,19 @@ import pytest
 from gateway.research.contracts import (
     Attempt,
     AttemptState,
+    EvaluationSpecEntry,
+    EvaluationSpecSet,
     ImplementationRecord,
     ReviewEvidence,
+    RunPlan,
 )
 from gateway.research.control import ControlError, OwnerControl, ReviewCancellation, StartResult
 from gateway.research.jobs import JobRecord
 from gateway.research.jobs import cancel as cancel_job
 from gateway.research.status import ResearchStatus, build_status_frame, read_status
 from gateway.research.store import ResearchStore
+
+from tests.gateway.research.conftest import run_plan
 
 
 def _db(root: Path) -> sqlite3.Connection:
@@ -241,6 +247,21 @@ def _attempt_fixture(root: Path, *, review: bool = True) -> tuple[ResearchStore,
     receipt.write_text("receipt", encoding="utf-8")
     eval_spec.write_text("evaluation", encoding="utf-8")
     dividends.write_text('{"contract":"trusted-dividends-v2"}', encoding="utf-8")
+    spec_set = root / "evaluation-spec-set.json"
+    spec_set.write_text(
+        EvaluationSpecSet(
+            "research-evaluation-spec-set-v1",
+            "H0001",
+            "c000",
+            (
+                EvaluationSpecEntry(
+                    "c000", str(eval_spec), hashlib.sha256(eval_spec.read_bytes()).hexdigest()
+                ),
+            ),
+            "2026-01-01T00:00:00Z",
+        ).to_json(),
+        encoding="utf-8",
+    )
     hypothesis = store.create_hypothesis(
         "control fixture",
         spec_file,
@@ -249,6 +270,7 @@ def _attempt_fixture(root: Path, *, review: bool = True) -> tuple[ResearchStore,
         eval_spec,
         "a" * 40,
         dividends,
+        evaluation_spec_set=spec_set,
     )
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, root / "worktree")
@@ -263,7 +285,9 @@ def _attempt_fixture(root: Path, *, review: bool = True) -> tuple[ResearchStore,
         submitted_at="2026-09-06T00:02:00Z",
     )
     (root / "tests.json").write_text("{}", encoding="utf-8")
-    attempt = store.submit_implementation(attempt.attempt_id, implementation)
+    attempt = store.submit_implementation(
+        attempt.attempt_id, implementation, run_plan=run_plan(store, attempt, implementation)
+    )
     if review:
         review_record = ReviewEvidence(
             attempt_id=attempt.attempt_id,
@@ -291,6 +315,9 @@ def _attempt_fixture(root: Path, *, review: bool = True) -> tuple[ResearchStore,
                 "verdict_json": review_record.to_json(),
                 "bound_commit": review_record.commit,
                 "bound_spec_sha256": review_record.spec_sha256,
+                "bound_run_plan_sha256": hashlib.sha256(
+                    store.evidence(attempt.attempt_id, "run_plan").encode()
+                ).hexdigest(),
                 "collected_at": review_record.submitted_at,
                 "verdict": review_record.verdict,
             },
@@ -305,7 +332,8 @@ def _queue_running_job(store: ResearchStore, attempt: Attempt, job_id: str) -> A
     run_dir = (
         store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt.attempt_id / "run"
     )
-    store.queue_run_request(attempt.attempt_id, job_id, run_dir, 30, 256)
+    plan = RunPlan.from_json(store.evidence(attempt.attempt_id, "run_plan"))
+    store.queue_run_request(attempt.attempt_id, job_id, run_dir, 30, 256, run_plan=plan)
     store.acquire_run_lock()
     try:
         running = store.claim_queued_job(attempt.attempt_id, job_id)
@@ -462,7 +490,10 @@ def test_stop_cancels_queued_job_without_signalling(tmp_path: Path) -> None:
     run_dir = (
         tmp_path / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt.attempt_id / "run"
     )
-    queued = store.queue_run_request(attempt.attempt_id, "job-queued", run_dir, 30, 256)
+    plan = RunPlan.from_json(store.evidence(attempt.attempt_id, "run_plan"))
+    queued = store.queue_run_request(
+        attempt.attempt_id, "job-queued", run_dir, 30, 256, run_plan=plan
+    )
     unit = _FakeUnit("active")
 
     result = OwnerControl(tmp_path, unit=unit).stop()

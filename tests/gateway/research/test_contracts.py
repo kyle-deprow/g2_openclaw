@@ -160,6 +160,8 @@ def test_reviewed_run_plan_binds_distinct_specs_and_analysis(tmp_path: Path) -> 
     )
     assert EvaluationSpecSet.from_json(spec_set.to_json()) == spec_set
     assert RunPlan.from_json(plan.to_json()) == plan
+    with pytest.raises(ValueError, match="direct files"):
+        AnalysisPlan("analysis.module", (), ("analysis/nested/result.json",), 1024)
     with pytest.raises(ValueError, match="aggregate"):
         RunPlan(
             plan.contract,
@@ -172,4 +174,76 @@ def test_reviewed_run_plan_binds_distinct_specs_and_analysis(tmp_path: Path) -> 
             plan.analysis,
             3600,
             3600,
+        )
+
+
+def test_evaluation_spec_set_rejects_overflow_gaps_order_and_duplicate_paths(
+    tmp_path: Path,
+) -> None:
+    paths: list[Path] = []
+    entries: list[EvaluationSpecEntry] = []
+    for index in range(16):
+        path = tmp_path / f"spec-{index}.json"
+        path.write_text(json.dumps({"cost": index}), encoding="utf-8")
+        paths.append(path)
+        entries.append(
+            EvaluationSpecEntry(
+                f"c{index:03d}",
+                str(path),
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+        )
+    valid = EvaluationSpecSet(
+        "research-evaluation-spec-set-v1",
+        "H0001",
+        "c000",
+        tuple(entries),
+        "2026-01-01T00:00:00Z",
+    )
+    assert len(valid.specs) == 16
+    with pytest.raises(ValueError, match="at most 16"):
+        overflow = tmp_path / "spec-16.json"
+        overflow.write_text("overflow", encoding="utf-8")
+        EvaluationSpecSet(
+            valid.contract,
+            valid.hypothesis_id,
+            valid.primary_spec_id,
+            tuple(
+                [
+                    *entries,
+                    EvaluationSpecEntry(
+                        "c016",
+                        str(tmp_path / "spec-16.json"),
+                        hashlib.sha256(b"overflow").hexdigest(),
+                    ),
+                ]
+            ),
+            valid.created_at,
+        )
+    with pytest.raises(ValueError, match="contiguous"):
+        EvaluationSpecSet(
+            valid.contract,
+            valid.hypothesis_id,
+            valid.primary_spec_id,
+            (entries[0], entries[2]),
+            valid.created_at,
+        )
+    with pytest.raises(ValueError, match="contiguous"):
+        EvaluationSpecSet(
+            valid.contract,
+            valid.hypothesis_id,
+            valid.primary_spec_id,
+            (entries[1], entries[0]),
+            valid.created_at,
+        )
+    with pytest.raises(ValueError, match="paths must be unique"):
+        EvaluationSpecSet(
+            valid.contract,
+            valid.hypothesis_id,
+            valid.primary_spec_id,
+            (
+                entries[0],
+                EvaluationSpecEntry("c001", entries[0].path, entries[1].sha256),
+            ),
+            valid.created_at,
         )

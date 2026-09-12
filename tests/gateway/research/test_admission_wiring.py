@@ -16,6 +16,7 @@ from gateway.research.admission import (
 )
 from gateway.research.cli import (
     _admission_for_hypothesis,
+    _AdmissionInputError,
     _decode_panel_sessions,
     _parse_exposure_ledger,
     _record_admission_refusal,
@@ -23,16 +24,19 @@ from gateway.research.cli import (
 from gateway.research.contracts import (
     AttemptDecision,
     AttemptState,
+    EvaluationSpecEntry,
+    EvaluationSpecSet,
     HypothesisDecision,
     HypothesisSpec,
     HypothesisState,
     RunOutcome,
+    RunPlan,
 )
 from gateway.research.store import MAX_EXPOSURE_LEDGER_BYTES, ResearchStore, StoreConflict
 from gateway.research.wake import compose_wake
 from typer.testing import CliRunner
 
-from tests.gateway.research.conftest import implementation, review, verified_review
+from tests.gateway.research.conftest import implementation, review, run_plan, verified_review
 from tests.gateway.research.test_admission import _admit, _document, _payload
 from tests.gateway.research.test_review_evidence import _prepare_review
 
@@ -81,6 +85,22 @@ def _wired_spec(
         dividends_path=str(RECEIPT_FIXTURE.absolute()),
         dividends_sha256=hashlib.sha256(RECEIPT_FIXTURE.read_bytes()).hexdigest(),
     )
+
+
+def _wire_evaluation_spec_set(store: ResearchStore, spec: HypothesisSpec) -> None:
+    entry = EvaluationSpecEntry("c000", spec.evaluation_spec_path, spec.evaluation_spec_sha256)
+    manifest = EvaluationSpecSet(
+        "research-evaluation-spec-set-v1",
+        spec.hypothesis_id,
+        "c000",
+        (entry,),
+        "2026-01-01T00:00:00Z",
+    )
+
+    def fake_spec_set(hypothesis_id: str) -> EvaluationSpecSet:
+        return manifest
+
+    store.evaluation_spec_set = fake_spec_set  # type: ignore[method-assign]
 
 
 def test_campaign_policy_is_unset_without_a_default(
@@ -414,6 +434,7 @@ def test_wired_admission_uses_registered_policy_ledger_and_receipt_sessions(
         dividends_sha256=hashlib.sha256(RECEIPT_FIXTURE.read_bytes()).hexdigest(),
     )
     monkeypatch.setattr(store, "get_hypothesis", lambda _hypothesis_id: spec)
+    _wire_evaluation_spec_set(store, spec)
     store.set_campaign_policy(3, None, "operator-test")
     store.register_exposure_ledger(
         LEDGER_FIXTURE, hashlib.sha256(LEDGER_FIXTURE.read_bytes()).hexdigest()
@@ -426,6 +447,43 @@ def test_wired_admission_uses_registered_policy_ledger_and_receipt_sessions(
     assert (
         decision.receipt.receipt_sha256 == hashlib.sha256(RECEIPT_FIXTURE.read_bytes()).hexdigest()
     )
+
+
+def test_admission_rejects_second_spec_non_cost_bound_change(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _source, stored_hypothesis = campaign
+    spec = _wired_spec(stored_hypothesis, tmp_path)
+    alternate = tmp_path / "alternate-evaluator.json"
+    alternate.write_text(
+        json.dumps(
+            {
+                "instruments": [{"ticker": "SPY", "instrument_class": "etf"}],
+                "start_session": "2025-09-15",
+                "end_session": "2025-09-26",
+                "holding": {"max_sessions": 6},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = EvaluationSpecSet(
+        "research-evaluation-spec-set-v1",
+        spec.hypothesis_id,
+        "c000",
+        (
+            EvaluationSpecEntry("c000", spec.evaluation_spec_path, spec.evaluation_spec_sha256),
+            EvaluationSpecEntry(
+                "c001", str(alternate), hashlib.sha256(alternate.read_bytes()).hexdigest()
+            ),
+        ),
+        "2026-01-01T00:00:00Z",
+    )
+    monkeypatch.setattr(store, "get_hypothesis", lambda _hypothesis_id: spec)
+    monkeypatch.setattr(store, "evaluation_spec_set", lambda _hypothesis_id: manifest)
+    with pytest.raises(_AdmissionInputError, match="non-cost bound"):
+        _admission_for_hypothesis(store, spec.hypothesis_id)
 
 
 @pytest.mark.parametrize(
@@ -453,6 +511,7 @@ def test_attempt_open_cli_wires_capability_and_earnings_refusals(
         feature_source=feature_source,
     )
     monkeypatch.setattr(store, "get_hypothesis", lambda _hypothesis_id: spec)
+    _wire_evaluation_spec_set(store, spec)
     store.set_campaign_policy(3, None, "operator-test")
     store.register_exposure_ledger(
         LEDGER_FIXTURE, hashlib.sha256(LEDGER_FIXTURE.read_bytes()).hexdigest()
@@ -491,7 +550,9 @@ def test_dispatch_policy_race_releases_pending_attempt_without_readiness_or_budg
     store.freeze(hypothesis.hypothesis_id)
     admitted = _admit(_document(_payload()))
     attempt = store.open_attempt(hypothesis.hypothesis_id, source, admission=admitted)
-    store.submit_implementation(attempt.attempt_id, implementation(attempt.attempt_id, "a" * 40))
+    record = implementation(attempt.attempt_id, "a" * 40)
+    plan = run_plan(store, attempt, record)
+    store.submit_implementation(attempt.attempt_id, record, run_plan=plan)
     verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256))
     run_dir = (
         store.root
@@ -501,7 +562,9 @@ def test_dispatch_policy_race_releases_pending_attempt_without_readiness_or_budg
         / attempt.attempt_id
         / "run"
     )
-    store.queue_run_request(attempt.attempt_id, "job-admission-race", run_dir, 30, 256)
+    store.queue_run_request(
+        attempt.attempt_id, "job-admission-race", run_dir, 30, 256, run_plan=plan
+    )
     changed = replace(admitted, campaign_policy=CampaignPolicy(True, 2))
     monkeypatch.setattr(research_cli, "_admission_for_hypothesis", lambda *_: changed)
     monkeypatch.setattr(
@@ -535,8 +598,9 @@ def test_attempt_cap_pause_cancel_and_status_remain_safe(
     store.freeze(hypothesis.hypothesis_id)
     for number in (1, 2):
         attempt = store.open_attempt(hypothesis.hypothesis_id, source)
+        record = implementation(attempt.attempt_id, "a" * 40)
         store.submit_implementation(
-            attempt.attempt_id, implementation(attempt.attempt_id, "a" * 40)
+            attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
         )
         store.collect_review_evidence(
             attempt.attempt_id,
@@ -551,12 +615,14 @@ def test_attempt_cap_pause_cancel_and_status_remain_safe(
         )
         store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, f"retry {number}")
     final = store.open_attempt(hypothesis.hypothesis_id, source)
-    store.submit_implementation(final.attempt_id, implementation(final.attempt_id, "a" * 40))
+    final_record = implementation(final.attempt_id, "a" * 40)
+    final_plan = run_plan(store, final, final_record)
+    store.submit_implementation(final.attempt_id, final_record, run_plan=final_plan)
     verified_review(store, review(final.attempt_id, "a" * 40, hypothesis.spec_sha256))
     run_dir = (
         store.root / "hypotheses" / hypothesis.hypothesis_id / "attempts" / final.attempt_id / "run"
     )
-    store.queue_run_request(final.attempt_id, "job-cap", run_dir, 30, 256)
+    store.queue_run_request(final.attempt_id, "job-cap", run_dir, 30, 256, run_plan=final_plan)
 
     paused = runner.invoke(
         app, ["research", "pause", "--root", str(store.root), "--reason", "cap review"]
@@ -587,7 +653,8 @@ def test_final_allocated_attempt_completes_review_run_collect_and_decision(
         is AttemptState.REVIEW_PASSED
     )
     run_dir = store.root / "hypotheses" / "H0001" / "attempts" / attempt_id / "run"
-    queued = store.queue_run_request(attempt_id, "job-final", run_dir, 30, 256)
+    plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
+    queued = store.queue_run_request(attempt_id, "job-final", run_dir, 30, 256, run_plan=plan)
     assert queued.state is AttemptState.RUN_QUEUED
     store.claim_queued_job(attempt_id, "job-final")
     outcome = RunOutcome(

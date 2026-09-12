@@ -15,7 +15,7 @@ from gateway.research.wake import (
     poll_owner_turn,
 )
 
-from tests.gateway.research.conftest import implementation, review, verified_review
+from tests.gateway.research.conftest import implementation, review, run_plan, verified_review
 
 
 class Sender:
@@ -61,7 +61,9 @@ def test_wake_composes_each_state_and_failed_owner_turn_is_recorded(
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     assert compose_wake(store).state == "OPENED"  # type: ignore[union-attr]
     impl = implementation(attempt.attempt_id, "a" * 40)
-    implemented = store.submit_implementation(attempt.attempt_id, impl)
+    implemented = store.submit_implementation(
+        attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl)
+    )
     assert implemented.state == AttemptState.IMPLEMENTED
     assert compose_wake(store).state == "IMPLEMENTED"  # type: ignore[union-attr]
     passed = verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256))
@@ -245,13 +247,15 @@ def test_wake_compose_terminal_states_requests_close_decision(
     store, source, hypothesis = campaign
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
-    store.submit_implementation(attempt.attempt_id, implementation(attempt.attempt_id, "a" * 40))
+    impl = implementation(attempt.attempt_id, "a" * 40)
+    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
     verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
     assert compose_wake(store).state == "REVIEW_FAILED"  # type: ignore[union-attr]
     closed = store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
     assert closed.state.value == "CLOSED"
     reopened = store.open_attempt(hypothesis.hypothesis_id, source)
-    store.submit_implementation(reopened.attempt_id, implementation(reopened.attempt_id, "b" * 40))
+    impl = implementation(reopened.attempt_id, "b" * 40)
+    store.submit_implementation(reopened.attempt_id, impl, run_plan=run_plan(store, reopened, impl))
     passed = verified_review(store, review(reopened.attempt_id, "b" * 40, hypothesis.spec_sha256))
     queued = queue_run(passed, "2026-01-01T00:00:00Z")
     running = start_run(queued, "job-x", "2026-01-01T00:00:00Z")

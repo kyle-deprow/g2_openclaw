@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -16,16 +17,58 @@ from gateway.research.contracts import (
     AttemptState,
     ImplementationRecord,
     JobState,
+    RunPlan,
 )
 from gateway.research.jobs import JobRecord, _starttime
 from gateway.research.store import ResearchStore
 from gateway.research.wake import compose_wake
 from typer.testing import CliRunner
 
-from tests.gateway.research.conftest import review, verified_review
+from tests.gateway.research.conftest import review, run_plan, verified_review
 from tests.gateway.research.test_readiness import configure_real_readiness
 
 runner = CliRunner()
+
+
+def _fake_worker_evidence(
+    run_dir: Path,
+    *,
+    job_id: str,
+    attempt_id: str,
+    status: str,
+    result_path: Path | None = None,
+) -> None:
+    scenarios: dict[str, object] = {}
+    if result_path is not None:
+        scenarios["s000"] = {
+            "result_path": str(result_path),
+            "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
+        }
+    evidence = {
+        "contract": "research-run-evidence-v1",
+        "status": status,
+        "job_id": job_id,
+        "attempt_id": attempt_id,
+        "primary_scenario_id": "s000",
+        "scenarios": scenarios,
+        "completed_scenarios": [],
+    }
+    evidence_path = run_dir / "run-evidence.json"
+    evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+    (run_dir / "terminal.json").write_text(
+        json.dumps(
+            {
+                "job_id": job_id,
+                "status": status,
+                "targets_exit": 0,
+                "evaluator_exit": 0,
+                "run_evidence_sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+                "started_at": "2026-01-01T00:00:00Z",
+                "finished_at": "2026-01-01T00:00:01Z",
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _call(root: Path, *args: str, expect: int = 0) -> Result | Any:
@@ -38,18 +81,18 @@ def _ready(store: ResearchStore, source: Path, hypothesis: Any) -> Attempt:
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    store.submit_implementation(
+    record = ImplementationRecord(
         attempt.attempt_id,
-        ImplementationRecord(
-            attempt.attempt_id,
-            commit,
-            (sys.executable, "-m", "fixture_target"),
-            "/tmp/evidence.json",
-            "reported-coder",
-            "high",
-            "standard",
-            "2026-01-01T00:00:00Z",
-        ),
+        commit,
+        (sys.executable, "-m", "fixture_target"),
+        "/tmp/evidence.json",
+        "reported-coder",
+        "high",
+        "standard",
+        "2026-01-01T00:00:00Z",
+    )
+    store.submit_implementation(
+        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
     )
     verified_review(store, review(attempt.attempt_id, commit, hypothesis.spec_sha256))
     return store.get_attempt(attempt.attempt_id)
@@ -58,7 +101,8 @@ def _ready(store: ResearchStore, source: Path, hypothesis: Any) -> Attempt:
 def _queue(store: ResearchStore, attempt_id: str, job_id: str = "job-cli-test") -> None:
     attempt = store.get_attempt(attempt_id)
     run_dir = store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id / "run"
-    store.queue_run_request(attempt_id, job_id, run_dir, 30, 256)
+    plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
+    store.queue_run_request(attempt_id, job_id, run_dir, 30, 256, run_plan=plan)
 
 
 def _verified(store: ResearchStore, attempt_id: str) -> None:
@@ -289,11 +333,11 @@ def test_terminal_worker_failure_is_not_replaced_by_late_cancel(
     def fake_launch(attempt_dir: Path, *_a: object, **kwargs: object) -> JobRecord:
         run_dir = attempt_dir / "run"
         run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / "terminal.json").write_text(
-            json.dumps(
-                {"job_id": kwargs["job_id"], "status": "source_mutated", "evaluator_exit": 2}
-            ),
-            encoding="utf-8",
+        _fake_worker_evidence(
+            run_dir,
+            job_id=str(kwargs["job_id"]),
+            attempt_id=attempt.attempt_id,
+            status="source_mutated",
         )
         return JobRecord(str(kwargs["job_id"]), attempt.attempt_id, 0, 0, str(run_dir))
 
@@ -319,7 +363,7 @@ def test_dispatch_success_finishes_store_and_wakes_astra(
 
     def fake_launch(attempt_dir: Path, *_a: object, **kwargs: object) -> JobRecord:
         run_dir = attempt_dir / "run"
-        result_path = run_dir / "evaluator-stage" / "out" / "result.json"
+        result_path = run_dir / "scenarios" / "s000" / "evaluator-stage" / "out" / "result.json"
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_text(
             json.dumps(
@@ -336,18 +380,12 @@ def test_dispatch_success_finishes_store_and_wakes_astra(
             ),
             encoding="utf-8",
         )
-        (run_dir / "terminal.json").write_text(
-            json.dumps(
-                {
-                    "job_id": kwargs["job_id"],
-                    "status": "succeeded",
-                    "targets_exit": 0,
-                    "evaluator_exit": 0,
-                    "started_at": "2026-01-01T00:00:00Z",
-                    "finished_at": "2026-01-01T00:00:01Z",
-                }
-            ),
-            encoding="utf-8",
+        _fake_worker_evidence(
+            run_dir,
+            job_id=str(kwargs["job_id"]),
+            attempt_id=attempt.attempt_id,
+            status="succeeded",
+            result_path=result_path,
         )
         return JobRecord(str(kwargs["job_id"]), attempt.attempt_id, 0, 0, str(run_dir))
 

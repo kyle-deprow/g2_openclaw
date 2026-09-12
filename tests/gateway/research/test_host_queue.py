@@ -32,6 +32,7 @@ from gateway.research.store import ResearchStore, StoreConflict
 from typer.testing import CliRunner
 
 from tests.gateway.research.conftest import review, verified_review
+from tests.gateway.research.conftest import run_plan as fixture_run_plan
 from tests.gateway.research.test_readiness import configure_real_readiness
 
 
@@ -59,6 +60,8 @@ def _ready(
     run_plan = (
         run_plan_factory(attempt, implementation_record) if run_plan_factory is not None else None
     )
+    if run_plan is None:
+        run_plan = fixture_run_plan(store, attempt, implementation_record)
     store.submit_implementation(attempt.attempt_id, implementation_record, run_plan=run_plan)
     verified_review(store, review(attempt.attempt_id, commit, hypothesis.spec_sha256))
     return store.get_attempt(attempt.attempt_id)
@@ -78,7 +81,8 @@ def _insert_verified(store: ResearchStore, attempt_id: str, kind: str) -> None:
 def _queue(store: ResearchStore, attempt_id: str, *, job_id: str = "job-queue-test") -> Attempt:
     attempt = store.get_attempt(attempt_id)
     run_dir = store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id / "run"
-    return store.queue_run_request(attempt_id, job_id, run_dir, 30, 256)
+    plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
+    return store.queue_run_request(attempt_id, job_id, run_dir, 30, 256, run_plan=plan)
 
 
 def test_run_cli_only_queues_and_does_not_spawn(
@@ -141,6 +145,31 @@ def test_queue_replay_is_idempotent_and_conflicting_payload_refused(
             31,
             256,
         )
+
+
+def test_host_dispatch_rejects_tampered_run_plan_before_launch(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt = _ready(store, source, hypothesis)
+    _queue(store, attempt.attempt_id)
+    row = store.job_for(attempt.attempt_id)
+    assert row is not None
+    payload = json.loads(str(row["payload_json"]))
+    payload["run_plan_sha256"] = "0" * 64
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET payload_json=?,payload_sha256=? WHERE job_id=?",
+            (text, hashlib.sha256(text.encode()).hexdigest(), payload["job_id"]),
+        )
+        conn.commit()
+    monkeypatch.setattr(research_cli, "launch", lambda *_a, **_k: pytest.fail("spawn"))
+    store.acquire_owner_lock()
+    try:
+        assert research_cli._dispatch_queued_job(store) == "run_plan_mismatch"
+    finally:
+        store.release_owner_lock()
 
 
 def test_competing_queue_requests_have_one_winner(
@@ -293,16 +322,32 @@ def test_running_cancel_reports_already_completed_outcome_honestly(
     )
     store.update_job(payload, attempt.attempt_id)
     run_dir = Path(str(payload["run_dir"]))
-    result_path = run_dir / "evaluator-stage" / "out" / "result.json"
+    result_path = run_dir / "scenarios" / "s000" / "evaluator-stage" / "out" / "result.json"
     result_path.parent.mkdir(parents=True, exist_ok=True)
     result_path.write_text('{"compliant":true}', encoding="utf-8")
     terminal = run_dir / "terminal.json"
+    evidence = run_dir / "run-evidence.json"
+    evidence.write_text(
+        json.dumps(
+            {
+                "contract": "research-run-evidence-v1",
+                "status": "succeeded",
+                "job_id": payload["job_id"],
+                "attempt_id": attempt.attempt_id,
+                "primary_scenario_id": "s000",
+                "scenarios": {},
+                "completed_scenarios": [],
+            }
+        ),
+        encoding="utf-8",
+    )
     terminal.write_text(
         json.dumps(
             {
                 "job_id": payload["job_id"],
                 "status": "succeeded",
                 "evaluator_exit": 0,
+                "run_evidence_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
                 "started_at": "2026-01-01T00:00:00Z",
                 "finished_at": "2026-01-01T00:00:01Z",
             }
@@ -437,8 +482,8 @@ def test_three_attempt_retry_and_second_hypothesis_queue_lifecycle(
                 ),
             ),
             AnalysisPlan("fixture.analysis", (), ("analysis/result.json",), 1024),
-            30,
-            30,
+            10,
+            10,
         )
 
     attempt = _ready(store, source, second, run_plan_factory=second_run_plan)

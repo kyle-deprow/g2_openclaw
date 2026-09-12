@@ -13,11 +13,13 @@ import pytest
 from gateway.cli import app
 from gateway.openclaw_client import OpenClawTransportError
 from gateway.research.contracts import (
+    Attempt,
     AttemptState,
     HypothesisDecision,
     HypothesisSpec,
     ImplementationRecord,
     ReviewRecord,
+    RunPlan,
 )
 from gateway.research.review_evidence import (
     BundleError,
@@ -31,7 +33,16 @@ from gateway.research.review_evidence import (
 from gateway.research.store import ResearchStore, StoreConflict
 from typer.testing import CliRunner
 
+from tests.gateway.research.conftest import run_plan
+
 runner = CliRunner()
+
+
+def _queue(store: ResearchStore, attempt_id: str, job_id: str) -> Attempt:
+    attempt = store.get_attempt(attempt_id)
+    run_dir = store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id / "run"
+    plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
+    return store.queue_run_request(attempt_id, job_id, run_dir, 30, 256, run_plan=plan)
 
 
 def _setup(
@@ -43,18 +54,18 @@ def _setup(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    store.submit_implementation(
+    record = ImplementationRecord(
         attempt.attempt_id,
-        ImplementationRecord(
-            attempt.attempt_id,
-            commit,
-            ("python", "-m", "target"),
-            str(evidence),
-            "reported-coder",
-            "high",
-            "standard",
-            "2026-01-01T00:00:00Z",
-        ),
+        commit,
+        ("python", "-m", "target"),
+        str(evidence),
+        "reported-coder",
+        "high",
+        "standard",
+        "2026-01-01T00:00:00Z",
+    )
+    store.submit_implementation(
+        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
     )
     bundle = tmp_path / "review-bundle"
     return store, source, hypothesis, attempt.attempt_id, bundle
@@ -423,6 +434,19 @@ def test_planted_blocked_bundle_file_is_rejected(
         reserve_review(store, attempt_id, bundle, "owner")
 
 
+def test_evaluation_spec_copy_tampering_is_rejected(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    reserve_review(store, attempt_id, bundle, "owner")
+    spec_copy = bundle / "evaluation-specs" / "c000.json"
+    bundle.chmod(0o755)
+    spec_copy.chmod(0o644)
+    spec_copy.write_text('{"tampered":true}', encoding="utf-8")
+    with pytest.raises(BundleError):
+        reserve_review(store, attempt_id, bundle, "owner")
+
+
 def test_reservation_accepts_nested_tracked_source_directories(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
@@ -485,11 +509,7 @@ def test_collect_requires_terminal_host_evidence_and_is_idempotent(
     assert (attempt_dir / "review.json").is_file()
     assert (attempt_dir / "review_host_evidence.json").is_file()
     assert len([row for row in store.events() if row.kind == "review_collected"]) == 1
-    run_dir = store.root / "hypotheses" / "H0001" / "attempts" / attempt_id / "run"
-    assert (
-        store.queue_run_request(attempt_id, "job-evidence", run_dir, 30, 256).state
-        == AttemptState.RUN_QUEUED
-    )
+    assert _queue(store, attempt_id, "job-evidence").state == AttemptState.RUN_QUEUED
 
 
 def test_collect_nonterminal_is_pending_and_bundle_mutation_is_rejected(
@@ -739,9 +759,8 @@ def test_queue_refuses_missing_or_forced_review_host_evidence(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
     store, _source, hypothesis, attempt_id, _bundle = _setup(campaign, tmp_path)
-    run_dir = store.root / "hypotheses" / hypothesis.hypothesis_id / "attempts" / attempt_id / "run"
     with pytest.raises(StoreConflict):
-        store.queue_run_request(attempt_id, "job-missing-review", run_dir, 30, 256)
+        _queue(store, attempt_id, "job-missing-review")
     attempt = store.get_attempt(attempt_id)
     forced = replace(
         attempt,
@@ -752,7 +771,7 @@ def test_queue_refuses_missing_or_forced_review_host_evidence(
     )
     store.set_state(forced, event="test_forced_review_pass")
     with pytest.raises(StoreConflict):
-        store.queue_run_request(attempt_id, "job-forced-review", run_dir, 30, 256)
+        _queue(store, attempt_id, "job-forced-review")
 
 
 def test_queue_refuses_forced_pass_with_fail_host_evidence(
@@ -775,9 +794,8 @@ def test_queue_refuses_forced_pass_with_fail_host_evidence(
         review_spec_sha256=hypothesis.spec_sha256,
     )
     store.set_state(forced, event="test_forced_review_pass")
-    run_dir = store.root / "hypotheses" / hypothesis.hypothesis_id / "attempts" / attempt_id / "run"
     with pytest.raises(StoreConflict):
-        store.queue_run_request(attempt_id, "job-fail-review", run_dir, 30, 256)
+        _queue(store, attempt_id, "job-fail-review")
 
 
 def test_self_report_submit_is_a_tombstone(

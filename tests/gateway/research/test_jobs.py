@@ -17,6 +17,7 @@ from typing import Any, cast
 import pytest
 from gateway.research import worker
 from gateway.research.containment import runtime_pins
+from gateway.research.contracts import AnalysisPlan, ImplementationRecord, RunPlan, RunScenario
 from gateway.research.jobs import (
     JobError,
     JobRecord,
@@ -78,7 +79,7 @@ def _launch(
         tmp_path, sleep=sleep, mutate=mutate
     )
     eval_spec.chmod(0o444)
-    attempt_dir = tmp_path / "attempt"
+    attempt_dir = tmp_path / "H0001-A001"
     (attempt_dir / "run" / "logs").mkdir(parents=True)
     out = attempt_dir / "run" / "targets.json"
     spec = tmp_path / "spec.json"
@@ -147,10 +148,37 @@ def _launch(
     artifact_digests = {
         key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in artifact_paths.items()
     }
+    targets_argv = (str(pins.shared_python), str(target), "--out", str(out))
+    implementation = ImplementationRecord(
+        attempt_dir.name,
+        commit,
+        targets_argv,
+        "/tmp/test-evidence.json",
+        "fixture-coder",
+        "high",
+        "standard",
+        "2026-01-01T00:00:00Z",
+    )
+    plan = RunPlan(
+        "research-run-plan-v1",
+        attempt_dir.name,
+        commit,
+        hashlib.sha256(implementation.to_json().encode()).hexdigest(),
+        "a" * 64,
+        "s000",
+        (
+            RunScenario(
+                "s000", targets_argv, "c000", hashlib.sha256(eval_spec.read_bytes()).hexdigest()
+            ),
+        ),
+        AnalysisPlan("fixture.analysis", (), ("analysis/result.json",), 1024),
+        0.05 if timeout < 1 else 1,
+        0.05 if timeout < 1 else 1,
+    )
     job = launch(
         attempt_dir,
         worktree,
-        (str(pins.shared_python), str(target), "--out", str(out)),
+        targets_argv,
         timeout,
         512,
         shared_python=pins.shared_python,
@@ -161,6 +189,9 @@ def _launch(
         evaluator_source_sha256=pins.evaluator_sha256,
         configured_pins=pins,
         dividends_path=dividends,
+        run_plan=plan,
+        evaluation_spec_paths={"c000": eval_spec},
+        evaluation_spec_digests={"c000": hashlib.sha256(eval_spec.read_bytes()).hexdigest()},
     )
     return job, worktree
 
@@ -300,8 +331,9 @@ def test_contained_worker_timeout_is_terminal(tmp_path: Path) -> None:
     assert _wait(job) == "TIMED_OUT"
     terminal = json.loads((Path(job.run_dir) / "terminal.json").read_text(encoding="utf-8"))
     assert terminal["status"] == "timed_out"
-    assert terminal["source_writable"] is False
-    assert terminal["shared_env_writable"] is True
+    assert terminal["run_evidence_sha256"]
+    evidence = json.loads((Path(job.run_dir) / "run-evidence.json").read_text(encoding="utf-8"))
+    assert evidence["checks"][0]["name"] == "source_before"
 
 
 def test_cancel_identity_and_orphan(tmp_path: Path) -> None:
@@ -495,7 +527,7 @@ def test_worker_launch_uses_trusted_package_not_worktree_shadow(
     evaluator.chmod(0o555)
     eval_spec.chmod(0o444)
     worktree.chmod(0o555)
-    attempt_dir = tmp_path / "shadow" / "attempt"
+    attempt_dir = tmp_path / "shadow" / "H0001-A001"
     (attempt_dir / "run" / "logs").mkdir(parents=True)
     artifacts = {}
     for name, content in (("spec", "{}"), ("panel", "panel"), ("receipt", "receipt")):
@@ -525,10 +557,42 @@ def test_worker_launch_uses_trusted_package_not_worktree_shadow(
     trusted_evaluator.write_bytes(evaluator.read_bytes())
     trusted_evaluator.chmod(0o555)
     pins = runtime_pins(snapshot, venv / "bin" / "python", trusted_evaluator, universe)
+    targets_argv = (
+        str(pins.shared_python),
+        str(target),
+        "--out",
+        str(attempt_dir / "run" / "targets.json"),
+    )
+    implementation = ImplementationRecord(
+        attempt_dir.name,
+        commit,
+        targets_argv,
+        "/tmp/test-evidence.json",
+        "fixture-coder",
+        "high",
+        "standard",
+        "2026-01-01T00:00:00Z",
+    )
+    plan = RunPlan(
+        "research-run-plan-v1",
+        attempt_dir.name,
+        commit,
+        hashlib.sha256(implementation.to_json().encode()).hexdigest(),
+        "a" * 64,
+        "s000",
+        (
+            RunScenario(
+                "s000", targets_argv, "c000", hashlib.sha256(eval_spec.read_bytes()).hexdigest()
+            ),
+        ),
+        AnalysisPlan("fixture.analysis", (), ("analysis/result.json",), 1024),
+        1,
+        1,
+    )
     job = launch(
         attempt_dir,
         worktree,
-        (str(pins.shared_python), str(target), "--out", str(attempt_dir / "run" / "targets.json")),
+        targets_argv,
         5,
         512,
         shared_python=pins.shared_python,
@@ -541,13 +605,16 @@ def test_worker_launch_uses_trusted_package_not_worktree_shadow(
         evaluator_source_sha256=pins.evaluator_sha256,
         configured_pins=pins,
         dividends_path=artifacts["dividends"],
+        run_plan=plan,
+        evaluation_spec_paths={"c000": eval_spec},
+        evaluation_spec_digests={"c000": hashlib.sha256(eval_spec.read_bytes()).hexdigest()},
     )
     assert _wait(job) == "EXITED"
     terminal = json.loads((Path(job.run_dir) / "terminal.json").read_text(encoding="utf-8"))
     assert terminal["job_id"] == job.job_id
     assert isinstance(terminal["status"], str) and terminal["status"]
-    assert terminal["checks"][0]["name"] == "source_before"
-    assert any(check["name"] == "containment" for check in terminal["checks"])
+    evidence = json.loads((Path(job.run_dir) / "run-evidence.json").read_text(encoding="utf-8"))
+    assert evidence["checks"][0]["name"] == "source_before"
     assert not (worktree / "hijacked").exists()
 
 

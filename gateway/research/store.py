@@ -25,6 +25,7 @@ from .contracts import (
     Attempt,
     AttemptDecision,
     AttemptState,
+    EvaluationSpecEntry,
     EvaluationSpecSet,
     Event,
     HypothesisDecision,
@@ -525,7 +526,9 @@ class ResearchStore:
         )
 
     def _projection(self, path: Path, payload: str) -> bool:
-        data = payload.encode()
+        return self._projection_bytes(path, payload.encode())
+
+    def _projection_bytes(self, path: Path, data: bytes) -> bool:
         if path.is_file() and sha256_bytes(path.read_bytes()) == sha256_bytes(data):
             return False
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -540,6 +543,40 @@ class ResearchStore:
             if os.path.exists(name):
                 os.unlink(name)
         return True
+
+    def _validate_owned_spec_set(
+        self, hypothesis: HypothesisSpec, spec_set: EvaluationSpecSet
+    ) -> None:
+        owned_root = (
+            self.root / "hypotheses" / hypothesis.hypothesis_id / "evaluation-specs"
+        ).resolve()
+        primary = next(
+            entry for entry in spec_set.specs if entry.spec_id == spec_set.primary_spec_id
+        )
+        if (
+            primary.path != hypothesis.evaluation_spec_path
+            or primary.sha256 != hypothesis.evaluation_spec_sha256
+        ):
+            raise StoreConflict("primary evaluation spec does not match immutable set")
+        seen_paths: set[str] = set()
+        for entry in spec_set.specs:
+            path = Path(entry.path)
+            try:
+                resolved = path.resolve(strict=True)
+            except OSError as exc:
+                raise StoreConflict(f"evaluation spec is missing: {entry.spec_id}") from exc
+            if (
+                resolved.parent != owned_root
+                or path.is_symlink()
+                or not path.is_file()
+                or path.stat().st_mode & 0o222
+            ):
+                raise StoreConflict(f"evaluation spec is not store-owned: {entry.spec_id}")
+            if str(resolved) in seen_paths:
+                raise StoreConflict("evaluation spec paths must be unique")
+            seen_paths.add(str(resolved))
+            if sha256_file(path) != entry.sha256:
+                raise StoreConflict(f"evaluation spec digest mismatch: {entry.spec_id}")
 
     def _hypothesis_from_row(self, row: sqlite3.Row) -> HypothesisSpec:
         payload = str(row["payload_json"])
@@ -619,6 +656,8 @@ class ResearchStore:
             ).fetchone()
         if configured is None or not bool(configured[0]):
             raise ValueError("contained runtime must be configured before hypothesis-create")
+        if evaluation_spec_set is None:
+            raise ValueError("evaluation spec set is required for every new hypothesis")
         if dividends.is_symlink() or not dividends.is_file():
             raise ValueError("dividends must be a regular non-symlink file")
         raw = json.loads(spec_file.read_text(encoding="utf-8"))
@@ -633,6 +672,43 @@ class ResearchStore:
             created = now_utc()
             dividends_path = str(dividends.resolve())
             dividends_sha256 = sha256_file(dividends)
+            if evaluation_spec_set.is_symlink() or not evaluation_spec_set.is_file():
+                raise ValueError("evaluation spec set must be a regular non-symlink file")
+            parsed_set = EvaluationSpecSet.from_json(
+                evaluation_spec_set.read_text(encoding="utf-8")
+            )
+            if parsed_set.hypothesis_id != hid:
+                raise ValueError("evaluation spec set hypothesis_id does not match new hypothesis")
+            if parsed_set.primary_spec_id not in {entry.spec_id for entry in parsed_set.specs}:
+                raise ValueError("evaluation spec set primary entry is missing")
+            parsed_primary = next(
+                entry for entry in parsed_set.specs if entry.spec_id == parsed_set.primary_spec_id
+            )
+            if sha256_file(eval_spec) != parsed_primary.sha256:
+                raise ValueError("primary evaluation spec does not match immutable set")
+            owned_dir = self.root / "hypotheses" / hid / "evaluation-specs"
+            owned_entries: list[EvaluationSpecEntry] = []
+            for entry in parsed_set.specs:
+                source = Path(entry.path)
+                content = source.read_bytes()
+                if hashlib.sha256(content).hexdigest() != entry.sha256:
+                    raise ValueError(f"evaluation spec digest mismatch: {entry.spec_id}")
+                owned_path = owned_dir / f"{entry.spec_id}.json"
+                self._projection_bytes(owned_path, content)
+                owned_path.chmod(0o444)
+                owned_entries.append(
+                    EvaluationSpecEntry(entry.spec_id, str(owned_path), entry.sha256)
+                )
+            spec_set = EvaluationSpecSet(
+                parsed_set.contract,
+                parsed_set.hypothesis_id,
+                parsed_set.primary_spec_id,
+                tuple(owned_entries),
+                parsed_set.created_at,
+            )
+            primary = next(
+                entry for entry in spec_set.specs if entry.spec_id == spec_set.primary_spec_id
+            )
             spec = HypothesisSpec(
                 hid,
                 title,
@@ -640,8 +716,8 @@ class ResearchStore:
                 _digest(spec_json),
                 str(panel.resolve()),
                 str(receipt.resolve()),
-                str(eval_spec.resolve()),
-                sha256_file(eval_spec),
+                primary.path,
+                primary.sha256,
                 sha256_file(panel),
                 sha256_file(receipt),
                 max_attempts,
@@ -651,28 +727,6 @@ class ResearchStore:
                 dividends_sha256,
                 HypothesisState.DRAFT,
             )
-            spec_set: EvaluationSpecSet | None = None
-            if evaluation_spec_set is not None:
-                if evaluation_spec_set.is_symlink() or not evaluation_spec_set.is_file():
-                    raise ValueError("evaluation spec set must be a regular non-symlink file")
-                spec_set = EvaluationSpecSet.from_json(
-                    evaluation_spec_set.read_text(encoding="utf-8")
-                )
-                if spec_set.hypothesis_id != hid:
-                    raise ValueError(
-                        "evaluation spec set hypothesis_id does not match new hypothesis"
-                    )
-                primary = next(
-                    entry for entry in spec_set.specs if entry.spec_id == spec_set.primary_spec_id
-                )
-                if (
-                    primary.path != spec.evaluation_spec_path
-                    or primary.sha256 != spec.evaluation_spec_sha256
-                ):
-                    raise ValueError("primary evaluation spec does not match hypothesis spec")
-                for entry in spec_set.specs:
-                    if sha256_file(Path(entry.path)) != entry.sha256:
-                        raise ValueError(f"evaluation spec digest mismatch: {entry.spec_id}")
             payload = spec.to_json()
             conn.execute(
                 "INSERT INTO hypotheses(hypothesis_id,state,title,spec_json,spec_sha256,panel_path,receipt_path,evaluation_spec_path,evaluation_spec_sha256,panel_sha256,receipt_sha256,dividends_path,dividends_sha256,max_attempts,base_commit,created_at,payload_json,payload_sha256) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -697,24 +751,19 @@ class ResearchStore:
                     _digest(payload),
                 ),
             )
-            if spec_set is not None:
-                set_payload = spec_set.to_json()
-                conn.execute(
-                    "INSERT INTO hypothesis_evidence VALUES(?,?,?,?)",
-                    (hid, "evaluation_spec_set", set_payload, _digest(set_payload)),
-                )
+            set_payload = spec_set.to_json()
+            conn.execute(
+                "INSERT INTO hypothesis_evidence VALUES(?,?,?,?)",
+                (hid, "evaluation_spec_set", set_payload, _digest(set_payload)),
+            )
             self._event(conn, hid, None, "hypothesis_created", {"title": title}, "astra")
             conn.commit()
         self._projection(self.root / "hypotheses" / hid / "spec.json", spec_json)
-        if spec_set is not None:
-            self._projection(
-                self.root / "hypotheses" / hid / "evaluation-spec-set.json", spec_set.to_json()
-            )
-            for entry in spec_set.specs:
-                self._projection(
-                    self.root / "hypotheses" / hid / "evaluation-specs" / f"{entry.spec_id}.json",
-                    Path(entry.path).read_text(encoding="utf-8"),
-                )
+        self._projection(
+            self.root / "hypotheses" / hid / "evaluation-spec-set.json", spec_set.to_json()
+        )
+        for entry in spec_set.specs:
+            self._projection_bytes(Path(entry.path), Path(entry.path).read_bytes())
         return spec
 
     def _update_hypothesis(
@@ -736,16 +785,8 @@ class ResearchStore:
 
     def freeze(self, hypothesis_id: str) -> HypothesisSpec:
         current = self.get_hypothesis(hypothesis_id)
-        if current.state == HypothesisState.DRAFT and current.hypothesis_id != "H0001":
-            with self._connect() as conn:
-                evidence = conn.execute(
-                    "SELECT 1 FROM hypothesis_evidence WHERE hypothesis_id=? AND kind='evaluation_spec_set'",
-                    (hypothesis_id,),
-                ).fetchone()
-            if evidence is None:
-                raise StoreConflict(
-                    "DRAFT hypothesis requires evaluation spec set evidence before freeze"
-                )
+        if current.state == HypothesisState.DRAFT:
+            self._validate_owned_spec_set(current, self.evaluation_spec_set(hypothesis_id))
         return self._update_hypothesis(freeze(current), "hypothesis_frozen")
 
     def decide_hypothesis(
@@ -862,32 +903,34 @@ class ResearchStore:
         run_plan: RunPlan | None = None,
     ) -> Attempt:
         attempt = self.get_attempt(attempt_id)
-        run_plan_payload = run_plan.to_json() if run_plan is not None else None
-        if run_plan is not None:
-            if run_plan.attempt_id != attempt_id or run_plan.commit != record.commit:
-                raise StoreConflict("run plan does not match implementation")
-            if run_plan.implementation_sha256 != _digest(record.to_json()):
-                raise StoreConflict("run plan implementation digest does not match implementation")
-            try:
-                spec_set = self.evaluation_spec_set(attempt.hypothesis_id)
-            except ValueError as exc:
-                raise StoreConflict("evaluation spec set evidence is required") from exc
-            if run_plan.evaluation_spec_set_sha256 != _digest(spec_set.to_json()):
-                raise StoreConflict("run plan evaluation spec set digest does not match evidence")
-            primary = next(
-                scenario
-                for scenario in run_plan.scenarios
-                if scenario.scenario_id == run_plan.primary_scenario_id
-            )
-            if primary.targets_argv != record.targets_argv:
-                raise StoreConflict("primary scenario argv does not match implementation")
-            entries = {entry.spec_id: entry.sha256 for entry in spec_set.specs}
-            if any(
-                scenario.spec_id not in entries
-                or scenario.evaluation_spec_sha256 != entries[scenario.spec_id]
-                for scenario in run_plan.scenarios
-            ):
-                raise StoreConflict("run plan scenario spec does not match evidence")
+        if run_plan is None:
+            raise StoreConflict("immutable run plan evidence is required")
+        if run_plan.attempt_id != attempt_id or run_plan.commit != record.commit:
+            raise StoreConflict("run plan does not match implementation")
+        if run_plan.implementation_sha256 != _digest(record.to_json()):
+            raise StoreConflict("run plan implementation digest does not match implementation")
+        try:
+            spec_set = self.evaluation_spec_set(attempt.hypothesis_id)
+        except (StoreConflict, ValueError) as exc:
+            raise StoreConflict("evaluation spec set evidence is required") from exc
+        self._validate_owned_spec_set(self.get_hypothesis(attempt.hypothesis_id), spec_set)
+        if run_plan.evaluation_spec_set_sha256 != _digest(spec_set.to_json()):
+            raise StoreConflict("run plan evaluation spec set digest does not match evidence")
+        primary = next(
+            scenario
+            for scenario in run_plan.scenarios
+            if scenario.scenario_id == run_plan.primary_scenario_id
+        )
+        if primary.targets_argv != record.targets_argv:
+            raise StoreConflict("primary scenario argv does not match implementation")
+        entries = {entry.spec_id: entry.sha256 for entry in spec_set.specs}
+        if any(
+            scenario.spec_id not in entries
+            or scenario.evaluation_spec_sha256 != entries[scenario.spec_id]
+            for scenario in run_plan.scenarios
+        ):
+            raise StoreConflict("run plan scenario spec does not match evidence")
+        run_plan_payload = run_plan.to_json()
         with self._connect() as conn:
             old = conn.execute(
                 "SELECT payload_json FROM attempt_evidence WHERE attempt_id=? AND kind='implementation'",
@@ -896,16 +939,14 @@ class ResearchStore:
         if old is not None:
             if old[0] != record.to_json():
                 raise StoreConflict("implementation payload differs from stored payload")
-            if run_plan_payload is not None:
-                existing_plan = conn.execute(
-                    "SELECT payload_json FROM attempt_evidence WHERE attempt_id=? AND kind='run_plan'",
-                    (attempt_id,),
-                ).fetchone()
-                if existing_plan is not None and str(existing_plan[0]) != run_plan_payload:
-                    raise StoreConflict("run plan payload differs from stored payload")
+            existing_plan = conn.execute(
+                "SELECT payload_json FROM attempt_evidence WHERE attempt_id=? AND kind='run_plan'",
+                (attempt_id,),
+            ).fetchone()
+            if existing_plan is None or str(existing_plan[0]) != run_plan_payload:
+                raise StoreConflict("run plan payload differs from stored payload")
             self._repair_evidence_projection(attempt, "implementation", record.to_json())
-            if run_plan_payload is not None:
-                self._repair_evidence_projection(attempt, "run_plan", run_plan_payload)
+            self._repair_evidence_projection(attempt, "run_plan", run_plan_payload)
             return attempt
         updated = submit_implementation(attempt, record, now_utc())
         payload = updated.to_json()
@@ -915,11 +956,10 @@ class ResearchStore:
                 "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
                 (attempt_id, "implementation", record.to_json(), _digest(record.to_json())),
             )
-            if run_plan_payload is not None:
-                conn.execute(
-                    "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
-                    (attempt_id, "run_plan", run_plan_payload, _digest(run_plan_payload)),
-                )
+            conn.execute(
+                "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+                (attempt_id, "run_plan", run_plan_payload, _digest(run_plan_payload)),
+            )
             conn.execute(
                 'UPDATE attempts SET state=?,"commit"=?,implementation_sha256=?,review_verdict=NULL,review_commit=NULL,review_spec_sha256=NULL,reported_reviewer_model=NULL,reported_reviewer_actual_model=NULL,reported_coder_model=?,coder_effort=?,coder_service_tier=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=?',
                 (
@@ -953,16 +993,15 @@ class ResearchStore:
             / "implementation.json",
             record.to_json(),
         )
-        if run_plan_payload is not None:
-            self._projection(
-                self.root
-                / "hypotheses"
-                / attempt.hypothesis_id
-                / "attempts"
-                / attempt_id
-                / "run-plan.json",
-                run_plan_payload,
-            )
+        self._projection(
+            self.root
+            / "hypotheses"
+            / attempt.hypothesis_id
+            / "attempts"
+            / attempt_id
+            / "run-plan.json",
+            run_plan_payload,
+        )
         return updated
 
     def insert_review_evidence(self, attempt_id: str, kind: str, payload: str, event: str) -> None:
@@ -1798,24 +1837,15 @@ class ResearchStore:
         if run_dir.resolve() != expected_run_dir:
             raise StoreConflict("run directory is not the canonical attempt directory")
         implementation = ImplementationRecord.from_json(self.evidence(attempt_id, "implementation"))
-        stored_plan: RunPlan | None = run_plan
+        if run_plan is None:
+            raise StoreConflict("immutable run plan evidence is required")
         try:
             stored_plan = RunPlan.from_json(self.evidence(attempt_id, "run_plan"))
-        except ValueError:
-            if run_plan is None:
-                # Historical H1 attempts remain readable.  They are handled by
-                # the legacy queue shape only; fresh hypotheses cannot launch
-                # without the reviewed plan below.
-                stored_plan = None
-        if (
-            run_plan is not None
-            and stored_plan is not None
-            and run_plan.to_json() != stored_plan.to_json()
-        ):
+        except (StoreConflict, ValueError) as exc:
+            raise StoreConflict("stored immutable run plan is malformed") from exc
+        if run_plan.to_json() != stored_plan.to_json():
             raise StoreConflict("supplied run plan differs from stored run plan")
-        if stored_plan is None and hypothesis.hypothesis_id != "H0001":
-            raise StoreConflict("fresh hypotheses require immutable run plan evidence")
-        if hypothesis.state != HypothesisState.FROZEN and stored_plan is not None:
+        if hypothesis.state != HypothesisState.FROZEN:
             raise StoreConflict("hypothesis must be frozen before queueing a reviewed plan")
         try:
             host_review = json.loads(self.evidence(attempt_id, "review_host_evidence"))
@@ -1832,10 +1862,7 @@ class ResearchStore:
             or host_review.get("verdict") != "PASS"
             or host_review.get("bound_commit") != attempt.commit
             or host_review.get("bound_spec_sha256") != hypothesis.spec_sha256
-            or (
-                stored_plan is not None
-                and host_review.get("bound_run_plan_sha256") != _digest(stored_plan.to_json())
-            )
+            or (host_review.get("bound_run_plan_sha256") != _digest(stored_plan.to_json()))
         ):
             raise StoreConflict("verified host review evidence is required")
         artifact_paths = {
@@ -1854,22 +1881,30 @@ class ResearchStore:
         }
         evaluation_spec_paths: dict[str, str] = {}
         evaluation_spec_digests: dict[str, str] = {}
-        if stored_plan is not None:
-            spec_set = self.evaluation_spec_set(hypothesis.hypothesis_id)
-            set_digest = _digest(spec_set.to_json())
-            if stored_plan.evaluation_spec_set_sha256 != set_digest:
-                raise StoreConflict("run plan spec-set digest changed")
-            entries = {entry.spec_id: entry for entry in spec_set.specs}
-            for scenario in stored_plan.scenarios:
-                entry = entries.get(scenario.spec_id)
-                if entry is None or entry.sha256 != scenario.evaluation_spec_sha256:
-                    raise StoreConflict("run plan references an unbound evaluation spec")
-                evaluation_spec_paths[scenario.spec_id] = entry.path
-                evaluation_spec_digests[scenario.spec_id] = entry.sha256
-            if stored_plan.primary_scenario_id not in {
-                s.scenario_id for s in stored_plan.scenarios
-            }:
-                raise StoreConflict("run plan primary scenario is missing")
+        spec_set = self.evaluation_spec_set(hypothesis.hypothesis_id)
+        self._validate_owned_spec_set(hypothesis, spec_set)
+        set_digest = _digest(spec_set.to_json())
+        if stored_plan.evaluation_spec_set_sha256 != set_digest:
+            raise StoreConflict("run plan spec-set digest changed")
+        entries = {entry.spec_id: entry for entry in spec_set.specs}
+        for scenario in stored_plan.scenarios:
+            entry = entries.get(scenario.spec_id)
+            if entry is None or entry.sha256 != scenario.evaluation_spec_sha256:
+                raise StoreConflict("run plan references an unbound evaluation spec")
+            evaluation_spec_paths[scenario.spec_id] = entry.path
+            evaluation_spec_digests[scenario.spec_id] = entry.sha256
+        if stored_plan.primary_scenario_id not in {s.scenario_id for s in stored_plan.scenarios}:
+            raise StoreConflict("run plan primary scenario is missing")
+        if (
+            stored_plan.scenario_timeout_seconds > timeout_seconds
+            or stored_plan.analysis_timeout_seconds > timeout_seconds
+            or (
+                stored_plan.scenario_timeout_seconds * len(stored_plan.scenarios)
+                + stored_plan.analysis_timeout_seconds
+                > timeout_seconds
+            )
+        ):
+            raise StoreConflict("run plan stage timeouts exceed the queued job timeout")
         payload: dict[str, object] = {
             "job_id": job_id,
             "attempt_id": attempt_id,
@@ -1903,16 +1938,15 @@ class ResearchStore:
             "dividends_path": hypothesis.dividends_path,
             "dividends_sha256": hypothesis.dividends_sha256,
         }
-        if stored_plan is not None:
-            payload.update(
-                {
-                    "run_plan": json.loads(stored_plan.to_json()),
-                    "run_plan_sha256": _digest(stored_plan.to_json()),
-                    "evaluation_spec_set_sha256": stored_plan.evaluation_spec_set_sha256,
-                    "evaluation_spec_paths": evaluation_spec_paths,
-                    "evaluation_spec_digests": evaluation_spec_digests,
-                }
-            )
+        payload.update(
+            {
+                "run_plan": json.loads(stored_plan.to_json()),
+                "run_plan_sha256": _digest(stored_plan.to_json()),
+                "evaluation_spec_set_sha256": stored_plan.evaluation_spec_set_sha256,
+                "evaluation_spec_paths": evaluation_spec_paths,
+                "evaluation_spec_digests": evaluation_spec_digests,
+            }
+        )
         # A retried request with the same caller-selected id is idempotent.  The
         # timestamp is observational and therefore excluded from this replay
         # comparison; all execution-affecting fields must still match.

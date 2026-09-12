@@ -675,34 +675,36 @@ def _admission_for_hypothesis(store: ResearchStore, hypothesis_id: str) -> Admis
     bounds = _parse_evaluator_bounds(
         evaluation_path, hypothesis_spec.evaluation_spec_sha256, panel_sessions
     )
-    spec_set_digest: str | None = None
     try:
         spec_set = store.evaluation_spec_set(hypothesis_id)
-    except ValueError:
-        spec_set = None
-    # Historical H1 admission rows are not recomputed against newly added
-    # spec-set evidence; only fresh hypotheses carry this binding.
-    if hypothesis_id == "H0001":
-        spec_set = None
-    if spec_set is not None:
-        spec_set_digest = hashlib.sha256(spec_set.to_json().encode("utf-8")).hexdigest()
-        primary = next(
-            entry for entry in spec_set.specs if entry.spec_id == spec_set.primary_spec_id
+    except (StoreConflict, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise _AdmissionInputError("EVALUATION_SPEC_SET_REJECTED", str(exc)) from exc
+    spec_set_digest = hashlib.sha256(spec_set.to_json().encode("utf-8")).hexdigest()
+    primary = next(entry for entry in spec_set.specs if entry.spec_id == spec_set.primary_spec_id)
+    if (
+        primary.path != hypothesis_spec.evaluation_spec_path
+        or primary.sha256 != hypothesis_spec.evaluation_spec_sha256
+    ):
+        raise _AdmissionInputError(
+            "EVALUATION_SPEC_DIGEST_MISMATCH", "primary spec set entry differs from hypothesis"
         )
+    for entry in spec_set.specs:
+        entry_path = Path(entry.path)
         if (
-            primary.path != hypothesis_spec.evaluation_spec_path
-            or primary.sha256 != hypothesis_spec.evaluation_spec_sha256
+            entry_path.is_symlink()
+            or not entry_path.is_file()
+            or hashlib.sha256(entry_path.read_bytes()).hexdigest() != entry.sha256
         ):
             raise _AdmissionInputError(
-                "EVALUATION_SPEC_DIGEST_MISMATCH", "primary spec set entry differs from hypothesis"
+                "EVALUATION_SPEC_DIGEST_MISMATCH",
+                f"evaluation spec {entry.spec_id} bytes differ from its declared digest",
             )
-        for entry in spec_set.specs:
-            candidate = _parse_evaluator_bounds(Path(entry.path), entry.sha256, panel_sessions)
-            if not _same_evaluator_bounds(bounds, candidate):
-                raise _AdmissionInputError(
-                    "EVALUATION_SPEC_DIGEST_MISMATCH",
-                    f"evaluation spec {entry.spec_id} changes a non-cost bound",
-                )
+        candidate = _parse_evaluator_bounds(entry_path, entry.sha256, panel_sessions)
+        if not _same_evaluator_bounds(bounds, candidate):
+            raise _AdmissionInputError(
+                "EVALUATION_SPEC_DIGEST_MISMATCH",
+                f"evaluation spec {entry.spec_id} changes a non-cost bound",
+            )
     try:
         policy = store.campaign_policy()
     except StoreConflict as exc:
@@ -753,6 +755,26 @@ def _terminal_outcome(
     if run_evidence_path.is_file():
         result_path = run_evidence_path
     result: dict[str, object] = {}
+    terminal_evidence_digest = terminal.get("run_evidence_sha256")
+    if (
+        not isinstance(terminal_evidence_digest, str)
+        or not run_evidence_path.is_file()
+        or hashlib.sha256(run_evidence_path.read_bytes()).hexdigest() != terminal_evidence_digest
+    ):
+        return RunOutcome(
+            attempt_id=attempt_id,
+            job_id=str(terminal.get("job_id", attempt.run_job_id or "")),
+            exit_code=-1,
+            compliant=False,
+            zero_trade=False,
+            metrics_available=False,
+            acceptance_class="unknown",
+            earnings_provenance="unknown",
+            result_path="",
+            started_at=str(terminal.get("started_at", now_utc())),
+            finished_at=str(terminal.get("finished_at", now_utc())),
+            status="run_evidence_mismatch",
+        )
     if result_path.is_file():
         try:
             loaded = json.loads(result_path.read_text(encoding="utf-8"))
@@ -764,9 +786,16 @@ def _terminal_outcome(
                         primary_data = scenarios.get(primary)
                         if isinstance(primary_data, dict):
                             primary_result = primary_data.get("result_path")
-                            if isinstance(primary_result, str):
+                            expected_result_digest = primary_data.get("result_sha256")
+                            if isinstance(primary_result, str) and isinstance(
+                                expected_result_digest, str
+                            ):
                                 candidate = Path(primary_result)
-                                if candidate.is_file():
+                                if (
+                                    candidate.is_file()
+                                    and hashlib.sha256(candidate.read_bytes()).hexdigest()
+                                    == expected_result_digest
+                                ):
                                     decoded = json.loads(candidate.read_text(encoding="utf-8"))
                                     if isinstance(decoded, dict):
                                         result = decoded
@@ -1051,15 +1080,10 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
         implementation = ImplementationRecord.from_json(
             store.evidence(attempt_id, "implementation")
         )
-        plan: RunPlan | None = None
         try:
             plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
-        except ValueError:
-            # H0001's historical attempts have no plan evidence and remain
-            # readable.  A fresh hypothesis is never allowed to launch this
-            # legacy argv-only shape.
-            if attempt.hypothesis_id != "H0001":
-                return reject("run_plan_mismatch")
+        except (StoreConflict, ValueError, TypeError, json.JSONDecodeError):
+            return reject("run_plan_mismatch")
         try:
             host_review = json.loads(store.evidence(attempt_id, "review_host_evidence"))
         except (ValueError, json.JSONDecodeError):
@@ -1070,11 +1094,8 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
             or host_review.get("bound_commit") != attempt.commit
             or host_review.get("bound_spec_sha256")
             != store.get_hypothesis(attempt.hypothesis_id).spec_sha256
-            or (
-                plan is not None
-                and host_review.get("bound_run_plan_sha256")
-                != hashlib.sha256(plan.to_json().encode("utf-8")).hexdigest()
-            )
+            or host_review.get("bound_run_plan_sha256")
+            != hashlib.sha256(plan.to_json().encode("utf-8")).hexdigest()
             or implementation.commit != attempt.commit
         ):
             return reject("review_gate_unavailable")
@@ -1106,39 +1127,38 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
             != implementation.targets_argv
         ):
             return reject("implementation_pin_mismatch")
-        if plan is not None:
-            if (
-                plan.attempt_id != attempt_id
-                or plan.commit != attempt.commit
-                or plan.implementation_sha256 != attempt.implementation_sha256
-            ):
-                return reject("run_plan_mismatch")
-            raw_plan = payload.get("run_plan")
-            raw_digest = payload.get("run_plan_sha256")
-            expected_plan_digest = hashlib.sha256(plan.to_json().encode("utf-8")).hexdigest()
-            if (
-                not isinstance(raw_plan, dict)
-                or raw_digest != expected_plan_digest
-                or json.dumps(raw_plan, sort_keys=True, separators=(",", ":")) != plan.to_json()
-            ):
-                return reject("run_plan_mismatch")
-            try:
-                spec_set = store.evaluation_spec_set(attempt.hypothesis_id)
-            except ValueError:
-                return reject("run_plan_mismatch")
-            expected_specs = {entry.spec_id: (entry.path, entry.sha256) for entry in spec_set.specs}
-            scenario_spec_ids = {scenario.spec_id for scenario in plan.scenarios}
-            raw_paths = payload.get("evaluation_spec_paths")
-            raw_digests = payload.get("evaluation_spec_digests")
-            if not isinstance(raw_paths, dict) or not isinstance(raw_digests, dict):
-                return reject("run_plan_mismatch")
-            if set(raw_paths) != scenario_spec_ids or set(raw_digests) != scenario_spec_ids:
-                return reject("run_plan_mismatch")
-            if any(
-                (str(raw_paths[key]), str(raw_digests[key])) != expected_specs.get(key)
-                for key in scenario_spec_ids
-            ):
-                return reject("run_plan_mismatch")
+        if (
+            plan.attempt_id != attempt_id
+            or plan.commit != attempt.commit
+            or plan.implementation_sha256 != attempt.implementation_sha256
+        ):
+            return reject("run_plan_mismatch")
+        raw_plan = payload.get("run_plan")
+        raw_digest = payload.get("run_plan_sha256")
+        expected_plan_digest = hashlib.sha256(plan.to_json().encode("utf-8")).hexdigest()
+        if (
+            not isinstance(raw_plan, dict)
+            or raw_digest != expected_plan_digest
+            or json.dumps(raw_plan, sort_keys=True, separators=(",", ":")) != plan.to_json()
+        ):
+            return reject("run_plan_mismatch")
+        try:
+            spec_set = store.evaluation_spec_set(attempt.hypothesis_id)
+        except (StoreConflict, ValueError, TypeError, json.JSONDecodeError):
+            return reject("run_plan_mismatch")
+        expected_specs = {entry.spec_id: (entry.path, entry.sha256) for entry in spec_set.specs}
+        scenario_spec_ids = {scenario.spec_id for scenario in plan.scenarios}
+        raw_paths = payload.get("evaluation_spec_paths")
+        raw_digests = payload.get("evaluation_spec_digests")
+        if not isinstance(raw_paths, dict) or not isinstance(raw_digests, dict):
+            return reject("run_plan_mismatch")
+        if set(raw_paths) != scenario_spec_ids or set(raw_digests) != scenario_spec_ids:
+            return reject("run_plan_mismatch")
+        if any(
+            (str(raw_paths[key]), str(raw_digests[key])) != expected_specs.get(key)
+            for key in scenario_spec_ids
+        ):
+            return reject("run_plan_mismatch")
         admission_reject = _admission_execution_ready(store, attempt_id)
         if admission_reject is not None:
             return admission_reject
@@ -1220,7 +1240,7 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
                         key: Path(str(value))
                         for key, value in dict(payload["evaluation_spec_paths"]).items()
                     }
-                    if plan is not None and isinstance(payload.get("evaluation_spec_paths"), dict)
+                    if isinstance(payload.get("evaluation_spec_paths"), dict)
                     else None
                 ),
                 evaluation_spec_digests=(
@@ -1228,7 +1248,7 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
                         key: str(value)
                         for key, value in dict(payload["evaluation_spec_digests"]).items()
                     }
-                    if plan is not None and isinstance(payload.get("evaluation_spec_digests"), dict)
+                    if isinstance(payload.get("evaluation_spec_digests"), dict)
                     else None
                 ),
             )
@@ -1330,7 +1350,10 @@ def run_command(
             run_dir = (
                 store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id / "run"
             )
-            store.queue_run_request(attempt_id, job_id, run_dir, timeout_seconds, max_rss_mb)
+            plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
+            store.queue_run_request(
+                attempt_id, job_id, run_dir, timeout_seconds, max_rss_mb, run_plan=plan
+            )
         finally:
             store.release_run_lock()
         typer.echo(f"accepted {job_id} state=QUEUED")

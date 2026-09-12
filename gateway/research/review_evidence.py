@@ -34,7 +34,6 @@ from .codec import to_json
 from .contracts import (
     Attempt,
     AttemptState,
-    EvaluationSpecSet,
     ReviewEvidence,
     ReviewRecord,
     RunPlan,
@@ -388,22 +387,20 @@ def build_review_bundle(
         raise BundleError("frozen hypothesis spec digest does not match its bytes")
     implementation = json.loads(store.evidence(attempt_id, "implementation"))
     run_plan_payload = _stored_json(store, attempt_id, "run_plan")
-    run_plan = (
-        RunPlan.from_json(json.dumps(run_plan_payload, sort_keys=True, separators=(",", ":")))
-        if run_plan_payload is not None
-        else None
-    )
-    spec_set: EvaluationSpecSet | None = None
-    if run_plan is not None:
-        try:
-            spec_set = store.evaluation_spec_set(hypothesis.hypothesis_id)
-        except ValueError as exc:
-            raise BundleError("run plan requires immutable evaluation spec-set evidence") from exc
-        if (
-            run_plan.evaluation_spec_set_sha256
-            != hashlib.sha256(spec_set.to_json().encode()).hexdigest()
-        ):
-            raise BundleError("run plan evaluation spec-set digest differs from evidence")
+    if run_plan_payload is None:
+        raise BundleError("review bundle requires immutable run-plan evidence")
+    try:
+        run_plan = RunPlan.from_json(
+            json.dumps(run_plan_payload, sort_keys=True, separators=(",", ":"))
+        )
+        spec_set = store.evaluation_spec_set(hypothesis.hypothesis_id)
+    except (StoreConflict, ValueError, TypeError, json.JSONDecodeError) as exc:
+        raise BundleError("review bundle requires valid immutable plan evidence") from exc
+    if (
+        run_plan.evaluation_spec_set_sha256
+        != hashlib.sha256(spec_set.to_json().encode()).hexdigest()
+    ):
+        raise BundleError("run plan evaluation spec-set digest differs from evidence")
     test_path = implementation.get("test_evidence_path")
     if not isinstance(test_path, str) or not test_path:
         raise BundleError("implementation has no bounded test evidence path")
@@ -414,7 +411,7 @@ def build_review_bundle(
         raise BundleError("implementation diff exceeds the bundle limit")
     text = instructions or (
         "Review only the committed source under source/. Your entire final response must be one "
-        "bare JSON object: first character { and last character }, with no markdown or prose. "
+        "bare JSON object: first character { and last character }, with no markdown or prose, "
         f"with verdict, attempt_id={attempt.attempt_id}, commit={attempt.commit}, "
         f"spec_sha256={hypothesis.spec_sha256}, and findings."
     )
@@ -457,15 +454,12 @@ def build_review_bundle(
         (temporary / "source" / "COMMIT").write_text(attempt.commit + "\n", encoding="utf-8")
         if tracked.excluded:
             (temporary / "source" / "EXCLUDED").write_bytes(_excluded_bytes(tracked.excluded))
-        if run_plan is not None and spec_set is not None:
-            (temporary / "run-plan.json").write_text(run_plan.to_json(), encoding="utf-8")
-            (temporary / "evaluation-spec-set.json").write_text(
-                spec_set.to_json(), encoding="utf-8"
-            )
-            for entry in spec_set.specs:
-                destination = temporary / "evaluation-specs" / f"{entry.spec_id}.json"
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(Path(entry.path).read_bytes())
+        (temporary / "run-plan.json").write_text(run_plan.to_json(), encoding="utf-8")
+        (temporary / "evaluation-spec-set.json").write_text(spec_set.to_json(), encoding="utf-8")
+        for entry in spec_set.specs:
+            destination = temporary / "evaluation-specs" / f"{entry.spec_id}.json"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(Path(entry.path).read_bytes())
         for relative, content in tracked.files:
             destination = temporary / "source" / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -494,10 +488,19 @@ def _validate_bundle(
     if not root.is_absolute() or not root.is_dir() or root.is_symlink():
         raise BundleError("bundle directory is missing or unsafe")
     _require_immutable(root, "bundle directory")
-    allowed = {"spec.json", "diff.patch", "test-evidence", "instructions.md", "source"}
+    allowed = {
+        "spec.json",
+        "diff.patch",
+        "test-evidence",
+        "instructions.md",
+        "source",
+        "run-plan.json",
+        "evaluation-spec-set.json",
+        "evaluation-specs",
+    }
     run_plan_payload = _stored_json(store, attempt_id, "run_plan")
-    if run_plan_payload is not None:
-        allowed.update({"run-plan.json", "evaluation-spec-set.json", "evaluation-specs"})
+    if run_plan_payload is None:
+        raise BundleError("review bundle requires immutable run-plan evidence")
     entries = {path.name for path in root.iterdir()}
     if entries != allowed:
         raise BundleError("bundle contains an unexpected file or directory")
@@ -539,26 +542,35 @@ def _validate_bundle(
         raise BundleError("bundle diff differs from the committed implementation")
     _require_immutable(root / "test-evidence", "bundle test evidence")
     _read_bounded(root / "test-evidence", MAX_TEST_EVIDENCE_BYTES, "bundle test evidence")
-    if run_plan_payload is not None:
-        run_plan = RunPlan.from_json((root / "run-plan.json").read_text(encoding="utf-8"))
-        stored_plan = RunPlan.from_json(
-            json.dumps(run_plan_payload, sort_keys=True, separators=(",", ":"))
+    run_plan = RunPlan.from_json((root / "run-plan.json").read_text(encoding="utf-8"))
+    stored_plan = RunPlan.from_json(
+        json.dumps(run_plan_payload, sort_keys=True, separators=(",", ":"))
+    )
+    _require_immutable(root / "run-plan.json", "bundle run plan")
+    if run_plan.to_json() != stored_plan.to_json():
+        raise BundleError("bundle run plan differs from immutable evidence")
+    spec_set = store.evaluation_spec_set(hypothesis.hypothesis_id)
+    _require_immutable(root / "evaluation-spec-set.json", "bundle evaluation spec set")
+    if (root / "evaluation-spec-set.json").read_text(encoding="utf-8") != spec_set.to_json():
+        raise BundleError("bundle evaluation spec set differs from immutable evidence")
+    expected_specs = {entry.spec_id: Path(entry.path).read_bytes() for entry in spec_set.specs}
+    spec_paths = sorted((root / "evaluation-specs").iterdir())
+    expected_names = {f"{entry.spec_id}.json" for entry in spec_set.specs}
+    if {path.name for path in spec_paths} != expected_names:
+        raise BundleError("bundle evaluation spec set has missing or extra files")
+    actual_specs: dict[str, bytes] = {}
+    for path in spec_paths:
+        if path.is_symlink() or not path.is_file() or path.suffix != ".json":
+            raise BundleError("bundle evaluation specs contain an unsafe entry")
+        _require_immutable(path, f"bundle evaluation spec {path.name}")
+        actual_specs[path.stem] = _read_bounded(
+            path, MAX_BUNDLE_FILE_BYTES, f"evaluation spec {path.name}"
         )
-        if run_plan.to_json() != stored_plan.to_json():
-            raise BundleError("bundle run plan differs from immutable evidence")
-        spec_set = store.evaluation_spec_set(hypothesis.hypothesis_id)
-        if (root / "evaluation-spec-set.json").read_text(encoding="utf-8") != spec_set.to_json():
-            raise BundleError("bundle evaluation spec set differs from immutable evidence")
-        expected_specs = {entry.spec_id: Path(entry.path).read_bytes() for entry in spec_set.specs}
-        actual_specs = {
-            path.stem: _read_bounded(path, MAX_BUNDLE_FILE_BYTES, f"evaluation spec {path.name}")
-            for path in (root / "evaluation-specs").glob("*.json")
-        }
-        if actual_specs != expected_specs:
-            raise BundleError("bundle evaluation specs differ from immutable evidence")
-        for entry in spec_set.specs:
-            if hashlib.sha256(actual_specs[entry.spec_id]).hexdigest() != entry.sha256:
-                raise BundleError(f"bundle evaluation spec digest differs: {entry.spec_id}")
+    if actual_specs != expected_specs:
+        raise BundleError("bundle evaluation specs differ from immutable evidence")
+    for entry in spec_set.specs:
+        if hashlib.sha256(actual_specs[entry.spec_id]).hexdigest() != entry.sha256:
+            raise BundleError(f"bundle evaluation spec digest differs: {entry.spec_id}")
     digest = _bundle_digest(root)
     if expected_digest is not None and digest != expected_digest:
         raise BundleError("reserved review bundle was modified")

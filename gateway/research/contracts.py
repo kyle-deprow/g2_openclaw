@@ -168,6 +168,8 @@ class EvaluationSpecSet:
             raise ValueError("primary_spec_id must name a spec entry")
         if len({item.sha256 for item in self.specs}) != len(self.specs):
             raise ValueError("evaluation spec digests must be unique")
+        if len({item.path for item in self.specs}) != len(self.specs):
+            raise ValueError("evaluation spec paths must be unique")
         require_utc_iso(self.created_at, "created_at")
 
     def to_json(self) -> str:
@@ -284,9 +286,10 @@ class AnalysisPlan:
                 path.is_absolute()
                 or not artifact.startswith("analysis/")
                 or path.name == "analysis"
+                or len(path.parts) != 2
                 or any(part in {"", ".", ".."} for part in path.parts)
             ):
-                raise ValueError("analysis artifacts must be safe relative paths under analysis/")
+                raise ValueError("analysis artifacts must be direct files under analysis/")
         if type(self.max_artifact_bytes) is not int or not (
             1 <= self.max_artifact_bytes <= _MAX_ANALYSIS_BYTES
         ):

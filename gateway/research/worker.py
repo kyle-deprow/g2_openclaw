@@ -166,9 +166,9 @@ def _stage(plan: StagePlan, cwd: Path, out: Path, deadline: float) -> tuple[int,
     argv = plan.argv
     _owned_directory(out.parent, "stage logs")
     err = out.with_suffix(".err")
-    if out.is_symlink() or err.is_symlink():
-        raise ContainmentError(f"stage log is a symlink: {out}")
     active_path = out.parent.parent / "active-stage.json"
+    if _path_present(out) or _path_present(err) or _path_present(active_path):
+        raise ContainmentError(f"stage output already exists from an earlier run: {out}")
     with out.open("wb") as stdout, err.open("wb") as stderr:
         remove_active_evidence = True
         try:
@@ -353,8 +353,27 @@ def _scenario_outputs(scenario_dir: Path) -> tuple[Path, Path, Path, Path]:
     return target, output / "result.json", output / "trades.parquet", output / "daily.parquet"
 
 
+def _stage_deadline(global_deadline: float, stage_seconds: float) -> float:
+    return min(global_deadline, time.monotonic() + stage_seconds)
+
+
+def _require_empty_directory(path: Path, label: str) -> None:
+    _owned_directory(path, label)
+    if any(path.iterdir()):
+        raise ContainmentError(f"{label} contains output from an earlier stage")
+
+
+def _write_run_evidence(run_dir: Path, evidence: dict[str, object]) -> str | None:
+    with lifecycle_lock(run_dir):
+        if _path_present(run_dir / "cancel.json"):
+            return None
+        path = run_dir / "run-evidence.json"
+        _write(path, evidence)
+        return _sha(path)
+
+
 def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
-    """Execute an immutable multi-spec plan; the legacy branch stays below."""
+    """Execute one immutable multi-spec plan through the fixed stage boundary."""
     global _WORKER_INTERRUPTED
     _WORKER_INTERRUPTED = False
     run_dir = Path(str(job["run_dir"]))
@@ -371,6 +390,8 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
     plan_digest = str(job.get("run_plan_sha256", ""))
     output_hashes: dict[str, object] = {"scenarios": {}, "analysis": {}}
     validated_digest: str | None = None
+    run_evidence_digest: str | None = None
+    active_scenario_id: str | None = None
     try:
         _owned_directory(run_dir, "run directory")
         _owned_directory(run_dir / "logs", "run logs")
@@ -399,6 +420,16 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
         ):
             raise ContainmentError("invalid resource limits")
         deadline = time.monotonic() + float(timeout_value)
+        if (
+            plan.scenario_timeout_seconds > float(timeout_value)
+            or plan.analysis_timeout_seconds > float(timeout_value)
+            or (
+                plan.scenario_timeout_seconds * len(plan.scenarios) + plan.analysis_timeout_seconds
+                > float(timeout_value)
+            )
+        ):
+            status = "run_plan_mismatch"
+            raise ContainmentError("run plan stage timeouts exceed the job timeout")
         panel, receipt, dividends = artifacts["panel"], artifacts["receipt"], artifacts["dividends"]
         spec_paths = {
             key.removeprefix("evaluation:"): path
@@ -454,7 +485,10 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             )
             tick = time.monotonic()
             validation_exit, timed_out = _stage(
-                validation_plan, run_dir, run_dir / "logs" / f"{stage_name}.out", deadline
+                validation_plan,
+                run_dir,
+                run_dir / "logs" / f"{stage_name}.out",
+                _stage_deadline(deadline, plan.scenario_timeout_seconds),
             )
             stages.append(
                 _stage_evidence(run_dir, stage_name, validation_exit, time.monotonic() - tick)
@@ -505,8 +539,9 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
         )
         validated_digest = _sha(run_dir / "validated-inputs.json")
         for scenario in plan.scenarios:
+            active_scenario_id = scenario.scenario_id
             scenario_dir = run_dir / "scenarios" / scenario.scenario_id
-            _owned_directory(scenario_dir, "scenario directory")
+            _require_empty_directory(scenario_dir, "scenario directory")
             target_path, result_path, trades_path, daily_path = _scenario_outputs(scenario_dir)
             from .containment import rewrite_targets_argv
 
@@ -527,7 +562,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 receipt=receipt,
             )
             target_dir = target_path.parent
-            _owned_directory(target_dir, "scenario targets stage")
+            _require_empty_directory(target_dir, "scenario targets stage")
             target_plan = stage_plan(
                 pins,
                 str(job["job_id"]),
@@ -544,7 +579,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 target_plan,
                 run_dir,
                 run_dir / "logs" / f"targets-{scenario.scenario_id}.out",
-                deadline,
+                _stage_deadline(deadline, plan.scenario_timeout_seconds),
             )
             stages.append(
                 _stage_evidence(
@@ -554,6 +589,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             if target_timeout or target_exit != 0 or not target_file_ok(target_path):
                 status = "timed_out" if target_timeout else "scenario_failed"
                 scenarios_evidence[scenario.scenario_id] = {
+                    "status": "failed",
                     "spec_id": scenario.spec_id,
                     "spec_sha256": spec_digests[scenario.spec_id],
                     "targets_exit": target_exit,
@@ -561,7 +597,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 raise ContainmentError(f"targets failed for {scenario.scenario_id}")
             target_digest = _sha(target_path)
             evaluator_dir = scenario_dir / "evaluator-stage"
-            _owned_directory(evaluator_dir, "scenario evaluator stage")
+            _require_empty_directory(evaluator_dir, "scenario evaluator stage")
             evaluator_command = (
                 str(pins.shared_python),
                 "-P",
@@ -602,7 +638,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 evaluator_plan,
                 run_dir,
                 run_dir / "logs" / f"evaluate-{scenario.scenario_id}.out",
-                deadline,
+                _stage_deadline(deadline, plan.scenario_timeout_seconds),
             )
             stages.append(
                 _stage_evidence(
@@ -658,8 +694,9 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 }
             )
         analysis_dir = run_dir / "analysis-stage"
-        _owned_directory(analysis_dir, "analysis stage")
+        _require_empty_directory(analysis_dir, "analysis stage")
         analysis_out = analysis_dir / "analysis"
+        _owned_directory(analysis_out, "analysis output stage")
         analysis_inputs = {
             "panel.parquet": panel,
             "receipt.json": receipt,
@@ -695,15 +732,18 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
         )
         tick = time.monotonic()
         analysis_exit, analysis_timeout = _stage(
-            analysis_plan, run_dir, run_dir / "logs" / "analysis.out", deadline
+            analysis_plan,
+            run_dir,
+            run_dir / "logs" / "analysis.out",
+            _stage_deadline(deadline, plan.analysis_timeout_seconds),
         )
         stages.append(_stage_evidence(run_dir, "analysis", analysis_exit, time.monotonic() - tick))
         declared = set(plan.analysis.artifacts)
         actual: set[str] = set()
-        if analysis_out.is_dir() and not analysis_out.is_symlink():
-            for path in analysis_out.rglob("*"):
-                if path.is_symlink() or not path.is_file():
-                    raise ContainmentError("analysis output contains unsafe entry")
+        for path in analysis_dir.rglob("*"):
+            if path.is_symlink():
+                raise ContainmentError("analysis output contains unsafe entry")
+            if path.is_file():
                 actual.add(path.relative_to(analysis_dir).as_posix())
         if analysis_timeout:
             status = "timed_out"
@@ -739,7 +779,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             "started_at": started,
             "finished_at": _now(),
         }
-        _write(run_dir / "run-evidence.json", evidence)
+        run_evidence_digest = _write_run_evidence(run_dir, evidence)
         return evidence
     except (
         ContainmentError,
@@ -751,7 +791,28 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
     ) as exc:
         error = str(exc)
         if status == "containment_unavailable":
-            status = "containment_unavailable"
+            if "worktree is dirty" in error or "HEAD changed" in error:
+                status = "source_mutated"
+            elif (
+                "trusted runtime" in error
+                or "frozen input" in error
+                or "evaluation spec changed" in error
+            ):
+                status = "input_digest_mismatch"
+            elif "run plan" in error:
+                status = "run_plan_mismatch"
+        if active_scenario_id is not None and active_scenario_id not in scenarios_evidence:
+            scenarios_evidence[active_scenario_id] = {
+                "status": "failed",
+                "spec_id": next(
+                    scenario.spec_id
+                    for scenario in plan.scenarios
+                    if scenario.scenario_id == active_scenario_id
+                )
+                if plan is not None
+                else None,
+                "error": error,
+            }
         evidence = {
             "contract": "research-run-evidence-v1",
             "status": status,
@@ -770,7 +831,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             "started_at": started,
             "finished_at": _now(),
         }
-        _write(run_dir / "run-evidence.json", evidence)
+        run_evidence_digest = _write_run_evidence(run_dir, evidence)
         return evidence
     finally:
         if not _WORKER_INTERRUPTED:
@@ -791,361 +852,15 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             if isinstance(primary_evidence, dict):
                 terminal["targets_exit"] = primary_evidence.get("targets_exit")
                 terminal["evaluator_exit"] = primary_evidence.get("evaluator_exit")
-            _write_terminal_if_authorized(run_dir, terminal)
-
-
-def _contained_run(job: dict[str, object]) -> dict[str, object]:
-    if "run_plan" in job:
-        return _contained_run_plan(job)
-    global _WORKER_INTERRUPTED
-    _WORKER_INTERRUPTED = False
-    run_dir = Path(str(job["run_dir"]))
-    worktree = Path(str(job["worktree"]))
-    started = _now()
-    checks: list[dict[str, object]] = []
-    stages: list[dict[str, object]] = []
-    output_hashes: dict[str, str | None] = {
-        "targets_sha256": None,
-        "result_sha256": None,
-        "validated_inputs_sha256": None,
-    }
-    targets_exit: int | None = None
-    evaluator_exit: int | None = None
-    status = "containment_unavailable"
-    error: str | None = None
-    pins: RuntimePins | None = None
-    source_writable = _host_writable(worktree)
-    shared_env_writable = _host_writable(Path(str(job.get("shared_python", ""))).parent)
-    try:
-        _owned_directory(run_dir, "run directory")
-        _owned_directory(run_dir / "logs", "run logs")
-        pins = _pins_from_job(job)
-        verify_runtime_pins(pins)
-        artifacts, digests = _p3b_artifacts(job)
-        before = _trusted_source(worktree, job.get("expected_commit"))
-        checks.append({"name": "source_before", "value": before, "ok": True})
-        timeout_value = job.get("timeout_seconds")
-        max_rss_value = job.get("max_rss_mb")
-        if (
-            isinstance(timeout_value, bool)
-            or not isinstance(timeout_value, (int, float))
-            or not math.isfinite(float(timeout_value))
-            or not 0 < float(timeout_value) <= 7200
-            or isinstance(max_rss_value, bool)
-            or not isinstance(max_rss_value, int)
-            or not 0 < max_rss_value <= 8192
-        ):
-            raise ContainmentError("invalid resource limits")
-        deadline = time.monotonic() + float(timeout_value)
-        panel = artifacts["panel"]
-        receipt = artifacts["receipt"]
-        eval_spec = artifacts["evaluation_spec"]
-        dividends = artifacts["dividends"]
-        validation_command = (
-            str(pins.shared_python),
-            "-P",
-            "-s",
-            str(pins.evaluator),
-            "research",
-            "validate-inputs",
-            "--panel",
-            "/inputs/panel.parquet",
-            "--receipt",
-            "/inputs/receipt.json",
-            "--spec",
-            "/inputs/spec.json",
-            "--dividends",
-            "/inputs/dividends.json",
-            "--universe",
-            "/universe.json",
-        )
-        validation_plan = stage_plan(
-            pins,
-            str(job["job_id"]),
-            "validate",
-            max_rss_value,
-            validation_command,
-            panel=panel,
-            receipt=receipt,
-            spec=eval_spec,
-            dividends=dividends,
-        )
-        tick = time.monotonic()
-        validation_exit, timed_out = _stage(
-            validation_plan, run_dir, run_dir / "logs" / "validate.out", deadline
-        )
-        stages.append(
-            _stage_evidence(run_dir, "validate", validation_exit, time.monotonic() - tick)
-        )
-        containment_check: dict[str, object] = {
-            "name": "containment",
-            "ok": True,
-            "stages": ["validate", "targets", "evaluate"],
-            "exercised": "validate",
-        }
-        checks.append(containment_check)
-        if timed_out:
-            status = "timed_out"
-            return {"status": status}
-        validation_text = (run_dir / "logs" / "validate.out").read_text(encoding="utf-8")
-        if validation_exit != 0 and not validation_text.strip():
-            status = "containment_unavailable"
-            error = (
-                f"validate stage launch failed before structured output (exit={validation_exit}); "
-                "inspect logs/validate.out and logs/validate.err"
-            )
-            containment_check.update({"ok": False, "reason": error})
-            return {"status": status, "error": error, "targets_exit": validation_exit}
-        try:
-            validation = json.loads(validation_text)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ContainmentError(
-                f"validate-inputs did not return structured JSON: {exc}"
-            ) from exc
-        if validation_exit != 0 or not isinstance(validation, dict):
-            status = "input_validation_failed"
-            error = "validate-inputs exited unsuccessfully"
-            return {"status": status, "error": error}
-        semantic = validation.get("spec_sha256_semantic")
-        if (
-            validation.get("verdict") != "PASS"
-            or not isinstance(semantic, str)
-            or len(semantic) != 64
-            or any(character not in "0123456789abcdef" for character in semantic)
-        ):
-            status = "input_validation_failed"
-            error = "trusted input validation failed"
-            return {"status": status, "error": error}
-        expected_validation_digests = {
-            "spec_sha256_raw": digests["evaluation_spec"],
-            "panel_sha256": digests["panel"],
-            "receipt_sha256": digests["receipt"],
-            "universe_file_sha256": pins.universe_sha256,
-            "dividends_sha256": digests["dividends"],
-        }
-        if any(validation.get(key) != value for key, value in expected_validation_digests.items()):
-            status = "input_validation_failed"
-            error = "validation digests do not bind frozen inputs"
-            return {"status": status, "error": error}
-        _write(
-            run_dir / "validated-inputs.json",
-            {
-                "validation": validation,
-                "spec_sha256_raw": digests["evaluation_spec"],
-                "spec_sha256_semantic": semantic,
-                "dividends_sha256": digests["dividends"],
-                "snapshot_sha256": pins.snapshot_sha256,
-                "universe_sha256": pins.universe_sha256,
-            },
-        )
-        output_hashes["validated_inputs_sha256"] = _sha(run_dir / "validated-inputs.json")
-        _p3b_artifacts(job)
-        verify_runtime_pins(pins)
-        middle = _trusted_source(worktree, job.get("expected_commit"))
-        checks.append({"name": "source_after_validate", "value": middle, "ok": middle == before})
-        targets_value = job.get("targets_argv")
-        if not isinstance(targets_value, list):
-            raise ContainmentError("invalid target argv")
-        from .containment import rewrite_targets_argv
-
-        validate_targets_argv(
-            tuple(str(item) for item in targets_value),
-            shared_python=pins.shared_python,
-            worktree=worktree,
-            run_dir=run_dir,
-            panel=panel,
-            receipt=receipt,
-        )
-        targets = rewrite_targets_argv(
-            tuple(str(item) for item in targets_value),
-            shared_python=pins.shared_python,
-            worktree=worktree,
-            run_dir=run_dir,
-            panel=panel,
-            receipt=receipt,
-        )
-        targets_dir = run_dir / "targets-stage"
-        _owned_directory(targets_dir, "targets stage")
-        target_file = targets_dir / "targets.json"
-        if target_file.exists() or target_file.is_symlink():
-            raise ContainmentError("targets output already exists from an earlier stage")
-        target_plan = stage_plan(
-            pins,
-            str(job["job_id"]),
-            "targets",
-            max_rss_value,
-            targets,
-            panel=panel,
-            receipt=receipt,
-            worktree=worktree,
-            targets_stage=targets_dir,
-        )
-        tick = time.monotonic()
-        targets_exit, timed_out = _stage(
-            target_plan, run_dir, run_dir / "logs" / "targets.out", deadline
-        )
-        stages.append(_stage_evidence(run_dir, "targets", targets_exit, time.monotonic() - tick))
-        if not target_file_ok(target_file):
-            status = "timed_out" if timed_out else "targets_failed"
-            error = "targets output is missing, non-regular, or oversized"
-            return {"status": status, "error": error, "targets_exit": targets_exit}
-        output_hashes["targets_sha256"] = _sha(target_file)
-        if timed_out or targets_exit != 0:
-            status = "timed_out" if timed_out else "targets_failed"
-            return {"status": status, "targets_exit": targets_exit}
-        verify_runtime_pins(pins)
-        _p3b_artifacts(job)
-        middle = _trusted_source(worktree, job.get("expected_commit"))
-        checks.append({"name": "source_after_targets", "value": middle, "ok": middle == before})
-        evaluator_command = (
-            str(pins.shared_python),
-            "-P",
-            "-s",
-            str(pins.evaluator),
-            "research",
-            "evaluate",
-            "--panel",
-            "/inputs/panel.parquet",
-            "--receipt",
-            "/inputs/receipt.json",
-            "--spec",
-            "/inputs/spec.json",
-            "--targets",
-            "/targets.json",
-            "--dividends",
-            "/inputs/dividends.json",
-            "--out",
-            "/stage/out",
-            "--require-source-root",
-            "/snapshot/src",
-        )
-        evaluator_dir = run_dir / "evaluator-stage"
-        _owned_directory(evaluator_dir, "evaluator stage")
-        evaluator_output = evaluator_dir / "out"
-        # Quantipy creates its output directory itself and deliberately refuses
-        # to overwrite an existing one.  Never pre-create, remove, or reuse it;
-        # reject regular files, directories, and dangling symlinks alike.
-        if _path_present(evaluator_output):
-            raise ContainmentError("evaluator output already exists from an earlier stage")
-        result_path = evaluator_output / "result.json"
-        evaluator_plan = stage_plan(
-            pins,
-            str(job["job_id"]),
-            "evaluate",
-            max_rss_value,
-            evaluator_command,
-            panel=panel,
-            receipt=receipt,
-            spec=eval_spec,
-            dividends=dividends,
-            evaluator_stage=evaluator_dir,
-            targets_file=target_file,
-        )
-        tick = time.monotonic()
-        evaluator_exit, timed_out = _stage(
-            evaluator_plan, run_dir, run_dir / "logs" / "evaluate.out", deadline
-        )
-        stages.append(_stage_evidence(run_dir, "evaluate", evaluator_exit, time.monotonic() - tick))
-        if result_path.is_file() and not result_path.is_symlink():
-            output_hashes["result_sha256"] = _sha(result_path)
-        if timed_out:
-            status = "timed_out"
-            return {"status": status, "evaluator_exit": evaluator_exit}
-        if evaluator_exit != 0 or not result_path.is_file() or result_path.is_symlink():
-            if (
-                evaluator_exit != 0
-                and not (run_dir / "logs" / "evaluate.out").read_text(encoding="utf-8").strip()
-            ):
-                status = "containment_unavailable"
-                error = (
-                    f"evaluate stage launch failed before result output (exit={evaluator_exit}); "
-                    "inspect logs/evaluate.out and logs/evaluate.err"
-                )
-            else:
-                status = "evaluator_failed"
-                error = "trusted evaluator did not produce a result"
-            return {"status": status, "evaluator_exit": evaluator_exit, "error": error}
-        _p3b_artifacts(job)
-        try:
-            loaded = json.loads(result_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ContainmentError(f"invalid evaluator result: {exc}") from exc
-        if not isinstance(loaded, dict):
-            status = "evaluator_failed"
-            error = "evaluator result is not an object"
-            return {"status": status, "evaluator_exit": evaluator_exit, "error": error}
-        result = loaded
-        if (
-            result.get("evaluator_version") != "research-evaluator-v2"
-            or result.get("spec_sha256") != semantic
-            or result.get("dividends_sha256") != digests["dividends"]
-        ):
-            status = "evaluator_failed"
-            error = "evaluator result does not bind validated semantic inputs"
-            return {"status": status, "evaluator_exit": evaluator_exit, "error": error}
-        verify_runtime_pins(pins)
-        after = _trusted_source(worktree, job.get("expected_commit"))
-        checks.append({"name": "source_after", "value": after, "ok": after == before})
-        status = "succeeded"
-        return {"status": status, "targets_exit": targets_exit, "evaluator_exit": evaluator_exit}
-    except ContainmentError as exc:
-        error = str(exc)
-        if "worktree" in error and ("dirty" in error or "HEAD changed" in error):
-            status = "source_mutated"
-        elif "trusted runtime or input pin changed" in error or "frozen input changed" in error:
-            status = "input_digest_mismatch"
-        else:
-            status = "containment_unavailable"
-        failed_containment_check: dict[str, object] | None = next(
-            (check for check in checks if check.get("name") == "containment"), None
-        )
-        if failed_containment_check is None:
-            checks.append({"name": "containment", "ok": False, "reason": error})
-        elif status == "containment_unavailable" and not failed_containment_check.get("exercised"):
-            failed_containment_check.update({"ok": False, "reason": error})
-        return {"status": status, "error": error}
-    except (OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError) as exc:
-        error = str(exc)
-        status = "evaluator_failed"
-        return {"status": status, "error": error}
-    finally:
-        # Cancellation owns a sibling cancel.json written by the controlling
-        # process.  Never let a late SIGTERM replace a worker terminal record
-        # (or manufacture one that hides the cancellation evidence).
-        if not _WORKER_INTERRUPTED:
-            terminal: dict[str, object] = {
-                "job_id": job.get("job_id", ""),
-                "worker_pid": os.getpid(),
-                "worker_starttime": _identity(os.getpid()),
-                "targets_exit": targets_exit,
-                "evaluator_exit": evaluator_exit,
-                "checks": checks,
-                "stages": stages,
-                "outputs": output_hashes,
-                "verified_evaluator_sha256": pins.evaluator_sha256 if pins else None,
-                "verified_evaluator_source_snapshot_sha256": (
-                    pins.snapshot_sha256 if pins else None
-                ),
-                "evaluator_stub_sha256": pins.evaluator_sha256 if pins else None,
-                "source_writable": source_writable,
-                "shared_env_writable": shared_env_writable,
-                "started_at": started,
-                "finished_at": _now(),
-                "status": status,
-            }
-            if error is not None:
-                terminal["error"] = error
-            # A trusted host may have finalized a launch failure while this
-            # detached child was unwinding.  Never replace that first terminal
-            # record with a late worker result.  Cancellation and this write
-            # share a per-job lock and cancellation authority is checked while
-            # holding it, so a killed target cannot become targets_failed.
+            if run_evidence_digest is None and _path_present(run_dir / "run-evidence.json"):
+                run_evidence_digest = _sha(run_dir / "run-evidence.json")
+            terminal["run_evidence_sha256"] = run_evidence_digest
             _write_terminal_if_authorized(run_dir, terminal)
 
 
 def _run(job: dict[str, object]) -> dict[str, object]:
     """Run the fixed boundary, with no uncontained execution path."""
-    outcome = _contained_run(job)
+    outcome = _contained_run_plan(job)
     run_dir = Path(str(job["run_dir"]))
     # The stage can finish computing a result after cancellation has acquired
     # authority but before the worker reaches its finally block.  The terminal

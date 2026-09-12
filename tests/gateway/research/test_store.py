@@ -6,10 +6,16 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from gateway.research.contracts import AttemptDecision, AttemptState, HypothesisSpec
+from gateway.research.contracts import (
+    AttemptDecision,
+    AttemptState,
+    EvaluationSpecEntry,
+    EvaluationSpecSet,
+    HypothesisSpec,
+)
 from gateway.research.store import OwnerLockHeld, ResearchStore, StoreConflict
 
-from tests.gateway.research.conftest import implementation, review, verified_review
+from tests.gateway.research.conftest import implementation, review, run_plan, verified_review
 
 
 def test_store_evidence_is_idempotent_and_repairs_projection(
@@ -30,7 +36,8 @@ def test_store_evidence_is_idempotent_and_repairs_projection(
         record.coder_service_tier,
         record.submitted_at,
     )
-    store.submit_implementation(attempt.attempt_id, record)
+    plan = run_plan(store, attempt, record)
+    store.submit_implementation(attempt.attempt_id, record, run_plan=plan)
     projection = (
         store.root
         / "hypotheses"
@@ -40,7 +47,10 @@ def test_store_evidence_is_idempotent_and_repairs_projection(
         / "implementation.json"
     )
     projection.unlink()
-    assert store.submit_implementation(attempt.attempt_id, record).state == AttemptState.IMPLEMENTED
+    assert (
+        store.submit_implementation(attempt.attempt_id, record, run_plan=plan).state
+        == AttemptState.IMPLEMENTED
+    )
     assert projection.is_file()
     with pytest.raises(StoreConflict):
         store.submit_implementation(
@@ -55,6 +65,7 @@ def test_store_evidence_is_idempotent_and_repairs_projection(
                 record.coder_service_tier,
                 record.submitted_at,
             ),
+            run_plan=plan,
         )
 
 
@@ -82,7 +93,7 @@ def test_owner_lock_and_closed_attempt_trigger(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
-    store.submit_implementation(attempt.attempt_id, impl)
+    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
     verified_review(
         store,
         review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"),
@@ -102,7 +113,7 @@ def test_review_is_idempotent_repairs_projection_and_is_insert_only(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
-    store.submit_implementation(attempt.attempt_id, impl)
+    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
     record = review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256)
     verified_review(store, record)
     projection = (
@@ -146,7 +157,9 @@ def test_reconcile_repairs_missing_projection_without_launching(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     record = implementation(attempt.attempt_id, "a" * 40)
-    store.submit_implementation(attempt.attempt_id, record)
+    store.submit_implementation(
+        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
+    )
     projection = (
         store.root
         / "hypotheses"
@@ -156,8 +169,35 @@ def test_reconcile_repairs_missing_projection_without_launching(
         / "implementation.json"
     )
     projection.unlink()
-    assert store.repair_projections() == 1
+    assert store.repair_projections() == 2
     assert projection.is_file()
+
+
+def test_historical_hypothesis_remains_readable_without_spec_set_evidence(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, hypothesis = campaign
+    set_projection = (
+        store.root / "hypotheses" / hypothesis.hypothesis_id / "evaluation-spec-set.json"
+    )
+    with store._connect() as conn:
+        conn.execute("DROP TRIGGER immutable_hypothesis_evidence_delete")
+        conn.execute(
+            "DELETE FROM hypothesis_evidence WHERE hypothesis_id=? AND kind='evaluation_spec_set'",
+            (hypothesis.hypothesis_id,),
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER immutable_hypothesis_evidence_delete
+            BEFORE DELETE ON hypothesis_evidence
+            BEGIN SELECT RAISE(ABORT, 'hypothesis evidence is insert-only'); END
+            """
+        )
+        conn.commit()
+    set_projection.unlink()
+    assert store.get_hypothesis(hypothesis.hypothesis_id).hypothesis_id == hypothesis.hypothesis_id
+    with pytest.raises(ValueError):
+        store.evaluation_spec_set(hypothesis.hypothesis_id)
 
 
 def test_run_reservation_is_atomic_before_worker_launch(
@@ -166,7 +206,9 @@ def test_run_reservation_is_atomic_before_worker_launch(
     store, source, hypothesis = campaign
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
-    store.submit_implementation(attempt.attempt_id, implementation(attempt.attempt_id, "a" * 40))
+    record = implementation(attempt.attempt_id, "a" * 40)
+    plan = run_plan(store, attempt, record)
+    store.submit_implementation(attempt.attempt_id, record, run_plan=plan)
     verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256))
     run_dir = (
         store.root
@@ -176,7 +218,7 @@ def test_run_reservation_is_atomic_before_worker_launch(
         / attempt.attempt_id
         / "run"
     )
-    store.queue_run_request(attempt.attempt_id, "job-reserved", run_dir, 30, 256)
+    store.queue_run_request(attempt.attempt_id, "job-reserved", run_dir, 30, 256, run_plan=plan)
     store.acquire_run_lock()
     try:
         running = store.claim_queued_job(attempt.attempt_id, "job-reserved")
@@ -217,7 +259,10 @@ def test_pause_close_commits_attempt_and_campaign_together(
     store, source, hypothesis = campaign
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
-    store.submit_implementation(attempt.attempt_id, implementation(attempt.attempt_id, "a" * 40))
+    record = implementation(attempt.attempt_id, "a" * 40)
+    store.submit_implementation(
+        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
+    )
     verified_review(
         store,
         review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"),
@@ -254,13 +299,32 @@ def test_hypothesis_create_requires_decided_previous_and_reconcile_repairs(
     )
     spec_file = store.root / "second-spec.json"
     spec_file.write_text('{"second": true}', encoding="utf-8")
+    second_eval = Path(hypothesis.evaluation_spec_path)
+    second_set = store.root / "second-evaluation-spec-set.json"
+    second_set.write_text(
+        EvaluationSpecSet(
+            "research-evaluation-spec-set-v1",
+            "H0002",
+            "c000",
+            (
+                EvaluationSpecEntry(
+                    "c000",
+                    str(second_eval),
+                    hashlib.sha256(second_eval.read_bytes()).hexdigest(),
+                ),
+            ),
+            "2026-01-01T00:00:00Z",
+        ).to_json(),
+        encoding="utf-8",
+    )
     second = store.create_hypothesis(
         "second",
         spec_file,
         Path(hypothesis.panel_path),
         Path(hypothesis.receipt_path),
-        Path(hypothesis.evaluation_spec_path),
+        second_eval,
         "b" * 40,
         dividends=Path(hypothesis.dividends_path),
+        evaluation_spec_set=second_set,
     )
     assert second.hypothesis_id == "H0002"

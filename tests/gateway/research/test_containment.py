@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +27,7 @@ from gateway.research.containment import (
     validate_targets_argv,
     verify_runtime_pins,
 )
+from gateway.research.contracts import AnalysisPlan, RunPlan, RunScenario
 
 
 def _runtime(tmp_path: Path) -> tuple[RuntimePins, Path, Path, Path, Path]:
@@ -186,6 +188,39 @@ def test_bwrap_targets_and_evaluate_have_separate_writable_stage(tmp_path: Path)
     assert "/inputs/spec.json" not in target
 
 
+def test_bwrap_analysis_mount_is_scoped_to_declared_output_subdirectory(
+    tmp_path: Path,
+) -> None:
+    pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
+    worktree = tmp_path / "worktree"
+    scenarios = tmp_path / "scenarios"
+    analysis_stage = tmp_path / "analysis-stage"
+    worktree.mkdir()
+    scenarios.mkdir()
+    analysis_stage.mkdir()
+    panel = tmp_path / "panel"
+    spec = tmp_path / "spec"
+    panel.write_text("panel")
+    spec.write_text("spec")
+    command = bwrap_argv(
+        pins,
+        "analysis",
+        (str(pins.shared_python), "-m", "analysis.module"),
+        worktree=worktree,
+        scenarios_dir=scenarios,
+        analysis_stage=analysis_stage,
+        analysis_inputs={"panel.parquet": panel},
+        evaluation_specs={"c000": spec},
+    )
+    assert ("--dir", "/stage") in pairwise(command)
+    bind = ("--bind", str(analysis_stage / "analysis"), "/stage/analysis")
+    assert bind == tuple(command[command.index("--bind") : command.index("--bind") + 3])
+    assert not any(
+        command[index : index + 3] == ("--bind", str(analysis_stage), "/stage")
+        for index in range(len(command) - 2)
+    )
+
+
 def test_target_rewrite_maps_only_known_roots_and_rejects_escape(tmp_path: Path) -> None:
     pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
     worktree = tmp_path / "worktree"
@@ -323,11 +358,11 @@ def test_stop_scope_refuses_to_claim_completion_when_scope_stays_active(
 @pytest.mark.parametrize(
     ("failure_mode", "expected_status", "expected_calls"),
     [
-        (None, "succeeded", ["validate", "targets", "evaluate"]),
-        ("validate", "input_validation_failed", ["validate"]),
-        ("targets", "targets_failed", ["validate", "targets"]),
-        ("evaluate", "evaluator_failed", ["validate", "targets", "evaluate"]),
-        ("result", "evaluator_failed", ["validate", "targets", "evaluate"]),
+        (None, "succeeded", ["validate-c000", "targets-s000", "evaluate-s000", "analysis"]),
+        ("validate", "input_validation_failed", ["validate-c000"]),
+        ("targets", "scenario_failed", ["validate-c000", "targets-s000"]),
+        ("evaluate", "scenario_failed", ["validate-c000", "targets-s000", "evaluate-s000"]),
+        ("result", "scenario_failed", ["validate-c000", "targets-s000", "evaluate-s000"]),
     ],
 )
 def test_contained_worker_runs_fixed_stages_and_binds_v2_result(
@@ -337,7 +372,7 @@ def test_contained_worker_runs_fixed_stages_and_binds_v2_result(
     expected_status: str,
     expected_calls: list[str],
 ) -> None:
-    pins, _snapshot, _evaluator, universe, venv = _runtime(tmp_path)
+    pins, _snapshot, _evaluator, universe, _venv = _runtime(tmp_path)
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     (worktree / "target.py").write_text("pass\n")
@@ -360,6 +395,24 @@ def test_contained_worker_runs_fixed_stages_and_binds_v2_result(
         name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in artifacts.items()
     }
     semantic = "a" * 64
+    attempt_id = "H0001-A001"
+    targets_argv = (
+        str(pins.shared_python),
+        str(worktree / "target.py"),
+        str(run_dir / "scenarios" / "s000" / "targets-stage" / "targets.json"),
+    )
+    plan = RunPlan(
+        "research-run-plan-v1",
+        attempt_id,
+        commit,
+        "a" * 64,
+        "b" * 64,
+        "s000",
+        (RunScenario("s000", targets_argv, "c000", digests["evaluation_spec"]),),
+        AnalysisPlan("fixture.analysis", (), ("analysis/result.json",), 1024),
+        1,
+        1,
+    )
     job: dict[str, object] = {
         "job_id": "job-contained",
         "run_dir": str(run_dir),
@@ -367,11 +420,7 @@ def test_contained_worker_runs_fixed_stages_and_binds_v2_result(
         "expected_commit": commit,
         "timeout_seconds": 5,
         "max_rss_mb": 256,
-        "targets_argv": [
-            str(venv / "bin" / "python"),
-            str(worktree / "target.py"),
-            str(run_dir / "targets.json"),
-        ],
+        "targets_argv": list(targets_argv),
         "artifact_paths": {name: str(path) for name, path in artifacts.items()},
         "artifact_digests": digests,
         "snapshot_dir": str(pins.snapshot_dir),
@@ -387,6 +436,10 @@ def test_contained_worker_runs_fixed_stages_and_binds_v2_result(
         "evaluator_sha256": pins.evaluator_sha256,
         "universe": str(universe),
         "universe_sha256": pins.universe_sha256,
+        "run_plan": json.loads(plan.to_json()),
+        "run_plan_sha256": hashlib.sha256(plan.to_json().encode()).hexdigest(),
+        "evaluation_spec_paths": {"c000": str(artifacts["evaluation_spec"])},
+        "evaluation_spec_digests": {"c000": digests["evaluation_spec"]},
     }
 
     def fake_plan(
@@ -407,7 +460,7 @@ def test_contained_worker_runs_fixed_stages_and_binds_v2_result(
         assert hasattr(plan, "stage")
         stage = str(plan.stage)
         calls.append(stage)
-        if stage == "validate":
+        if stage.startswith("validate"):
             out.write_text(
                 json.dumps(
                     {
@@ -424,14 +477,14 @@ def test_contained_worker_runs_fixed_stages_and_binds_v2_result(
             )
             if failure_mode == "validate":
                 return 7, False
-        elif stage == "targets":
-            output = run_dir / "targets-stage" / "targets.json"
+        elif stage.startswith("targets"):
+            output = run_dir / "scenarios" / "s000" / "targets-stage" / "targets.json"
             output.parent.mkdir(exist_ok=True)
             output.write_text("{}")
             if failure_mode == "targets":
                 return 7, False
-        else:
-            output = run_dir / "evaluator-stage" / "out" / "result.json"
+        elif stage.startswith("evaluate"):
+            output = run_dir / "scenarios" / "s000" / "evaluator-stage" / "out" / "result.json"
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_text(
                 json.dumps(
@@ -445,13 +498,18 @@ def test_contained_worker_runs_fixed_stages_and_binds_v2_result(
                     }
                 )
             )
+            output.with_name("trades.parquet").write_bytes(b"trades")
+            output.with_name("daily.parquet").write_bytes(b"daily")
             if failure_mode == "evaluate":
                 return 7, False
+        else:
+            output = run_dir / "analysis-stage" / "analysis" / "result.json"
+            output.write_text("{}")
         return 0, False
 
     monkeypatch.setattr(worker, "stage_plan", fake_plan)
     monkeypatch.setattr(worker, "_stage", fake_stage)
-    assert worker._contained_run(job)["status"] == expected_status
+    assert worker._contained_run_plan(job)["status"] == expected_status
     assert calls == expected_calls
     terminal = json.loads((run_dir / "terminal.json").read_text())
     assert terminal["status"] == expected_status

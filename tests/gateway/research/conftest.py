@@ -11,12 +11,15 @@ from pathlib import Path
 
 import pytest
 from gateway.research.contracts import (
+    AnalysisPlan,
     Attempt,
     EvaluationSpecEntry,
     EvaluationSpecSet,
     HypothesisSpec,
     ImplementationRecord,
     ReviewEvidence,
+    RunPlan,
+    RunScenario,
 )
 from gateway.research.store import ResearchStore
 
@@ -131,6 +134,32 @@ def implementation(attempt_id: str, commit: str | None) -> ImplementationRecord:
         "high",
         "standard",
         "2026-01-01T00:00:00Z",
+    )
+
+
+def run_plan(
+    store: ResearchStore,
+    attempt: Attempt,
+    record: ImplementationRecord,
+    *,
+    scenarios: tuple[RunScenario, ...] | None = None,
+) -> RunPlan:
+    spec_set = store.evaluation_spec_set(attempt.hypothesis_id)
+    entries = {entry.spec_id: entry for entry in spec_set.specs}
+    if scenarios is None:
+        primary = entries[spec_set.primary_spec_id]
+        scenarios = (RunScenario("s000", record.targets_argv, primary.spec_id, primary.sha256),)
+    return RunPlan(
+        "research-run-plan-v1",
+        attempt.attempt_id,
+        record.commit,
+        hashlib.sha256(record.to_json().encode()).hexdigest(),
+        hashlib.sha256(spec_set.to_json().encode()).hexdigest(),
+        scenarios[0].scenario_id,
+        scenarios,
+        AnalysisPlan("fixture.analysis", (), ("analysis/result.json",), 1024),
+        10,
+        10,
     )
 
 
