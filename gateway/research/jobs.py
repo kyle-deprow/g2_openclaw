@@ -25,6 +25,7 @@ from .containment import (
     stop_scope,
     verify_configured_runtime_pins,
 )
+from .contracts import RunPlan
 
 
 class JobError(RuntimeError):
@@ -69,6 +70,10 @@ def _now() -> str:
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _sha_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def _starttime(pid: int) -> int | None:
@@ -239,11 +244,11 @@ def _active_stage(run_dir: Path) -> tuple[int, int] | None:
 
 def _owned_scope(job_id: str, unit: str) -> bool:
     prefix = f"research-{job_id}-"
-    return unit.startswith(prefix) and unit.removeprefix(prefix) in {
-        "validate",
-        "targets",
-        "evaluate",
-    }
+    suffix = unit.removeprefix(prefix)
+    return unit.startswith(prefix) and (
+        suffix in {"validate", "targets", "evaluate", "analysis"}
+        or re.fullmatch(r"(?:validate-c\d{3}|targets-s\d{3}|evaluate-s\d{3})", suffix) is not None
+    )
 
 
 def cleanup_stage(job_record: JobRecord) -> bool:
@@ -300,6 +305,9 @@ def launch(
     configured_pins: RuntimePins,
     dividends_path: Path,
     job_id: str | None = None,
+    run_plan: RunPlan | None = None,
+    evaluation_spec_paths: dict[str, Path] | None = None,
+    evaluation_spec_digests: dict[str, str] | None = None,
 ) -> JobRecord:
     """Validate a clean worktree and launch exactly one detached worker."""
     worktree = worktree.resolve()
@@ -342,7 +350,35 @@ def launch(
         raise JobError("all frozen input artifacts and digests are required")
     if artifact_digests.get("dividends") != _sha(dividends_path):
         raise JobError("dividends digest does not match frozen artifact")
-    _validate_targets(targets_argv, shared_python, worktree, run_dir)
+    if run_plan is not None:
+        if run_plan.attempt_id != attempt_dir.name:
+            raise JobError("run plan attempt_id does not match launch directory")
+        if run_plan.commit != expected_commit:
+            raise JobError("run plan commit does not match expected commit")
+        if evaluation_spec_paths is None or evaluation_spec_digests is None:
+            raise JobError("run plan evaluation spec paths and digests are required")
+        expected_spec_ids = {scenario.spec_id for scenario in run_plan.scenarios}
+        if (
+            set(evaluation_spec_paths) != expected_spec_ids
+            or set(evaluation_spec_digests) != expected_spec_ids
+        ):
+            raise JobError("run plan evaluation spec bindings contain unexpected entries")
+        primary = next(
+            scenario
+            for scenario in run_plan.scenarios
+            if scenario.scenario_id == run_plan.primary_scenario_id
+        )
+        if tuple(targets_argv) != primary.targets_argv:
+            raise JobError("primary scenario argv does not match launch argv")
+        for scenario in run_plan.scenarios:
+            _validate_targets(scenario.targets_argv, shared_python, worktree, run_dir)
+            spec_path = evaluation_spec_paths.get(scenario.spec_id)
+            if spec_path is None or not spec_path.is_file() or spec_path.is_symlink():
+                raise JobError(f"missing evaluation spec {scenario.spec_id}")
+            if evaluation_spec_digests.get(scenario.spec_id) != _sha(spec_path):
+                raise JobError(f"evaluation spec digest mismatch: {scenario.spec_id}")
+    else:
+        _validate_targets(targets_argv, shared_python, worktree, run_dir)
     job_id = job_id or new_job_id()
     attempt_id = attempt_dir.name
     config: dict[str, object] = {
@@ -373,6 +409,20 @@ def launch(
         "dividends_path": str(dividends_path.resolve()),
         "dividends_sha256": _sha(dividends_path),
     }
+    if run_plan is not None:
+        plan_json = json.loads(run_plan.to_json())
+        config.update(
+            {
+                "run_plan": plan_json,
+                "run_plan_sha256": _sha_text(run_plan.to_json()),
+                "evaluation_spec_paths": {
+                    key: str(value.resolve())
+                    for key, value in (evaluation_spec_paths or {}).items()
+                },
+                "evaluation_spec_digests": evaluation_spec_digests,
+                "evaluation_spec_set_sha256": run_plan.evaluation_spec_set_sha256,
+            }
+        )
     job_file = run_dir / "job.json"
     _write_json(job_file, config)
     log = (run_dir / "logs").resolve()

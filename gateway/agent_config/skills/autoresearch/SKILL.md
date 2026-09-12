@@ -84,6 +84,16 @@ no repair, retry, substitution, evaluator substitution, or invented result. A
 failed or lost job is terminal evidence for Astra. Completion of the last
 allocated attempt remains allowed even when a new admission would be exhausted.
 
+Before a fresh hypothesis is frozen, Astra must bind an immutable
+`EvaluationSpecSet` containing every evaluator file used by the reviewed
+`RunPlan`. All entries must preserve the primary panel, universe, dates,
+horizon, and policy bounds; only explicit cost settings can vary. Each cost
+scenario is a real Quantipy invocation with its own digest, not a post-hoc
+transformation of retained trades. The bounded runner validates each distinct
+spec once, executes scenarios sequentially, and runs declared analysis only
+after all scenario artifacts are complete. H1 historical rows remain
+readable; new launches cannot fall back to an unbound argv or one evaluator.
+
 ## Scientific boundary
 
 The initial capability is price-panel-only and ETF-scoped. Require trusted

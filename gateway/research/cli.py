@@ -46,6 +46,7 @@ from .contracts import (
     HypothesisDecision,
     ImplementationRecord,
     RunOutcome,
+    RunPlan,
 )
 from .hypothesis import HypothesisDocument
 from .jobs import (
@@ -191,10 +192,20 @@ def hypothesis_create(
     eval_spec: Path = typer.Option(..., "--eval-spec"),
     dividends: Path = typer.Option(..., "--dividends"),
     base_commit: str = typer.Option(..., "--base-commit"),
+    evaluation_spec_set: list[Path] = typer.Option([], "--evaluation-spec-set"),
 ) -> None:
     try:
+        if len(evaluation_spec_set) > 1:
+            raise ValueError("--evaluation-spec-set accepts one manifest")
         spec = ResearchStore(_root(root)).create_hypothesis(
-            title, spec_file, panel, receipt, eval_spec, base_commit, dividends=dividends
+            title,
+            spec_file,
+            panel,
+            receipt,
+            eval_spec,
+            base_commit,
+            dividends=dividends,
+            evaluation_spec_set=evaluation_spec_set[0] if evaluation_spec_set else None,
         )
         typer.echo(spec.hypothesis_id)
     except Exception as exc:
@@ -237,10 +248,14 @@ def implementation_submit(
     attempt_id: str,
     root: Path = typer.Option(..., "--root"),
     file: Path = typer.Option(..., "--file"),
+    run_plan: Path = typer.Option(..., "--run-plan"),
 ) -> None:
     try:
         record = ImplementationRecord.from_json(file.read_text(encoding="utf-8"))
-        typer.echo(ResearchStore(_root(root)).submit_implementation(attempt_id, record).state.value)
+        plan = RunPlan.from_json(run_plan.read_text(encoding="utf-8"))
+        typer.echo(
+            ResearchStore(_root(root)).submit_implementation(attempt_id, record, plan).state.value
+        )
     except Exception as exc:
         _fail(exc)
 
@@ -483,6 +498,18 @@ def _parse_evaluator_bounds(
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         document = _strict_object(raw, "evaluator spec")
+        allowed_keys = {
+            "instruments",
+            "start_session",
+            "end_session",
+            "costs",
+            "holding",
+            "execution",
+            "max_gross_exposure",
+            "long_only",
+        }
+        if not set(document).issubset(allowed_keys):
+            raise ValueError("evaluator spec has unsupported non-cost bounds")
         instruments_raw = document.get("instruments")
         if not isinstance(instruments_raw, list) or not instruments_raw:
             raise ValueError("evaluator instruments missing")
@@ -501,6 +528,36 @@ def _parse_evaluator_bounds(
         max_holding = holding["max_sessions"]
         if type(max_holding) is not int:
             raise ValueError("evaluator holding.max_sessions must be an integer")
+        execution = _strict_object(
+            document.get(
+                "execution",
+                {
+                    "decision_at": "regular_close",
+                    "fill_at": "next_regular_open",
+                },
+            ),
+            "evaluator execution",
+        )
+        if not set(holding).issubset({"max_sessions", "exit_at"}):
+            raise ValueError("evaluator holding has unsupported bounds")
+        if not set(execution).issubset({"decision_at", "fill_at"}):
+            raise ValueError("evaluator execution has unsupported bounds")
+        costs = document.get("costs")
+        if costs is not None:
+            costs_object = _strict_object(costs, "evaluator costs")
+            if not set(costs_object).issubset(
+                {"half_spread_bps", "slippage_bps", "commission_bps"}
+            ):
+                raise ValueError("evaluator costs has unsupported fields")
+        max_gross_exposure = document.get("max_gross_exposure", 1.0)
+        long_only = document.get("long_only", True)
+        if (
+            isinstance(max_gross_exposure, bool)
+            or not isinstance(max_gross_exposure, (int, float))
+            or not math.isfinite(float(max_gross_exposure))
+            or not isinstance(long_only, bool)
+        ):
+            raise ValueError("evaluator execution bounds are malformed")
         return EvaluatorBounds(
             start,
             end,
@@ -509,6 +566,11 @@ def _parse_evaluator_bounds(
             max_holding,
             EarningsCoverage(EarningsCoverageStatus.UNAVAILABLE),
             panel_sessions,
+            str(holding.get("exit_at", "session_close")),
+            str(execution.get("decision_at", "regular_close")),
+            str(execution.get("fill_at", "next_regular_open")),
+            float(max_gross_exposure),
+            long_only,
         )
     except (
         OSError,
@@ -561,6 +623,22 @@ def _parse_exposure_ledger(store: ResearchStore) -> ExposureLedger | None:
         return ExposureLedger((), False, None, "")
 
 
+def _same_evaluator_bounds(left: EvaluatorBounds, right: EvaluatorBounds) -> bool:
+    """Compare every admission bound except the explicitly cost-bearing spec."""
+    return (
+        left.panel_start == right.panel_start
+        and left.panel_end == right.panel_end
+        and left.instruments == right.instruments
+        and left.max_holding_sessions == right.max_holding_sessions
+        and left.panel_sessions == right.panel_sessions
+        and left.holding_exit_at == right.holding_exit_at
+        and left.execution_decision_at == right.execution_decision_at
+        and left.execution_fill_at == right.execution_fill_at
+        and left.max_gross_exposure == right.max_gross_exposure
+        and left.long_only == right.long_only
+    )
+
+
 def _admission_for_hypothesis(store: ResearchStore, hypothesis_id: str) -> AdmissionDecision:
     hypothesis_spec = store.get_hypothesis(hypothesis_id)
     try:
@@ -597,6 +675,34 @@ def _admission_for_hypothesis(store: ResearchStore, hypothesis_id: str) -> Admis
     bounds = _parse_evaluator_bounds(
         evaluation_path, hypothesis_spec.evaluation_spec_sha256, panel_sessions
     )
+    spec_set_digest: str | None = None
+    try:
+        spec_set = store.evaluation_spec_set(hypothesis_id)
+    except ValueError:
+        spec_set = None
+    # Historical H1 admission rows are not recomputed against newly added
+    # spec-set evidence; only fresh hypotheses carry this binding.
+    if hypothesis_id == "H0001":
+        spec_set = None
+    if spec_set is not None:
+        spec_set_digest = hashlib.sha256(spec_set.to_json().encode("utf-8")).hexdigest()
+        primary = next(
+            entry for entry in spec_set.specs if entry.spec_id == spec_set.primary_spec_id
+        )
+        if (
+            primary.path != hypothesis_spec.evaluation_spec_path
+            or primary.sha256 != hypothesis_spec.evaluation_spec_sha256
+        ):
+            raise _AdmissionInputError(
+                "EVALUATION_SPEC_DIGEST_MISMATCH", "primary spec set entry differs from hypothesis"
+            )
+        for entry in spec_set.specs:
+            candidate = _parse_evaluator_bounds(Path(entry.path), entry.sha256, panel_sessions)
+            if not _same_evaluator_bounds(bounds, candidate):
+                raise _AdmissionInputError(
+                    "EVALUATION_SPEC_DIGEST_MISMATCH",
+                    f"evaluation spec {entry.spec_id} changes a non-cost bound",
+                )
     try:
         policy = store.campaign_policy()
     except StoreConflict as exc:
@@ -610,6 +716,7 @@ def _admission_for_hypothesis(store: ResearchStore, hypothesis_id: str) -> Admis
         bounds,
         policy,
         ExecutionCapability(frozenset({"panel"})),
+        evaluation_spec_set_sha256=spec_set_digest,
     )
 
 
@@ -642,12 +749,29 @@ def _terminal_outcome(
             / "result.json"
         )
     )
+    run_evidence_path = result_path.parents[2] / "run-evidence.json"
+    if run_evidence_path.is_file():
+        result_path = run_evidence_path
     result: dict[str, object] = {}
     if result_path.is_file():
         try:
             loaded = json.loads(result_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
-                result = loaded
+                if result_path.name == "run-evidence.json":
+                    scenarios = loaded.get("scenarios")
+                    if isinstance(scenarios, dict):
+                        primary = str(loaded.get("primary_scenario_id", "s000"))
+                        primary_data = scenarios.get(primary)
+                        if isinstance(primary_data, dict):
+                            primary_result = primary_data.get("result_path")
+                            if isinstance(primary_result, str):
+                                candidate = Path(primary_result)
+                                if candidate.is_file():
+                                    decoded = json.loads(candidate.read_text(encoding="utf-8"))
+                                    if isinstance(decoded, dict):
+                                        result = decoded
+                else:
+                    result = loaded
         except json.JSONDecodeError:
             pass
     raw_exit = terminal.get("evaluator_exit", terminal.get("targets_exit", -1))
@@ -927,6 +1051,15 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
         implementation = ImplementationRecord.from_json(
             store.evidence(attempt_id, "implementation")
         )
+        plan: RunPlan | None = None
+        try:
+            plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
+        except ValueError:
+            # H0001's historical attempts have no plan evidence and remain
+            # readable.  A fresh hypothesis is never allowed to launch this
+            # legacy argv-only shape.
+            if attempt.hypothesis_id != "H0001":
+                return reject("run_plan_mismatch")
         try:
             host_review = json.loads(store.evidence(attempt_id, "review_host_evidence"))
         except (ValueError, json.JSONDecodeError):
@@ -937,6 +1070,11 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
             or host_review.get("bound_commit") != attempt.commit
             or host_review.get("bound_spec_sha256")
             != store.get_hypothesis(attempt.hypothesis_id).spec_sha256
+            or (
+                plan is not None
+                and host_review.get("bound_run_plan_sha256")
+                != hashlib.sha256(plan.to_json().encode("utf-8")).hexdigest()
+            )
             or implementation.commit != attempt.commit
         ):
             return reject("review_gate_unavailable")
@@ -968,6 +1106,39 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
             != implementation.targets_argv
         ):
             return reject("implementation_pin_mismatch")
+        if plan is not None:
+            if (
+                plan.attempt_id != attempt_id
+                or plan.commit != attempt.commit
+                or plan.implementation_sha256 != attempt.implementation_sha256
+            ):
+                return reject("run_plan_mismatch")
+            raw_plan = payload.get("run_plan")
+            raw_digest = payload.get("run_plan_sha256")
+            expected_plan_digest = hashlib.sha256(plan.to_json().encode("utf-8")).hexdigest()
+            if (
+                not isinstance(raw_plan, dict)
+                or raw_digest != expected_plan_digest
+                or json.dumps(raw_plan, sort_keys=True, separators=(",", ":")) != plan.to_json()
+            ):
+                return reject("run_plan_mismatch")
+            try:
+                spec_set = store.evaluation_spec_set(attempt.hypothesis_id)
+            except ValueError:
+                return reject("run_plan_mismatch")
+            expected_specs = {entry.spec_id: (entry.path, entry.sha256) for entry in spec_set.specs}
+            scenario_spec_ids = {scenario.spec_id for scenario in plan.scenarios}
+            raw_paths = payload.get("evaluation_spec_paths")
+            raw_digests = payload.get("evaluation_spec_digests")
+            if not isinstance(raw_paths, dict) or not isinstance(raw_digests, dict):
+                return reject("run_plan_mismatch")
+            if set(raw_paths) != scenario_spec_ids or set(raw_digests) != scenario_spec_ids:
+                return reject("run_plan_mismatch")
+            if any(
+                (str(raw_paths[key]), str(raw_digests[key])) != expected_specs.get(key)
+                for key in scenario_spec_ids
+            ):
+                return reject("run_plan_mismatch")
         admission_reject = _admission_execution_ready(store, attempt_id)
         if admission_reject is not None:
             return admission_reject
@@ -1043,6 +1214,23 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
                 configured_pins=pins,
                 dividends_path=Path(str(payload["dividends_path"])),
                 job_id=job_id,
+                run_plan=plan,
+                evaluation_spec_paths=(
+                    {
+                        key: Path(str(value))
+                        for key, value in dict(payload["evaluation_spec_paths"]).items()
+                    }
+                    if plan is not None and isinstance(payload.get("evaluation_spec_paths"), dict)
+                    else None
+                ),
+                evaluation_spec_digests=(
+                    {
+                        key: str(value)
+                        for key, value in dict(payload["evaluation_spec_digests"]).items()
+                    }
+                    if plan is not None and isinstance(payload.get("evaluation_spec_digests"), dict)
+                    else None
+                ),
             )
             updated_payload = {**payload, **json.loads(job.to_json()), "state": "LAUNCHED"}
             store.update_job(updated_payload, attempt_id)

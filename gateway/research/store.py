@@ -25,6 +25,7 @@ from .contracts import (
     Attempt,
     AttemptDecision,
     AttemptState,
+    EvaluationSpecSet,
     Event,
     HypothesisDecision,
     HypothesisSpec,
@@ -32,6 +33,7 @@ from .contracts import (
     ImplementationRecord,
     ReviewEvidence,
     RunOutcome,
+    RunPlan,
 )
 from .machine import (
     close_attempt as machine_close_attempt,
@@ -180,6 +182,11 @@ class ResearchStore:
                   payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL,
                   PRIMARY KEY(attempt_id, kind)
                 );
+                CREATE TABLE IF NOT EXISTS hypothesis_evidence (
+                  hypothesis_id TEXT NOT NULL REFERENCES hypotheses, kind TEXT NOT NULL,
+                  payload_json TEXT NOT NULL, payload_sha256 TEXT NOT NULL,
+                  PRIMARY KEY(hypothesis_id, kind)
+                );
                 CREATE TABLE IF NOT EXISTS events (
                   seq INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL,
                   hypothesis_id TEXT NOT NULL, attempt_id TEXT, kind TEXT NOT NULL,
@@ -248,6 +255,12 @@ class ResearchStore:
                 CREATE TRIGGER IF NOT EXISTS immutable_attempt_evidence_delete
                 BEFORE DELETE ON attempt_evidence
                 BEGIN SELECT RAISE(ABORT, 'attempt evidence is insert-only'); END;
+                CREATE TRIGGER IF NOT EXISTS immutable_hypothesis_evidence
+                BEFORE UPDATE ON hypothesis_evidence
+                BEGIN SELECT RAISE(ABORT, 'hypothesis evidence is insert-only'); END;
+                CREATE TRIGGER IF NOT EXISTS immutable_hypothesis_evidence_delete
+                BEFORE DELETE ON hypothesis_evidence
+                BEGIN SELECT RAISE(ABORT, 'hypothesis evidence is insert-only'); END;
                 """
             )
             columns = {
@@ -596,6 +609,7 @@ class ResearchStore:
         base_commit: str,
         dividends: Path,
         max_attempts: int = 3,
+        evaluation_spec_set: Path | None = None,
     ) -> HypothesisSpec:
         if any(h.state != HypothesisState.DECIDED for h in self.hypotheses()):
             raise ValueError("hypothesis-create requires every existing hypothesis to be DECIDED")
@@ -637,6 +651,28 @@ class ResearchStore:
                 dividends_sha256,
                 HypothesisState.DRAFT,
             )
+            spec_set: EvaluationSpecSet | None = None
+            if evaluation_spec_set is not None:
+                if evaluation_spec_set.is_symlink() or not evaluation_spec_set.is_file():
+                    raise ValueError("evaluation spec set must be a regular non-symlink file")
+                spec_set = EvaluationSpecSet.from_json(
+                    evaluation_spec_set.read_text(encoding="utf-8")
+                )
+                if spec_set.hypothesis_id != hid:
+                    raise ValueError(
+                        "evaluation spec set hypothesis_id does not match new hypothesis"
+                    )
+                primary = next(
+                    entry for entry in spec_set.specs if entry.spec_id == spec_set.primary_spec_id
+                )
+                if (
+                    primary.path != spec.evaluation_spec_path
+                    or primary.sha256 != spec.evaluation_spec_sha256
+                ):
+                    raise ValueError("primary evaluation spec does not match hypothesis spec")
+                for entry in spec_set.specs:
+                    if sha256_file(Path(entry.path)) != entry.sha256:
+                        raise ValueError(f"evaluation spec digest mismatch: {entry.spec_id}")
             payload = spec.to_json()
             conn.execute(
                 "INSERT INTO hypotheses(hypothesis_id,state,title,spec_json,spec_sha256,panel_path,receipt_path,evaluation_spec_path,evaluation_spec_sha256,panel_sha256,receipt_sha256,dividends_path,dividends_sha256,max_attempts,base_commit,created_at,payload_json,payload_sha256) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -661,9 +697,24 @@ class ResearchStore:
                     _digest(payload),
                 ),
             )
+            if spec_set is not None:
+                set_payload = spec_set.to_json()
+                conn.execute(
+                    "INSERT INTO hypothesis_evidence VALUES(?,?,?,?)",
+                    (hid, "evaluation_spec_set", set_payload, _digest(set_payload)),
+                )
             self._event(conn, hid, None, "hypothesis_created", {"title": title}, "astra")
             conn.commit()
         self._projection(self.root / "hypotheses" / hid / "spec.json", spec_json)
+        if spec_set is not None:
+            self._projection(
+                self.root / "hypotheses" / hid / "evaluation-spec-set.json", spec_set.to_json()
+            )
+            for entry in spec_set.specs:
+                self._projection(
+                    self.root / "hypotheses" / hid / "evaluation-specs" / f"{entry.spec_id}.json",
+                    Path(entry.path).read_text(encoding="utf-8"),
+                )
         return spec
 
     def _update_hypothesis(
@@ -684,9 +735,18 @@ class ResearchStore:
         return spec
 
     def freeze(self, hypothesis_id: str) -> HypothesisSpec:
-        return self._update_hypothesis(
-            freeze(self.get_hypothesis(hypothesis_id)), "hypothesis_frozen"
-        )
+        current = self.get_hypothesis(hypothesis_id)
+        if current.state == HypothesisState.DRAFT and current.hypothesis_id != "H0001":
+            with self._connect() as conn:
+                evidence = conn.execute(
+                    "SELECT 1 FROM hypothesis_evidence WHERE hypothesis_id=? AND kind='evaluation_spec_set'",
+                    (hypothesis_id,),
+                ).fetchone()
+            if evidence is None:
+                raise StoreConflict(
+                    "DRAFT hypothesis requires evaluation spec set evidence before freeze"
+                )
+        return self._update_hypothesis(freeze(current), "hypothesis_frozen")
 
     def decide_hypothesis(
         self, hypothesis_id: str, decision: HypothesisDecision, reason: str
@@ -795,8 +855,39 @@ class ResearchStore:
             self._repair_evidence_projection(attempt, "admission_decision", admission_payload)
         return attempt
 
-    def submit_implementation(self, attempt_id: str, record: ImplementationRecord) -> Attempt:
+    def submit_implementation(
+        self,
+        attempt_id: str,
+        record: ImplementationRecord,
+        run_plan: RunPlan | None = None,
+    ) -> Attempt:
         attempt = self.get_attempt(attempt_id)
+        run_plan_payload = run_plan.to_json() if run_plan is not None else None
+        if run_plan is not None:
+            if run_plan.attempt_id != attempt_id or run_plan.commit != record.commit:
+                raise StoreConflict("run plan does not match implementation")
+            if run_plan.implementation_sha256 != _digest(record.to_json()):
+                raise StoreConflict("run plan implementation digest does not match implementation")
+            try:
+                spec_set = self.evaluation_spec_set(attempt.hypothesis_id)
+            except ValueError as exc:
+                raise StoreConflict("evaluation spec set evidence is required") from exc
+            if run_plan.evaluation_spec_set_sha256 != _digest(spec_set.to_json()):
+                raise StoreConflict("run plan evaluation spec set digest does not match evidence")
+            primary = next(
+                scenario
+                for scenario in run_plan.scenarios
+                if scenario.scenario_id == run_plan.primary_scenario_id
+            )
+            if primary.targets_argv != record.targets_argv:
+                raise StoreConflict("primary scenario argv does not match implementation")
+            entries = {entry.spec_id: entry.sha256 for entry in spec_set.specs}
+            if any(
+                scenario.spec_id not in entries
+                or scenario.evaluation_spec_sha256 != entries[scenario.spec_id]
+                for scenario in run_plan.scenarios
+            ):
+                raise StoreConflict("run plan scenario spec does not match evidence")
         with self._connect() as conn:
             old = conn.execute(
                 "SELECT payload_json FROM attempt_evidence WHERE attempt_id=? AND kind='implementation'",
@@ -805,7 +896,16 @@ class ResearchStore:
         if old is not None:
             if old[0] != record.to_json():
                 raise StoreConflict("implementation payload differs from stored payload")
+            if run_plan_payload is not None:
+                existing_plan = conn.execute(
+                    "SELECT payload_json FROM attempt_evidence WHERE attempt_id=? AND kind='run_plan'",
+                    (attempt_id,),
+                ).fetchone()
+                if existing_plan is not None and str(existing_plan[0]) != run_plan_payload:
+                    raise StoreConflict("run plan payload differs from stored payload")
             self._repair_evidence_projection(attempt, "implementation", record.to_json())
+            if run_plan_payload is not None:
+                self._repair_evidence_projection(attempt, "run_plan", run_plan_payload)
             return attempt
         updated = submit_implementation(attempt, record, now_utc())
         payload = updated.to_json()
@@ -815,6 +915,11 @@ class ResearchStore:
                 "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
                 (attempt_id, "implementation", record.to_json(), _digest(record.to_json())),
             )
+            if run_plan_payload is not None:
+                conn.execute(
+                    "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+                    (attempt_id, "run_plan", run_plan_payload, _digest(run_plan_payload)),
+                )
             conn.execute(
                 'UPDATE attempts SET state=?,"commit"=?,implementation_sha256=?,review_verdict=NULL,review_commit=NULL,review_spec_sha256=NULL,reported_reviewer_model=NULL,reported_reviewer_actual_model=NULL,reported_coder_model=?,coder_effort=?,coder_service_tier=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=?',
                 (
@@ -848,6 +953,16 @@ class ResearchStore:
             / "implementation.json",
             record.to_json(),
         )
+        if run_plan_payload is not None:
+            self._projection(
+                self.root
+                / "hypotheses"
+                / attempt.hypothesis_id
+                / "attempts"
+                / attempt_id
+                / "run-plan.json",
+                run_plan_payload,
+            )
         return updated
 
     def insert_review_evidence(self, attempt_id: str, kind: str, payload: str, event: str) -> None:
@@ -1375,6 +1490,55 @@ class ResearchStore:
                         "driver",
                     )
                     conn.commit()
+            with self._connect() as conn:
+                hypothesis_evidence = conn.execute(
+                    "SELECT kind,payload_json,payload_sha256 FROM hypothesis_evidence WHERE hypothesis_id=?",
+                    (spec.hypothesis_id,),
+                ).fetchall()
+            for row in hypothesis_evidence:
+                payload = str(row["payload_json"])
+                if _digest(payload) != str(row["payload_sha256"]):
+                    raise StoreConflict(f"{row['kind']} evidence payload digest mismatch")
+                if row["kind"] == "evaluation_spec_set":
+                    path = (
+                        self.root / "hypotheses" / spec.hypothesis_id / "evaluation-spec-set.json"
+                    )
+                else:
+                    path = self.root / "hypotheses" / spec.hypothesis_id / f"{row['kind']}.json"
+                if self._projection(path, payload):
+                    repaired += 1
+                    with self._connect() as conn:
+                        conn.execute("BEGIN IMMEDIATE")
+                        self._event(
+                            conn,
+                            spec.hypothesis_id,
+                            None,
+                            "projection_repaired",
+                            {"path": str(path)},
+                            "driver",
+                        )
+                        conn.commit()
+                if row["kind"] == "evaluation_spec_set":
+                    spec_set = EvaluationSpecSet.from_json(payload)
+                    for entry in spec_set.specs:
+                        source = Path(entry.path)
+                        if (
+                            not source.is_file()
+                            or source.is_symlink()
+                            or sha256_file(source) != entry.sha256
+                        ):
+                            raise StoreConflict(
+                                f"evaluation spec evidence file changed: {entry.spec_id}"
+                            )
+                        spec_path = (
+                            self.root
+                            / "hypotheses"
+                            / spec.hypothesis_id
+                            / "evaluation-specs"
+                            / f"{entry.spec_id}.json"
+                        )
+                        if self._projection(spec_path, source.read_text(encoding="utf-8")):
+                            repaired += 1
             for attempt in self.attempts_for(spec.hypothesis_id):
                 with self._connect() as conn:
                     evidence = conn.execute(
@@ -1620,6 +1784,7 @@ class ResearchStore:
         run_dir: Path,
         timeout_seconds: int | float,
         max_rss_mb: int,
+        run_plan: RunPlan | None = None,
     ) -> Attempt:
         """Persist one validated run request without starting a process."""
         if not isinstance(job_id, str) or not job_id:
@@ -1633,6 +1798,25 @@ class ResearchStore:
         if run_dir.resolve() != expected_run_dir:
             raise StoreConflict("run directory is not the canonical attempt directory")
         implementation = ImplementationRecord.from_json(self.evidence(attempt_id, "implementation"))
+        stored_plan: RunPlan | None = run_plan
+        try:
+            stored_plan = RunPlan.from_json(self.evidence(attempt_id, "run_plan"))
+        except ValueError:
+            if run_plan is None:
+                # Historical H1 attempts remain readable.  They are handled by
+                # the legacy queue shape only; fresh hypotheses cannot launch
+                # without the reviewed plan below.
+                stored_plan = None
+        if (
+            run_plan is not None
+            and stored_plan is not None
+            and run_plan.to_json() != stored_plan.to_json()
+        ):
+            raise StoreConflict("supplied run plan differs from stored run plan")
+        if stored_plan is None and hypothesis.hypothesis_id != "H0001":
+            raise StoreConflict("fresh hypotheses require immutable run plan evidence")
+        if hypothesis.state != HypothesisState.FROZEN and stored_plan is not None:
+            raise StoreConflict("hypothesis must be frozen before queueing a reviewed plan")
         try:
             host_review = json.loads(self.evidence(attempt_id, "review_host_evidence"))
         except (ValueError, json.JSONDecodeError) as exc:
@@ -1648,6 +1832,10 @@ class ResearchStore:
             or host_review.get("verdict") != "PASS"
             or host_review.get("bound_commit") != attempt.commit
             or host_review.get("bound_spec_sha256") != hypothesis.spec_sha256
+            or (
+                stored_plan is not None
+                and host_review.get("bound_run_plan_sha256") != _digest(stored_plan.to_json())
+            )
         ):
             raise StoreConflict("verified host review evidence is required")
         artifact_paths = {
@@ -1664,6 +1852,24 @@ class ResearchStore:
             "evaluation_spec": hypothesis.evaluation_spec_sha256,
             "dividends": hypothesis.dividends_sha256,
         }
+        evaluation_spec_paths: dict[str, str] = {}
+        evaluation_spec_digests: dict[str, str] = {}
+        if stored_plan is not None:
+            spec_set = self.evaluation_spec_set(hypothesis.hypothesis_id)
+            set_digest = _digest(spec_set.to_json())
+            if stored_plan.evaluation_spec_set_sha256 != set_digest:
+                raise StoreConflict("run plan spec-set digest changed")
+            entries = {entry.spec_id: entry for entry in spec_set.specs}
+            for scenario in stored_plan.scenarios:
+                entry = entries.get(scenario.spec_id)
+                if entry is None or entry.sha256 != scenario.evaluation_spec_sha256:
+                    raise StoreConflict("run plan references an unbound evaluation spec")
+                evaluation_spec_paths[scenario.spec_id] = entry.path
+                evaluation_spec_digests[scenario.spec_id] = entry.sha256
+            if stored_plan.primary_scenario_id not in {
+                s.scenario_id for s in stored_plan.scenarios
+            }:
+                raise StoreConflict("run plan primary scenario is missing")
         payload: dict[str, object] = {
             "job_id": job_id,
             "attempt_id": attempt_id,
@@ -1697,6 +1903,16 @@ class ResearchStore:
             "dividends_path": hypothesis.dividends_path,
             "dividends_sha256": hypothesis.dividends_sha256,
         }
+        if stored_plan is not None:
+            payload.update(
+                {
+                    "run_plan": json.loads(stored_plan.to_json()),
+                    "run_plan_sha256": _digest(stored_plan.to_json()),
+                    "evaluation_spec_set_sha256": stored_plan.evaluation_spec_set_sha256,
+                    "evaluation_spec_paths": evaluation_spec_paths,
+                    "evaluation_spec_digests": evaluation_spec_digests,
+                }
+            )
         # A retried request with the same caller-selected id is idempotent.  The
         # timestamp is observational and therefore excluded from this replay
         # comparison; all execution-affecting fields must still match.
@@ -1979,6 +2195,24 @@ class ResearchStore:
         if _digest(payload) != str(row["payload_sha256"]):
             raise StoreConflict(f"{kind} evidence payload digest mismatch")
         return payload
+
+    def hypothesis_evidence(self, hypothesis_id: str, kind: str) -> str:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT payload_json,payload_sha256 FROM hypothesis_evidence WHERE hypothesis_id=? AND kind=?",
+                (hypothesis_id, kind),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"missing {kind} evidence for {hypothesis_id}")
+        payload = str(row["payload_json"])
+        if _digest(payload) != str(row["payload_sha256"]):
+            raise StoreConflict(f"{kind} evidence payload digest mismatch")
+        return payload
+
+    def evaluation_spec_set(self, hypothesis_id: str) -> EvaluationSpecSet:
+        return EvaluationSpecSet.from_json(
+            self.hypothesis_evidence(hypothesis_id, "evaluation_spec_set")
+        )
 
     def finish_run(self, attempt_id: str, outcome: object) -> Attempt:
         from .contracts import RunOutcome

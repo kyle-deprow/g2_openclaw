@@ -16,7 +16,7 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 
 class ContainmentError(RuntimeError):
@@ -26,7 +26,8 @@ class ContainmentError(RuntimeError):
 _UNIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 _DOTTED_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _SECRET_HINT = re.compile(r"(?i)(?:api[_-]?key|password|secret|token)")
-_STAGES: Final[frozenset[str]] = frozenset({"validate", "targets", "evaluate"})
+_STAGES: Final[frozenset[str]] = frozenset({"validate", "targets", "evaluate", "analysis"})
+_SCENARIO_STAGE = re.compile(r"^(?:validate-c\d{3}|targets-s\d{3}|evaluate-s\d{3})$")
 _MAX_TARGET_BYTES: Final[int] = 16 * 1024 * 1024
 _BWRAP: Final[str] = "/usr/bin/bwrap"
 _SYSTEMD_RUN: Final[str] = "/usr/bin/systemd-run"
@@ -255,7 +256,7 @@ def verify_runtime_pins(pins: RuntimePins) -> None:
 
 
 def _require_stage(stage: str) -> None:
-    if stage not in _STAGES:
+    if stage not in _STAGES and _SCENARIO_STAGE.fullmatch(stage) is None:
         raise ContainmentError(f"unknown containment stage: {stage}")
 
 
@@ -437,31 +438,83 @@ def bwrap_argv(
     spec: Path | None = None,
     dividends: Path | None = None,
     targets_file: Path | None = None,
+    scenarios_dir: Path | None = None,
+    analysis_stage: Path | None = None,
+    inputs_dir: Path | None = None,
+    evaluation_specs: Mapping[str, Path] | None = None,
+    analysis_inputs: Mapping[str, Path] | None = None,
 ) -> tuple[str, ...]:
-    """Build the fixed bubblewrap command for one of the three stages."""
+    """Build the fixed bubblewrap command for one research stage."""
     _require_stage(stage)
     argv = _base_argv(pins)
-    if stage in {"validate", "targets", "evaluate"}:
+    base_stage = stage.split("-", 1)[0]
+    if base_stage in {"validate", "targets", "evaluate"}:
         if panel is None or receipt is None:
             raise ContainmentError("panel and receipt are required in every stage")
         argv.extend(("--dir", "/inputs", "--ro-bind", str(panel), "/inputs/panel.parquet"))
         argv.extend(("--ro-bind", str(receipt), "/inputs/receipt.json"))
-    if stage in {"validate", "evaluate"}:
+    if base_stage in {"validate", "evaluate"}:
         if spec is None or dividends is None:
             raise ContainmentError("spec and dividends are required in validation/evaluation")
         argv.extend(("--ro-bind", str(spec), "/inputs/spec.json"))
         argv.extend(("--ro-bind", str(dividends), "/inputs/dividends.json"))
         argv.extend(("--ro-bind", str(pins.universe), "/universe.json"))
-    if stage == "targets":
+    if base_stage == "targets":
         if worktree is None or targets_stage is None:
             raise ContainmentError("target stage requires worktree and stage output")
         argv.extend(("--ro-bind", str(worktree), "/work", "--bind", str(targets_stage), "/stage"))
         argv.extend(("--chdir", "/work"))
-    elif stage == "evaluate":
+    elif base_stage == "evaluate":
         if evaluator_stage is None or targets_file is None:
             raise ContainmentError("evaluation stage requires output and targets")
         argv.extend(("--ro-bind", str(targets_file), "/targets.json"))
         argv.extend(("--bind", str(evaluator_stage), "/stage", "--chdir", "/snapshot"))
+    elif stage == "analysis":
+        if worktree is None or scenarios_dir is None or analysis_stage is None:
+            raise ContainmentError("analysis stage requires work, scenarios, and stage")
+        if analysis_inputs is None:
+            if inputs_dir is None:
+                raise ContainmentError("analysis stage requires bound input files")
+            analysis_inputs = {}
+        if evaluation_specs is not None:
+            analysis_inputs = {
+                **analysis_inputs,
+                **{
+                    f"evaluation-specs/{key}.json": value for key, value in evaluation_specs.items()
+                },
+            }
+        argv.extend(
+            (
+                "--ro-bind",
+                str(worktree),
+                "/work",
+                "--ro-bind",
+                str(scenarios_dir),
+                "/scenarios",
+                "--bind",
+                str(analysis_stage),
+                "/stage",
+                "--chdir",
+                "/work",
+                "--setenv",
+                "PYTHONPATH",
+                "/snapshot/src:/work",
+            )
+        )
+        argv.append("--dir")
+        argv.append("/inputs")
+        for relative, input_path in sorted(analysis_inputs.items()):
+            relative_path = Path(relative)
+            if (
+                relative_path.is_absolute()
+                or any(part in {"", ".", ".."} for part in relative_path.parts)
+                or not relative
+            ):
+                raise ContainmentError("analysis input path is unsafe")
+            parent = relative_path.parent
+            if str(parent) != ".":
+                argv.extend(("--dir", f"/inputs/{parent.as_posix()}"))
+            argv.extend(("--ro-bind", str(input_path), f"/inputs/{relative}"))
     else:
         argv.extend(("--chdir", "/snapshot"))
     argv.extend(command)
@@ -502,7 +555,7 @@ def stage_plan(
     stage: str,
     max_rss_mb: int,
     command: Sequence[str],
-    **mounts: Path | None,
+    **mounts: Any,
 ) -> StagePlan:
     return scope_argv(job_id, stage, max_rss_mb, bwrap_argv(pins, stage, command, **mounts))
 

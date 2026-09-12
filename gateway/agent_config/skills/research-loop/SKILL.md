@@ -120,6 +120,17 @@ and relative deliverable paths.
   of the final allocated attempt remains allowed even when new admission is
   exhausted.
 
+For a fresh hypothesis, author and freeze one immutable `EvaluationSpecSet`
+manifest before review. Its regular, digest-bound evaluator files must share
+the primary panel, universe, dates, horizon, and operator-policy bounds; only
+explicit cost settings may differ. Submit a reviewed `RunPlan` that names the
+set digest, one primary scenario, and each true Quantipy evaluator scenario.
+Never manufacture cost variants by post-processing one retained trade file.
+The runner executes scenarios sequentially and performs declared analysis only
+after every scenario has produced its bound result, trades, and daily
+artifacts. Historical H1 rows remain readable, but a fresh launch has no
+argv-only or single-spec fallback.
+
 ## Scientific proof boundary
 
 Trusted receipts, ledgers, panel sessions, and evaluator bounds are immutable

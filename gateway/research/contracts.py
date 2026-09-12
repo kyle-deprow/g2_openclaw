@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import asdict, dataclass
 from enum import StrEnum
-from typing import Self
+from pathlib import Path
+from typing import Self, cast
 
 from .codec import (
     require_enum,
@@ -69,6 +71,15 @@ _H = re.compile(r"^H\d{4}$")
 _A = re.compile(r"^H\d{4}-A\d{3}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40,64}$")
 _VERDICTS = {"PASS", "FAIL"}
+_SPEC_ID = re.compile(r"^c\d{3}$")
+_SCENARIO_ID = re.compile(r"^s\d{3}$")
+_DOTTED_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+_SECRET_HINT = re.compile(r"(?i)(?:api[_-]?key|password|secret|token)")
+_MAX_SCENARIOS = 16
+_MAX_RUN_SECONDS = 7200.0
+_MAX_ANALYSIS_ARGS = 32
+_MAX_ANALYSIS_ARTIFACTS = 16
+_MAX_ANALYSIS_BYTES = 16 * 1024 * 1024
 
 
 def _check_id(value: str, pattern: re.Pattern[str], name: str) -> str:
@@ -93,6 +104,315 @@ def _json_dict(value: object, name: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError(f"{name} must be an object")
     return value
+
+
+def _absolute_regular_path(value: object, name: str) -> str:
+    path = require_str(value, name)
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        raise ValueError(f"{name} must be absolute")
+    if candidate.is_symlink() or not candidate.is_file():
+        raise ValueError(f"{name} must be a regular non-symlink file")
+    return path
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationSpecEntry:
+    """One immutable evaluator-spec file bound into a hypothesis spec set."""
+
+    spec_id: str
+    path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if _SPEC_ID.fullmatch(self.spec_id) is None:
+            raise ValueError("spec_id must match cNNN")
+        object.__setattr__(self, "path", _absolute_regular_path(self.path, "spec path"))
+        require_sha256(self.sha256, "spec sha256")
+
+    def to_json_value(self) -> dict[str, object]:
+        return {"path": self.path, "sha256": self.sha256, "spec_id": self.spec_id}
+
+    @classmethod
+    def from_json_value(cls, value: object) -> Self:
+        raw = _json_dict(value, "evaluation spec entry")
+        data = require_keys_exact(raw, {"spec_id", "path", "sha256"}, "evaluation spec entry")
+        return cls(**data)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationSpecSet:
+    """Immutable, contiguous set of true evaluator specifications."""
+
+    contract: str
+    hypothesis_id: str
+    primary_spec_id: str
+    specs: tuple[EvaluationSpecEntry, ...]
+    created_at: str
+
+    def __post_init__(self) -> None:
+        if self.contract != "research-evaluation-spec-set-v1":
+            raise ValueError("unsupported evaluation spec set contract")
+        _check_id(self.hypothesis_id, _H, "hypothesis_id")
+        if not isinstance(self.specs, tuple) or not self.specs:
+            raise ValueError("specs must be a non-empty tuple")
+        if len(self.specs) > _MAX_SCENARIOS:
+            raise ValueError("evaluation spec set may contain at most 16 specs")
+        if any(not isinstance(item, EvaluationSpecEntry) for item in self.specs):
+            raise ValueError("specs must contain EvaluationSpecEntry values")
+        expected = tuple(f"c{index:03d}" for index in range(len(self.specs)))
+        actual = tuple(item.spec_id for item in self.specs)
+        if actual != expected:
+            raise ValueError("spec ids must be contiguous and ordered from c000")
+        if self.primary_spec_id not in actual:
+            raise ValueError("primary_spec_id must name a spec entry")
+        if len({item.sha256 for item in self.specs}) != len(self.specs):
+            raise ValueError("evaluation spec digests must be unique")
+        require_utc_iso(self.created_at, "created_at")
+
+    def to_json(self) -> str:
+        return to_json(
+            {
+                "contract": self.contract,
+                "created_at": self.created_at,
+                "hypothesis_id": self.hypothesis_id,
+                "primary_spec_id": self.primary_spec_id,
+                "specs": [item.to_json_value() for item in self.specs],
+            }
+        )
+
+    @classmethod
+    def from_json(cls, value: str) -> Self:
+        raw = _json_dict(json.loads(value), "evaluation spec set")
+        data = require_keys_exact(
+            raw,
+            {"contract", "hypothesis_id", "primary_spec_id", "specs", "created_at"},
+            "evaluation spec set",
+        )
+        entries = data["specs"]
+        if not isinstance(entries, list):
+            raise ValueError("specs must be an array")
+        data["specs"] = tuple(EvaluationSpecEntry.from_json_value(item) for item in entries)
+        return cls(**data)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class RunScenario:
+    """One sequential target/evaluator scenario in a reviewed run plan."""
+
+    scenario_id: str
+    targets_argv: tuple[str, ...]
+    spec_id: str
+    evaluation_spec_sha256: str
+    targets_sha256_expected: None = None
+
+    def __post_init__(self) -> None:
+        if _SCENARIO_ID.fullmatch(self.scenario_id) is None:
+            raise ValueError("scenario_id must match sNNN")
+        if (
+            not isinstance(self.targets_argv, tuple)
+            or not self.targets_argv
+            or any(not isinstance(item, str) or not item for item in self.targets_argv)
+        ):
+            raise ValueError("targets_argv must contain non-empty strings")
+        if _SPEC_ID.fullmatch(self.spec_id) is None:
+            raise ValueError("spec_id must match cNNN")
+        require_sha256(self.evaluation_spec_sha256, "evaluation_spec_sha256")
+        if self.targets_sha256_expected is not None:
+            raise ValueError("targets_sha256_expected must be null")
+
+    def to_json_value(self) -> dict[str, object]:
+        return {
+            "evaluation_spec_sha256": self.evaluation_spec_sha256,
+            "scenario_id": self.scenario_id,
+            "spec_id": self.spec_id,
+            "targets_argv": list(self.targets_argv),
+            "targets_sha256_expected": self.targets_sha256_expected,
+        }
+
+    @classmethod
+    def from_json_value(cls, value: object) -> Self:
+        raw = _json_dict(value, "run scenario")
+        data = require_keys_exact(
+            raw,
+            {
+                "scenario_id",
+                "targets_argv",
+                "spec_id",
+                "evaluation_spec_sha256",
+                "targets_sha256_expected",
+            },
+            "run scenario",
+        )
+        argv = data["targets_argv"]
+        if not isinstance(argv, list):
+            raise ValueError("scenario targets_argv must be an array")
+        data["targets_argv"] = tuple(argv)
+        return cls(**data)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisPlan:
+    """Fixed read-only analysis invocation and declared output manifest."""
+
+    module: str
+    args: tuple[str, ...]
+    artifacts: tuple[str, ...]
+    max_artifact_bytes: int
+
+    def __post_init__(self) -> None:
+        if _DOTTED_MODULE.fullmatch(self.module) is None:
+            raise ValueError("analysis module must be a dotted import name")
+        if not isinstance(self.args, tuple) or len(self.args) > _MAX_ANALYSIS_ARGS:
+            raise ValueError("analysis args must contain at most 32 tokens")
+        for token in self.args:
+            if not isinstance(token, str) or not token or token.startswith("-"):
+                raise ValueError("analysis args must be plain non-flag tokens")
+            if Path(token).is_absolute() or _SECRET_HINT.search(token):
+                raise ValueError("analysis args may not contain absolute paths or secret hints")
+        if not isinstance(self.artifacts, tuple) or not (
+            1 <= len(self.artifacts) <= _MAX_ANALYSIS_ARTIFACTS
+        ):
+            raise ValueError("analysis artifacts must contain 1..16 paths")
+        if tuple(sorted(self.artifacts)) != self.artifacts or len(set(self.artifacts)) != len(
+            self.artifacts
+        ):
+            raise ValueError("analysis artifacts must be sorted and unique")
+        for artifact in self.artifacts:
+            path = Path(artifact)
+            if (
+                path.is_absolute()
+                or not artifact.startswith("analysis/")
+                or path.name == "analysis"
+                or any(part in {"", ".", ".."} for part in path.parts)
+            ):
+                raise ValueError("analysis artifacts must be safe relative paths under analysis/")
+        if type(self.max_artifact_bytes) is not int or not (
+            1 <= self.max_artifact_bytes <= _MAX_ANALYSIS_BYTES
+        ):
+            raise ValueError("max_artifact_bytes exceeds the 16 MiB limit")
+
+    def to_json_value(self) -> dict[str, object]:
+        return {
+            "args": list(self.args),
+            "artifacts": list(self.artifacts),
+            "max_artifact_bytes": self.max_artifact_bytes,
+            "module": self.module,
+        }
+
+    @classmethod
+    def from_json_value(cls, value: object) -> Self:
+        raw = _json_dict(value, "analysis")
+        data = require_keys_exact(
+            raw, {"module", "args", "artifacts", "max_artifact_bytes"}, "analysis"
+        )
+        for key in ("args", "artifacts"):
+            values = data[key]
+            if not isinstance(values, list):
+                raise ValueError(f"analysis {key} must be an array")
+            data[key] = tuple(cast(list[object], values))
+        return cls(**data)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class RunPlan:
+    """Strict reviewed sequential execution plan for one attempt."""
+
+    contract: str
+    attempt_id: str
+    commit: str
+    implementation_sha256: str
+    evaluation_spec_set_sha256: str
+    primary_scenario_id: str
+    scenarios: tuple[RunScenario, ...]
+    analysis: AnalysisPlan
+    scenario_timeout_seconds: float
+    analysis_timeout_seconds: float
+
+    def __post_init__(self) -> None:
+        if self.contract != "research-run-plan-v1":
+            raise ValueError("unsupported run plan contract")
+        _check_id(self.attempt_id, _A, "attempt_id")
+        _check_commit(self.commit, "commit")
+        require_sha256(self.implementation_sha256, "implementation_sha256")
+        require_sha256(self.evaluation_spec_set_sha256, "evaluation_spec_set_sha256")
+        if not isinstance(self.scenarios, tuple) or not (
+            1 <= len(self.scenarios) <= _MAX_SCENARIOS
+        ):
+            raise ValueError("run plan scenarios must contain 1..16 entries")
+        if any(not isinstance(item, RunScenario) for item in self.scenarios):
+            raise ValueError("scenarios must contain RunScenario values")
+        expected = tuple(f"s{index:03d}" for index in range(len(self.scenarios)))
+        if tuple(item.scenario_id for item in self.scenarios) != expected:
+            raise ValueError("scenario ids must be contiguous and ordered from s000")
+        if self.primary_scenario_id not in expected:
+            raise ValueError("primary_scenario_id must name a scenario")
+        for value, name in (
+            (self.scenario_timeout_seconds, "scenario_timeout_seconds"),
+            (self.analysis_timeout_seconds, "analysis_timeout_seconds"),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value <= 0
+            ):
+                raise ValueError(f"{name} must be a positive finite number")
+            if value > _MAX_RUN_SECONDS:
+                raise ValueError(f"{name} exceeds the 7200 second limit")
+        if (
+            self.scenario_timeout_seconds * len(self.scenarios) + self.analysis_timeout_seconds
+            > _MAX_RUN_SECONDS
+        ):
+            raise ValueError("run plan stage timeouts exceed the 7200 second aggregate limit")
+
+    def to_json(self) -> str:
+        return to_json(
+            {
+                "analysis": self.analysis.to_json_value(),
+                "attempt_id": self.attempt_id,
+                "commit": self.commit,
+                "contract": self.contract,
+                "evaluation_spec_set_sha256": self.evaluation_spec_set_sha256,
+                "implementation_sha256": self.implementation_sha256,
+                "primary_scenario_id": self.primary_scenario_id,
+                "scenario_timeout_seconds": self.scenario_timeout_seconds,
+                "scenarios": [item.to_json_value() for item in self.scenarios],
+                "analysis_timeout_seconds": self.analysis_timeout_seconds,
+            }
+        )
+
+    @classmethod
+    def from_json(cls, value: str) -> Self:
+        raw = _json_dict(json.loads(value), "run plan")
+        data = require_keys_exact(
+            raw,
+            {
+                "contract",
+                "attempt_id",
+                "commit",
+                "implementation_sha256",
+                "evaluation_spec_set_sha256",
+                "primary_scenario_id",
+                "scenarios",
+                "analysis",
+                "scenario_timeout_seconds",
+                "analysis_timeout_seconds",
+            },
+            "run plan",
+        )
+        scenarios = data["scenarios"]
+        if not isinstance(scenarios, list):
+            raise ValueError("scenarios must be an array")
+        data["scenarios"] = tuple(RunScenario.from_json_value(item) for item in scenarios)
+        data["analysis"] = AnalysisPlan.from_json_value(data["analysis"])
+        return cls(**data)  # type: ignore[arg-type]
+
+
+# Short names used by the admission and worker layers.  Keep the descriptive
+# wire-record names above as the canonical public API.
+SpecEntry = EvaluationSpecEntry
+Scenario = RunScenario
 
 
 @dataclass(frozen=True, slots=True)

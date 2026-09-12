@@ -10,7 +10,14 @@ import sys
 from pathlib import Path
 
 import pytest
-from gateway.research.contracts import Attempt, HypothesisSpec, ImplementationRecord, ReviewEvidence
+from gateway.research.contracts import (
+    Attempt,
+    EvaluationSpecEntry,
+    EvaluationSpecSet,
+    HypothesisSpec,
+    ImplementationRecord,
+    ReviewEvidence,
+)
 from gateway.research.store import ResearchStore
 
 
@@ -43,6 +50,21 @@ def campaign(
     panel.write_text("panel", encoding="utf-8")
     receipt.write_text("receipt", encoding="utf-8")
     eval_spec.write_text("eval", encoding="utf-8")
+    evaluation_spec_set = tmp_path / "evaluation-spec-set.json"
+    evaluation_spec_set.write_text(
+        EvaluationSpecSet(
+            "research-evaluation-spec-set-v1",
+            "H0001",
+            "c000",
+            (
+                EvaluationSpecEntry(
+                    "c000", str(eval_spec), hashlib.sha256(eval_spec.read_bytes()).hexdigest()
+                ),
+            ),
+            "2026-01-01T00:00:00Z",
+        ).to_json(),
+        encoding="utf-8",
+    )
     snapshot = tmp_path / "snapshot"
     (snapshot / "src" / "quantipy").mkdir(parents=True)
     (snapshot / "src" / "quantipy" / "__init__.py").write_text("VERSION = 'v2'\n")
@@ -85,7 +107,14 @@ def campaign(
     store.configure(venv / "bin" / "python", evaluator, snapshot, universe)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     hypothesis = store.create_hypothesis(
-        "fixture", spec, panel, receipt, eval_spec, commit, dividends=dividends
+        "fixture",
+        spec,
+        panel,
+        receipt,
+        eval_spec,
+        commit,
+        dividends=dividends,
+        evaluation_spec_set=evaluation_spec_set,
     )
     source.chmod(0o555)
     return store, source, hypothesis
@@ -124,29 +153,32 @@ def review(
 
 def verified_review(store: ResearchStore, record: ReviewEvidence) -> Attempt:
     """Test fixture helper for the host-verified review path."""
-    import json
-
-    payload = json.dumps(
-        {
-            "task_id": "fixture-task",
-            "task_status": "succeeded",
-            "task_started_at": 1,
-            "task_ended_at": 2,
-            "acp_session_uuid": record.acp_session_id,
-            "transcript_path": "",
-            "transcript_sha256": "",
-            "assistant_events": 1,
-            "models_seen": ["claude-opus-5"],
-            "efforts_seen": ["high"],
-            "verdict_json": record.to_json(),
-            "bound_commit": record.commit,
-            "bound_spec_sha256": record.spec_sha256,
-            "collected_at": record.submitted_at,
-            "verdict": record.verdict,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
+    host_payload = {
+        "task_id": "fixture-task",
+        "task_status": "succeeded",
+        "task_started_at": 1,
+        "task_ended_at": 2,
+        "acp_session_uuid": record.acp_session_id,
+        "transcript_path": "",
+        "transcript_sha256": "",
+        "assistant_events": 1,
+        "models_seen": ["claude-opus-5"],
+        "efforts_seen": ["high"],
+        "verdict_json": record.to_json(),
+        "bound_commit": record.commit,
+        "bound_spec_sha256": record.spec_sha256,
+        "collected_at": record.submitted_at,
+        "verdict": record.verdict,
+    }
+    try:
+        run_plan_payload = store.evidence(record.attempt_id, "run_plan")
+    except ValueError:
+        run_plan_payload = None
+    if run_plan_payload is not None:
+        host_payload["bound_run_plan_sha256"] = hashlib.sha256(
+            run_plan_payload.encode()
+        ).hexdigest()
+    payload = json.dumps(host_payload, sort_keys=True, separators=(",", ":"))
     try:
         existing = store.evidence(record.attempt_id, "review")
     except ValueError:

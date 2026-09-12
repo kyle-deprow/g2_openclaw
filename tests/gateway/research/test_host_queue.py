@@ -6,6 +6,7 @@ import math
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -14,12 +15,17 @@ import pytest
 from gateway.cli import app
 from gateway.research import cli as research_cli
 from gateway.research.contracts import (
+    AnalysisPlan,
     Attempt,
     AttemptDecision,
     AttemptState,
+    EvaluationSpecEntry,
+    EvaluationSpecSet,
     HypothesisDecision,
     ImplementationRecord,
     JobState,
+    RunPlan,
+    RunScenario,
 )
 from gateway.research.jobs import JobError, JobRecord
 from gateway.research.store import ResearchStore, StoreConflict
@@ -29,24 +35,31 @@ from tests.gateway.research.conftest import review, verified_review
 from tests.gateway.research.test_readiness import configure_real_readiness
 
 
-def _ready(store: ResearchStore, source: Path, hypothesis: Any) -> Attempt:
+def _ready(
+    store: ResearchStore,
+    source: Path,
+    hypothesis: Any,
+    *,
+    run_plan_factory: Callable[[Attempt, ImplementationRecord], RunPlan] | None = None,
+) -> Attempt:
     if store.get_hypothesis(hypothesis.hypothesis_id).state.value == "DRAFT":
         store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    store.submit_implementation(
+    implementation_record = ImplementationRecord(
         attempt.attempt_id,
-        ImplementationRecord(
-            attempt.attempt_id,
-            commit,
-            (sys.executable, "-m", "fixture_target"),
-            "/tmp/evidence.json",
-            "reported-coder",
-            "high",
-            "standard",
-            "2026-01-01T00:00:00Z",
-        ),
+        commit,
+        (sys.executable, "-m", "fixture_target"),
+        "/tmp/evidence.json",
+        "reported-coder",
+        "high",
+        "standard",
+        "2026-01-01T00:00:00Z",
     )
+    run_plan = (
+        run_plan_factory(attempt, implementation_record) if run_plan_factory is not None else None
+    )
+    store.submit_implementation(attempt.attempt_id, implementation_record, run_plan=run_plan)
     verified_review(store, review(attempt.attempt_id, commit, hypothesis.spec_sha256))
     return store.get_attempt(attempt.attempt_id)
 
@@ -376,16 +389,59 @@ def test_three_attempt_retry_and_second_hypothesis_queue_lifecycle(
     store.decide_hypothesis(hypothesis.hypothesis_id, HypothesisDecision.FINISHED, "three attempts")
     spec_file = store.root / "second-spec.json"
     spec_file.write_text('{"second":true}', encoding="utf-8")
+    second_eval = Path(hypothesis.evaluation_spec_path)
+    second_set = store.root / "second-evaluation-spec-set.json"
+    second_set.write_text(
+        EvaluationSpecSet(
+            "research-evaluation-spec-set-v1",
+            "H0002",
+            "c000",
+            (
+                EvaluationSpecEntry(
+                    "c000",
+                    str(second_eval),
+                    hashlib.sha256(second_eval.read_bytes()).hexdigest(),
+                ),
+            ),
+            "2026-01-01T00:00:00Z",
+        ).to_json(),
+        encoding="utf-8",
+    )
     second = store.create_hypothesis(
         "second",
         spec_file,
         Path(hypothesis.panel_path),
         Path(hypothesis.receipt_path),
-        Path(hypothesis.evaluation_spec_path),
+        second_eval,
         hypothesis.base_commit,
         dividends=Path(hypothesis.dividends_path),
+        evaluation_spec_set=second_set,
     )
-    attempt = _ready(store, source, second)
+
+    def second_run_plan(attempt: Attempt, implementation: ImplementationRecord) -> RunPlan:
+        return RunPlan(
+            "research-run-plan-v1",
+            attempt.attempt_id,
+            implementation.commit,
+            hashlib.sha256(implementation.to_json().encode()).hexdigest(),
+            hashlib.sha256(
+                store.evaluation_spec_set(second.hypothesis_id).to_json().encode()
+            ).hexdigest(),
+            "s000",
+            (
+                RunScenario(
+                    "s000",
+                    implementation.targets_argv,
+                    "c000",
+                    hashlib.sha256(second_eval.read_bytes()).hexdigest(),
+                ),
+            ),
+            AnalysisPlan("fixture.analysis", (), ("analysis/result.json",), 1024),
+            30,
+            30,
+        )
+
+    attempt = _ready(store, source, second, run_plan_factory=second_run_plan)
     queued = _queue(store, attempt.attempt_id, job_id="job-second")
     assert queued.state == AttemptState.RUN_QUEUED
     assert len(store.attempts_for(hypothesis.hypothesis_id)) == 3

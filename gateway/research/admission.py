@@ -138,6 +138,11 @@ class EvaluatorBounds:
     max_holding_sessions: int
     earnings_coverage: EarningsCoverage
     panel_sessions: tuple[str, ...]
+    holding_exit_at: str = "session_close"
+    execution_decision_at: str = "regular_close"
+    execution_fill_at: str = "next_regular_open"
+    max_gross_exposure: float = 1.0
+    long_only: bool = True
 
     def __post_init__(self) -> None:
         panel_start = _date(self.panel_start, "evaluator.panel_start")
@@ -166,6 +171,22 @@ class EvaluatorBounds:
         if sessions[0] != panel_start or sessions[-1] != panel_end:
             raise ValueError("evaluator.panel_sessions must span the panel bounds")
         object.__setattr__(self, "panel_sessions", sessions)
+        if not isinstance(self.holding_exit_at, str) or not self.holding_exit_at:
+            raise ValueError("evaluator.holding_exit_at must be non-empty")
+        if not isinstance(self.execution_decision_at, str) or not self.execution_decision_at:
+            raise ValueError("evaluator.execution_decision_at must be non-empty")
+        if not isinstance(self.execution_fill_at, str) or not self.execution_fill_at:
+            raise ValueError("evaluator.execution_fill_at must be non-empty")
+        if (
+            isinstance(self.max_gross_exposure, bool)
+            or not isinstance(self.max_gross_exposure, (int, float))
+            or not math.isfinite(float(self.max_gross_exposure))
+            or self.max_gross_exposure <= 0
+            or self.max_gross_exposure > 1
+        ):
+            raise ValueError("evaluator.max_gross_exposure must be in (0, 1]")
+        if not isinstance(self.long_only, bool):
+            raise ValueError("evaluator.long_only must be boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -497,6 +518,7 @@ class AdmissionDecision:
     overlap_classification: OverlapClassification
     execution_capability: ExecutionCapability
     campaign_policy: CampaignPolicy
+    evaluation_spec_set_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.admitted, bool):
@@ -524,6 +546,8 @@ class AdmissionDecision:
         _positive_int(self.max_attempts, "decision.max_attempts")
         if self.exposure_ledger_sha256 is not None:
             _sha(self.exposure_ledger_sha256, "decision.exposure_ledger_sha256")
+        if self.evaluation_spec_set_sha256 is not None:
+            _sha(self.evaluation_spec_set_sha256, "decision.evaluation_spec_set_sha256")
         if not isinstance(self.overlap_classification, OverlapClassification):
             raise ValueError("decision.overlap_classification must be OverlapClassification")
         if not isinstance(self.execution_capability, ExecutionCapability):
@@ -574,7 +598,7 @@ class AdmissionDecision:
             "verdict": self.receipt.verdict,
             "market_hours": self.receipt.market_hours,
         }
-        return {
+        payload = {
             "admitted": self.admitted,
             "campaign_policy": {
                 "attempt_cap": self.campaign_policy.attempt_cap,
@@ -597,6 +621,9 @@ class AdmissionDecision:
             "receipt_sha256": self.receipt_sha256,
             "spec_sha256": self.spec_sha256,
         }
+        if self.evaluation_spec_set_sha256 is not None:
+            payload["evaluation_spec_set_sha256"] = self.evaluation_spec_set_sha256
+        return payload
 
     def to_json(self) -> str:
         return to_json(self.mapping())
@@ -619,6 +646,7 @@ def _decision(
     overlap: OverlapClassification,
     capability: ExecutionCapability,
     policy: CampaignPolicy,
+    evaluation_spec_set_sha256: str | None = None,
 ) -> AdmissionDecision:
     ledger_digest: str | None = None
     if isinstance(ledger, ExposureLedger):
@@ -646,6 +674,7 @@ def _decision(
         overlap_classification=overlap,
         execution_capability=capability,
         campaign_policy=policy,
+        evaluation_spec_set_sha256=evaluation_spec_set_sha256,
     )
 
 
@@ -697,6 +726,7 @@ def admit_hypothesis(
     evaluator_bounds: EvaluatorBounds,
     campaign_policy: CampaignPolicy,
     execution_capability: ExecutionCapability,
+    evaluation_spec_set_sha256: str | None = None,
 ) -> AdmissionDecision:
     """Return a fail-closed, canonical admission decision.
 
@@ -727,6 +757,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if hypothesis.sha256 != hypothesis_spec.spec_sha256:
         reason = AdmissionReason.SPEC_DIGEST_MISMATCH
@@ -743,6 +774,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if receipt.panel_sha256 != hypothesis_spec.panel_sha256:
         reason = AdmissionReason.PANEL_DIGEST_MISMATCH
@@ -759,6 +791,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if receipt.receipt_sha256 != hypothesis_spec.receipt_sha256:
         reason = AdmissionReason.RECEIPT_DIGEST_MISMATCH
@@ -775,6 +808,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if (
         receipt.spec_sha256_raw is not None
@@ -794,6 +828,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if (
         receipt.spec_sha256_semantic is not None
@@ -813,6 +848,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if (
         receipt.dividends_sha256 is not None
@@ -835,6 +871,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if receipt.panel_start is not None and (
         receipt.panel_start != evaluator_bounds.panel_start
@@ -852,6 +889,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if (receipt.verdict is not None and receipt.verdict != "PASS") or receipt.reasons:
         reason = AdmissionReason.RECEIPT_REJECTED
@@ -868,6 +906,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
 
     if not isinstance(exposure_ledger, ExposureLedger) or not exposure_ledger.valid:
@@ -885,6 +924,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     overlap = _ledger_classification(exposure_ledger, hypothesis)
 
@@ -901,6 +941,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if campaign_policy.attempt_cap is None or (
         campaign_policy.attempt_cap < hypothesis_spec.max_attempts
@@ -917,6 +958,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
 
     unsupported = _unsupported_feature(hypothesis, execution_capability)
@@ -934,6 +976,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
 
     expected_tickers = tuple(item.ticker for item in evaluator_bounds.instruments)
@@ -950,6 +993,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if (
         hypothesis.analysis.start < evaluator_bounds.panel_start
@@ -969,6 +1013,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     try:
         analysis_index = evaluator_bounds.panel_sessions.index(hypothesis.analysis.start)
@@ -985,6 +1030,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if any(analysis_index < feature.lookback_sessions for feature in hypothesis.features):
         return _decision(
@@ -999,6 +1045,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if (
         hypothesis.forward_label_sessions > 5
@@ -1017,6 +1064,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if hypothesis.search_budget_evaluations < len(hypothesis.variants):
         return _decision(
@@ -1031,6 +1079,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     has_stock = any(
         item.instrument_class is InstrumentClass.STOCK for item in evaluator_bounds.instruments
@@ -1048,6 +1097,7 @@ def admit_hypothesis(
             overlap=overlap,
             capability=execution_capability,
             policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if purpose is AdmissionPurpose.FINAL_HOLDOUT:
         holdout_reason: AdmissionReason | None
@@ -1074,6 +1124,7 @@ def admit_hypothesis(
                 overlap=overlap,
                 capability=execution_capability,
                 policy=campaign_policy,
+                evaluation_spec_set_sha256=evaluation_spec_set_sha256,
             )
     return _decision(
         admitted=True,
@@ -1087,6 +1138,7 @@ def admit_hypothesis(
         overlap=overlap,
         capability=execution_capability,
         policy=campaign_policy,
+        evaluation_spec_set_sha256=evaluation_spec_set_sha256,
     )
 
 
