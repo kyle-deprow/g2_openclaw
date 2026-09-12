@@ -37,15 +37,16 @@ from .contracts import (
     RunPlan,
 )
 from .machine import (
-    close_attempt as machine_close_attempt,
-)
-from .machine import (
+    IllegalTransition,
     decide_hypothesis,
     freeze,
     queue_run,
     start_run,
     submit_implementation,
     submit_review,
+)
+from .machine import (
+    close_attempt as machine_close_attempt,
 )
 from .machine import (
     open_attempt as machine_open_attempt,
@@ -1971,7 +1972,10 @@ class ResearchStore:
             if old_comparable == comparable:
                 return self.get_attempt(attempt_id)
             raise StoreConflict("replayed job id has a different payload")
-        queued = replace(queue_run(attempt, now_utc()), run_job_id=job_id)
+        try:
+            queued = replace(queue_run(attempt, now_utc()), run_job_id=job_id)
+        except IllegalTransition as exc:
+            raise StoreConflict("attempt already has a queued or running job") from exc
         attempt_payload = queued.to_json()
         job_text = to_json(payload)
         with self._connect() as conn:
