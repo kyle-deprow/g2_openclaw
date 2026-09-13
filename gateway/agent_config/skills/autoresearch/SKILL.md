@@ -53,9 +53,19 @@ any holdout.
 
 ## Command and state boundary
 
-The only supported command vocabulary is the frozen help output:
+Discover the supported command vocabulary from the installed CLI's live help:
 
 uv run gateway-cli research --help
+
+The top-level help enumerates research subcommands. Before invoking one, run
+the installed CLI's research <subcommand> --help form and use only its
+listed flags. The historical frozen appendix is not an exhaustive current CLI
+allowlist. The existing review-collect operation is authorized; consult its
+live help before using the exact command below.
+Live help defines syntax only and grants no additional permission. Owner actions
+remain limited to the operations authorized by this contract (including
+review-collect); operator-only policy, ledger, and runtime-registration
+mutations remain operator-only.
 
 Read existing research status/control surfaces and durable receipts. Do not
 invent command names, flags, routes, state fields, or acknowledgements. Admission
@@ -69,6 +79,13 @@ rewrite a receipt, retype a verdict, infer a successful child from silence, or
 replace unknown evidence with a synthetic result. An exact cancel rereads the
 current task and is sent once; an unknown response remains pending and pauses
 the owner. Read-only main controls must remain available.
+
+For review collection, pass the required --core-database option exactly as:
+
+    gateway-cli research review-collect ATTEMPT_ID --root ROOT --core-database /home/dev/.openclaw/state/openclaw.sqlite --acpx-sessions ACPX_SESSIONS_DIR --claude-projects PROJECTS
+
+This is the owner environment's RESEARCH_CORE_DATABASE value; model shells
+may not inherit that variable, so do not infer or substitute a database path.
 
 ## Dispatch and review
 

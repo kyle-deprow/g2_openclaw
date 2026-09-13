@@ -120,6 +120,11 @@ and relative deliverable paths.
   of the final allocated attempt remains allowed even when new admission is
   exhausted.
 
+For review collection, use the required --core-database option with the
+deployed canonical path: /home/dev/.openclaw/state/openclaw.sqlite. This is the
+owner environment's RESEARCH_CORE_DATABASE value; model shells may not inherit
+that variable, so do not infer or substitute a database path.
+
 For a fresh hypothesis, author and freeze one immutable `EvaluationSpecSet`
 manifest before review. Its regular, digest-bound evaluator files must share
 the primary panel, universe, dates, horizon, and operator-policy bounds; only

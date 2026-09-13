@@ -11,13 +11,30 @@
 - Return every refusal and outcome to Astra through the owner wake. Main
   controls remain read-only.
 
-## Frozen command evidence
+## Command evidence
 
-The only command example authorized in this contract is copied verbatim from
-the frozen appendix:
+Use the installed CLI's live help to discover supported research operations.
+Start with the top-level command:
 
 `uv run gateway-cli research --help`
 
-Use that help surface as the complete command vocabulary. Do not invent flags,
-providers, routes, or command names. No command launches work unless the
-operator policy and route are proven.
+The top-level help enumerates subcommands. Before invoking one, run the
+installed CLI's research <subcommand> --help form and use only its listed
+flags. The historical frozen appendix is not an exhaustive current CLI
+allowlist. Review collection through the existing review-collect operation
+is authorized; consult its live help before using the exact invocation below.
+Live help defines syntax only and grants no additional permission. Owner actions
+remain limited to the operations authorized by this contract (including
+review-collect); operator-only policy, ledger, and runtime-registration
+mutations remain operator-only.
+Do not invent flags, providers, routes, or command names. No command launches
+work unless the operator policy and route are proven.
+
+When collecting review evidence, use the required --core-database option with
+/home/dev/.openclaw/state/openclaw.sqlite:
+
+    gateway-cli research review-collect ATTEMPT_ID --root ROOT --core-database /home/dev/.openclaw/state/openclaw.sqlite --acpx-sessions ACPX_SESSIONS_DIR --claude-projects PROJECTS
+
+That path is the owner environment's RESEARCH_CORE_DATABASE value; model
+shells may not inherit the variable, so do not infer or substitute a database
+path.
