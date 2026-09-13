@@ -120,10 +120,21 @@ and relative deliverable paths.
   of the final allocated attempt remains allowed even when new admission is
   exhausted.
 
-For review collection, use the required --core-database option with the
-deployed canonical path: /home/dev/.openclaw/state/openclaw.sqlite. This is the
-owner environment's RESEARCH_CORE_DATABASE value; model shells may not inherit
-that variable, so do not infer or substitute a database path.
+For review collection, use the deployed canonical paths:
+`--core-database /home/dev/.openclaw/state/openclaw.sqlite`,
+`--acpx-sessions /home/dev/.openclaw/workspace/state/sessions`, and
+`--claude-projects /home/dev/.claude/projects`. These are verified local paths,
+not portable upstream defaults; model shells may not inherit them, so do not
+infer or substitute paths, search arbitrary records, or repair a verdict. If
+correlation remains unavailable, preserve the refusal.
+
+The analysis stage uses `--scenarios /scenarios --inputs /inputs --out /stage/analysis`;
+cost specs are at
+`/inputs/evaluation-specs/{spec_id}.json`, not `/evaluation-specs`. The
+canonical EvaluationSpecSet and RunPlan are host-attested control evidence,
+not automatically mounted analysis inputs: do not invent mounts or arguments
+or leak host paths. Frozen future specs, RunPlans, synthetic fixtures, and
+reviewed analysis must agree with this container contract.
 
 For a fresh hypothesis, author and freeze one immutable `EvaluationSpecSet`
 manifest before review. Its regular, digest-bound evaluator files must share

@@ -22,6 +22,18 @@ or proof that a current-price ETF feed is installed.
   bundle are immutable.
 - The ACK binds the exact child task, run, mode, attempt, commit, and spec
   digest. Never retype a verdict or respawn after an unknown acknowledgement.
+- Review collection uses the verified local paths
+  `--core-database /home/dev/.openclaw/state/openclaw.sqlite`,
+  `--acpx-sessions /home/dev/.openclaw/workspace/state/sessions`, and
+  `--claude-projects /home/dev/.claude/projects`; do not infer alternatives,
+  search arbitrary records, or repair a verdict. Preserve refusal if correlation
+  remains unavailable.
+- Analysis uses `--scenarios /scenarios --inputs /inputs --out /stage/analysis`;
+  cost specs are `/inputs/evaluation-specs/{spec_id}.json`, not
+  `/evaluation-specs`. The canonical EvaluationSpecSet and RunPlan are
+  host-attested control evidence, not automatically mounted analysis inputs;
+  do not invent mounts/args or leak host paths. Frozen future specs, RunPlans,
+  synthetic fixtures, and reviewed analysis must agree with this contract.
 - Read existing research status/control surfaces only. Preserve typed admission
   refusals, policy-unset pause, exhausted-attempt completion, exact cancel,
   owner wake, and read-only main controls.

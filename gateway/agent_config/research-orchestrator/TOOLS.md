@@ -33,8 +33,10 @@ work unless the operator policy and route are proven.
 When collecting review evidence, use the required --core-database option with
 /home/dev/.openclaw/state/openclaw.sqlite:
 
-    gateway-cli research review-collect ATTEMPT_ID --root ROOT --core-database /home/dev/.openclaw/state/openclaw.sqlite --acpx-sessions ACPX_SESSIONS_DIR --claude-projects PROJECTS
+    gateway-cli research review-collect ATTEMPT_ID --root ROOT --core-database /home/dev/.openclaw/state/openclaw.sqlite --acpx-sessions /home/dev/.openclaw/workspace/state/sessions --claude-projects /home/dev/.claude/projects
 
 That path is the owner environment's RESEARCH_CORE_DATABASE value; model
-shells may not inherit the variable, so do not infer or substitute a database
-path.
+shells may not inherit the variable, so do not infer or substitute a database,
+ACPX sessions, or Claude projects path. These are verified local paths, not
+portable upstream defaults; if correlation remains unavailable, preserve the
+refusal and never search arbitrary records or repair a verdict.
