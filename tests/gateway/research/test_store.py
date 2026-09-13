@@ -9,15 +9,202 @@ from pathlib import Path
 
 import pytest
 from gateway.research.contracts import (
+    Attempt,
     AttemptDecision,
     AttemptState,
     EvaluationSpecEntry,
     EvaluationSpecSet,
     HypothesisSpec,
+    ImplementationRecord,
 )
 from gateway.research.store import OwnerLockHeld, ResearchStore, StoreConflict
 
 from tests.gateway.research.conftest import implementation, review, run_plan, verified_review
+
+
+def _implemented_attempt(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> tuple[ResearchStore, Path, HypothesisSpec, Attempt, ImplementationRecord]:
+    store, source, hypothesis = campaign
+    store.freeze(hypothesis.hypothesis_id)
+    attempt = store.open_attempt(hypothesis.hypothesis_id, source)
+    record = implementation(attempt.attempt_id, "a" * 40)
+    attempt = store.submit_implementation(
+        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
+    )
+    return store, source, hypothesis, attempt, record
+
+
+def _insert_raw_evidence(store: ResearchStore, attempt_id: str, kind: str) -> None:
+    payload = json.dumps({"kind": kind}, sort_keys=True, separators=(",", ":"))
+    with store._connect() as conn:
+        conn.execute(
+            "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+            (attempt_id, kind, payload, hashlib.sha256(payload.encode()).hexdigest()),
+        )
+        conn.commit()
+
+
+def test_pre_review_retry_closes_implemented_and_preserves_evidence(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, source, hypothesis, attempt, record = _implemented_attempt(campaign)
+    implementation_payload = store.evidence(attempt.attempt_id, "implementation")
+    run_plan_payload = store.evidence(attempt.attempt_id, "run_plan")
+    before = store.get_attempt(attempt.attempt_id)
+
+    closed = store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "bundle too large")
+
+    assert closed.state == AttemptState.CLOSED
+    assert closed.decision == AttemptDecision.RETRY.value
+    assert closed.decision_reason == "bundle too large"
+    assert closed.commit == before.commit == record.commit
+    assert closed.implementation_sha256 == before.implementation_sha256
+    assert closed.run_job_id is None
+    assert closed.run_outcome is None
+    assert store.evidence(attempt.attempt_id, "implementation") == implementation_payload
+    assert store.evidence(attempt.attempt_id, "run_plan") == run_plan_payload
+    attempt_events = [event for event in store.events() if event.attempt_id == attempt.attempt_id]
+    assert attempt_events[-1].kind == "attempt_closed"
+    assert attempt_events[-1].actor == "astra"
+    assert json.loads(attempt_events[-1].detail) == {
+        "decision": "RETRY",
+        "reason": "bundle too large",
+    }
+
+    reopened = store.open_attempt(hypothesis.hypothesis_id, source)
+
+    assert reopened.number == attempt.number + 1
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ("review_reservation", "review_ack", "review", "review_host_evidence", "review_cancel"),
+)
+def test_pre_review_retry_refuses_review_lifecycle_evidence(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], kind: str
+) -> None:
+    store, _source, _hypothesis, attempt, _record = _implemented_attempt(campaign)
+    if kind in {"review_reservation", "review_ack", "review_cancel"}:
+        payload = json.dumps({"kind": kind})
+        store.insert_review_evidence(attempt.attempt_id, kind, payload, "review_test")
+    else:
+        _insert_raw_evidence(store, attempt.attempt_id, kind)
+
+    with pytest.raises(StoreConflict):
+        store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
+
+    assert store.get_attempt(attempt.attempt_id).state == AttemptState.IMPLEMENTED
+
+
+@pytest.mark.parametrize("blocker", ("run_job_id", "job_row"))
+def test_pre_review_retry_refuses_existing_run_binding(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], blocker: str
+) -> None:
+    store, _source, _hypothesis, attempt, _record = _implemented_attempt(campaign)
+    if blocker == "run_job_id":
+        store.set_state(replace(attempt, run_job_id="job-existing"), event="test_run_bound")
+    else:
+        store.save_job("job-existing", attempt.attempt_id, "CANCELLED", {"state": "CANCELLED"})
+
+    with pytest.raises(StoreConflict):
+        store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
+
+    assert store.get_attempt(attempt.attempt_id).state == AttemptState.IMPLEMENTED
+
+
+def test_pre_review_retry_refuses_dispatch_indicating_review_event(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, _hypothesis, attempt, _record = _implemented_attempt(campaign)
+    store.record_review_event(
+        attempt.attempt_id, "review_dispatch_requested", {"task_id": "unknown"}
+    )
+
+    with pytest.raises(StoreConflict):
+        store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
+
+    assert store.get_attempt(attempt.attempt_id).state == AttemptState.IMPLEMENTED
+
+
+def test_reservation_wins_against_pre_review_retry_close(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, _hypothesis, attempt, _record = _implemented_attempt(campaign)
+    payload = '{"reservation":true}'
+
+    store.insert_review_evidence(
+        attempt.attempt_id, "review_reservation", payload, "review_reserved"
+    )
+
+    with pytest.raises(StoreConflict):
+        store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
+
+    assert store.get_attempt(attempt.attempt_id).state == AttemptState.IMPLEMENTED
+
+
+def test_close_wins_against_new_review_reservation(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, _hypothesis, attempt, _record = _implemented_attempt(campaign)
+    payload = '{"reservation":true}'
+    store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
+
+    with pytest.raises(StoreConflict):
+        store.insert_review_evidence(
+            attempt.attempt_id, "review_reservation", payload, "review_reserved"
+        )
+
+    assert store.get_attempt(attempt.attempt_id).state == AttemptState.CLOSED
+
+
+def test_existing_review_payload_replay_repairs_projection_after_closed_transition(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, _hypothesis, attempt, _record = _implemented_attempt(campaign)
+    payload = '{"reservation":true}'
+    store.insert_review_evidence(
+        attempt.attempt_id, "review_reservation", payload, "review_reserved"
+    )
+    projection = (
+        store.root
+        / "hypotheses"
+        / attempt.hypothesis_id
+        / "attempts"
+        / attempt.attempt_id
+        / "review_reservation.json"
+    )
+    projection.unlink()
+    store.set_state(
+        replace(
+            attempt,
+            state=AttemptState.CLOSED,
+            decision=AttemptDecision.RETRY.value,
+            decision_reason="later",
+        ),
+        event="test_closed",
+    )
+
+    store.insert_review_evidence(
+        attempt.attempt_id, "review_reservation", payload, "review_reserved"
+    )
+
+    assert projection.is_file()
+
+
+def test_new_review_reservation_after_closed_attempt_is_refused(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, _hypothesis, attempt, _record = _implemented_attempt(campaign)
+    store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
+
+    with pytest.raises(StoreConflict):
+        store.insert_review_evidence(
+            attempt.attempt_id,
+            "review_reservation",
+            '{"reservation":true}',
+            "review_reserved",
+        )
 
 
 def test_store_evidence_is_idempotent_and_repairs_projection(

@@ -1025,6 +1025,16 @@ class ResearchStore:
                 # repaired by an idempotent retry.
                 self._repair_evidence_projection(attempt, kind, payload)
                 return
+            current_row = conn.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if current_row is None:
+                raise ValueError(f"unknown attempt: {attempt_id}")
+            current = self._attempt_from_row(current_row)
+            if current.state == AttemptState.CLOSED:
+                raise StoreConflict("cannot insert review lifecycle evidence on closed attempt")
+            if kind == "review_reservation" and current.state != AttemptState.IMPLEMENTED:
+                raise StoreConflict("review reservation requires an implemented attempt")
             conn.execute(
                 "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
                 (attempt_id, kind, payload, _digest(payload)),
@@ -1408,6 +1418,75 @@ class ResearchStore:
 
     def close_attempt(self, attempt_id: str, decision: AttemptDecision, reason: str) -> Attempt:
         attempt = self.get_attempt(attempt_id)
+        if attempt.state == AttemptState.IMPLEMENTED and decision == AttemptDecision.RETRY:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"unknown attempt: {attempt_id}")
+                current = self._attempt_from_row(row)
+                if current.state != AttemptState.IMPLEMENTED:
+                    raise StoreConflict("attempt is no longer implemented")
+                if current.run_job_id is not None:
+                    raise StoreConflict("implemented attempt already has a run binding")
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM jobs WHERE attempt_id=? LIMIT 1", (attempt_id,)
+                    ).fetchone()
+                    is not None
+                ):
+                    raise StoreConflict("implemented attempt already has a job row")
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM attempt_evidence "
+                        "WHERE attempt_id=? AND (kind='review' OR kind LIKE 'review_%') LIMIT 1",
+                        (attempt_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise StoreConflict("implemented attempt already has review evidence")
+                if (
+                    conn.execute(
+                        "SELECT 1 FROM events "
+                        "WHERE attempt_id=? AND (kind='review' OR kind LIKE 'review_%') LIMIT 1",
+                        (attempt_id,),
+                    ).fetchone()
+                    is not None
+                ):
+                    raise StoreConflict("implemented attempt already has review lifecycle activity")
+                updated = machine_close_attempt(current, decision, reason, now_utc())
+                payload = updated.to_json()
+                changed = conn.execute(
+                    "UPDATE attempts SET state=?,run_job_id=?,run_outcome=?,decision=?,"
+                    "decision_reason=?,updated_at=?,payload_json=?,payload_sha256=? "
+                    "WHERE attempt_id=? AND state=?",
+                    (
+                        updated.state.value,
+                        updated.run_job_id,
+                        updated.run_outcome,
+                        updated.decision,
+                        updated.decision_reason,
+                        updated.updated_at,
+                        payload,
+                        _digest(payload),
+                        attempt_id,
+                        AttemptState.IMPLEMENTED.value,
+                    ),
+                ).rowcount
+                if changed != 1:
+                    raise StoreConflict("attempt changed before retry closure")
+                self._event(
+                    conn,
+                    current.hypothesis_id,
+                    attempt_id,
+                    "attempt_closed",
+                    {"decision": decision.value, "reason": reason},
+                    "astra",
+                )
+                conn.commit()
+            return updated
         updated = machine_close_attempt(attempt, decision, reason, now_utc())
         if decision == AttemptDecision.PAUSE:
             payload = updated.to_json()

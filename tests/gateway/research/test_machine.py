@@ -250,12 +250,17 @@ def test_machine_rejects_all_non_edge_state_calls(
         "2026-01-01T00:00:00Z",
         "2026-01-01T00:00:01Z",
     )
-    states = [opened, implemented, passed, queued, running]
     with pytest.raises(IllegalTransition):
         freeze(frozen)
-    for item in states:
+    for item in [opened, passed, queued, running]:
         with pytest.raises(IllegalTransition):
             close_attempt(item, AttemptDecision.RETRY, "no", "2026-01-01T00:00:00Z")
+    retried = close_attempt(implemented, AttemptDecision.RETRY, "retry", "2026-01-01T00:00:00Z")
+    assert retried.state == AttemptState.CLOSED
+    assert retried.decision == AttemptDecision.RETRY.value
+    for decision in [AttemptDecision.FINISH, AttemptDecision.PAUSE]:
+        with pytest.raises(IllegalTransition):
+            close_attempt(implemented, decision, "no", "2026-01-01T00:00:00Z")
     with pytest.raises(IllegalTransition):
         submit_review(
             opened,

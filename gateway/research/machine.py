@@ -166,7 +166,9 @@ def close_attempt(
 ) -> Attempt:
     if not isinstance(decision, AttemptDecision):
         raise ValueError("decision must be an AttemptDecision")
-    if attempt.state not in {
+    if not (
+        attempt.state == AttemptState.IMPLEMENTED and decision == AttemptDecision.RETRY
+    ) and attempt.state not in {
         AttemptState.REVIEW_FAILED,
         AttemptState.RUN_SUCCEEDED,
         AttemptState.RUN_FAILED,
