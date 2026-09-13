@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
+import gateway.research.review_evidence as review_evidence
 import pytest
 from gateway.cli import app
 from gateway.openclaw_client import OpenClawTransportError
@@ -202,6 +203,92 @@ def _prepare_review(
         store, attempt_id, bundle, tmp_path, status=status, verdict=verdict
     )
     return store, attempt_id, bundle, core, sessions, projects
+
+
+def test_bundle_digest_allows_root_generated_patch_above_file_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 4)
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", 8)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "diff.patch").write_bytes(b"patch!!")
+    (bundle / "instructions.md").write_bytes(b"i")
+
+    digest = review_evidence._bundle_digest(bundle)
+
+    assert len(digest) == 64
+
+
+def test_bundle_digest_rejects_root_generated_patch_over_aggregate_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 4)
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", 8)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "diff.patch").write_bytes(b"patch!!!!")
+
+    with pytest.raises(BundleError):
+        review_evidence._bundle_digest(bundle)
+
+
+def test_bundle_digest_rejects_aggregate_overflow_even_when_each_file_fits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 4)
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", 8)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "diff.patch").write_bytes(b"patch!")
+    (bundle / "instructions.md").write_bytes(b"iii")
+
+    with pytest.raises(BundleError, match="review bundle exceeds its size limit"):
+        review_evidence._bundle_digest(bundle)
+
+
+@pytest.mark.parametrize("relative", ["source/diff.patch", "nested/diff.patch"])
+def test_bundle_digest_keeps_non_root_diff_namesakes_on_file_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 4)
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", 8)
+    bundle = tmp_path / "bundle"
+    (bundle / Path(relative).parent).mkdir(parents=True)
+    (bundle / "diff.patch").write_bytes(b"p")
+    (bundle / relative).write_bytes(b"large")
+
+    with pytest.raises(BundleError):
+        review_evidence._bundle_digest(bundle)
+
+
+def test_real_bundle_build_and_revalidation_accept_generated_patch_above_file_cap(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _store, source, _hypothesis = campaign
+    source.chmod(0o755)
+    for index in range(20):
+        (source / f"generated-{index:02d}.txt").write_text("x" * 96 + "\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=source, check=True)
+    subprocess.run(["git", "commit", "-qm", "generated patch"], cwd=source, check=True)
+    source.chmod(0o555)
+
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 1024)
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", 64 * 1024)
+    store, source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    attempt = store.get_attempt(attempt_id)
+    expected_diff = subprocess.check_output(
+        ["git", "diff", "--binary", _hypothesis.base_commit, str(attempt.commit)], cwd=source
+    )
+    assert len(expected_diff) > review_evidence.MAX_BUNDLE_FILE_BYTES
+
+    reservation = reserve_review(store, attempt_id, bundle, "owner")
+    replay = reserve_review(store, attempt_id, bundle, "owner")
+
+    assert (bundle / "diff.patch").read_bytes() == expected_diff
+    assert replay.bundle_sha256 == reservation.bundle_sha256
 
 
 def test_reservation_builds_actual_read_only_bundle_and_ack_replays(

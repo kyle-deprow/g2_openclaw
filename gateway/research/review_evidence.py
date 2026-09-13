@@ -309,7 +309,8 @@ def _bundle_digest(root: Path) -> str:
         if not path.is_file():
             raise BundleError("bundle contains a symlink or non-file entry")
         _safe_source_path(relative)
-        content = _read_bounded(path, MAX_BUNDLE_FILE_BYTES, f"bundle file {relative}")
+        limit = MAX_BUNDLE_BYTES if relative == "diff.patch" else MAX_BUNDLE_FILE_BYTES
+        content = _read_bounded(path, limit, f"bundle file {relative}")
         total += len(content)
         if total > MAX_BUNDLE_BYTES:
             raise BundleError("review bundle exceeds its size limit")
