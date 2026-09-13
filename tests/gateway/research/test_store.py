@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from gateway.research.admission import AdmissionDecision
 from gateway.research.contracts import (
     Attempt,
     AttemptDecision,
@@ -17,22 +18,33 @@ from gateway.research.contracts import (
     HypothesisSpec,
     ImplementationRecord,
 )
+from gateway.research.machine import IllegalTransition
 from gateway.research.store import OwnerLockHeld, ResearchStore, StoreConflict
 
 from tests.gateway.research.conftest import implementation, review, run_plan, verified_review
+from tests.gateway.research.test_admission import _admit, _document, _payload
 
 
 def _implemented_attempt(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    *,
+    admission: AdmissionDecision | None = None,
 ) -> tuple[ResearchStore, Path, HypothesisSpec, Attempt, ImplementationRecord]:
     store, source, hypothesis = campaign
     store.freeze(hypothesis.hypothesis_id)
-    attempt = store.open_attempt(hypothesis.hypothesis_id, source)
+    attempt = store.open_attempt(hypothesis.hypothesis_id, source, admission=admission)
     record = implementation(attempt.attempt_id, "a" * 40)
     attempt = store.submit_implementation(
         attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
     )
     return store, source, hypothesis, attempt, record
+
+
+def _admission_for(store: ResearchStore, hypothesis: HypothesisSpec) -> AdmissionDecision:
+    spec_set_sha256 = hashlib.sha256(
+        store.evaluation_spec_set(hypothesis.hypothesis_id).to_json().encode()
+    ).hexdigest()
+    return _admit(_document(_payload()), evaluation_spec_set_sha256=spec_set_sha256)
 
 
 def _insert_raw_evidence(store: ResearchStore, attempt_id: str, kind: str) -> None:
@@ -48,10 +60,21 @@ def _insert_raw_evidence(store: ResearchStore, attempt_id: str, kind: str) -> No
 def test_pre_review_retry_closes_implemented_and_preserves_evidence(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
-    store, source, hypothesis, attempt, record = _implemented_attempt(campaign)
+    store, source, hypothesis = campaign
+    admission = _admission_for(store, hypothesis)
+    store, source, hypothesis, attempt, record = _implemented_attempt(campaign, admission=admission)
     implementation_payload = store.evidence(attempt.attempt_id, "implementation")
     run_plan_payload = store.evidence(attempt.attempt_id, "run_plan")
+    admission_payload = store.evidence(attempt.attempt_id, "admission_decision")
+    frozen_hypothesis = store.get_hypothesis(hypothesis.hypothesis_id)
+    campaign_before = dict(store._campaign_row())
     before = store.get_attempt(attempt.attempt_id)
+    store.record_review_event(
+        attempt.attempt_id,
+        "execution_guard_refused",
+        {"guard": "review_bundle", "reason": "BUNDLE_TOO_LARGE"},
+    )
+    events_before = store.events()
 
     closed = store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "bundle too large")
 
@@ -64,6 +87,15 @@ def test_pre_review_retry_closes_implemented_and_preserves_evidence(
     assert closed.run_outcome is None
     assert store.evidence(attempt.attempt_id, "implementation") == implementation_payload
     assert store.evidence(attempt.attempt_id, "run_plan") == run_plan_payload
+    assert store.evidence(attempt.attempt_id, "admission_decision") == admission_payload
+    assert store.get_hypothesis(hypothesis.hypothesis_id) == frozen_hypothesis
+    assert dict(store._campaign_row()) == campaign_before
+    events_after = store.events()
+    assert events_after[:-1] == events_before
+    assert (
+        sum(event.kind == "attempt_closed" for event in events_after)
+        == sum(event.kind == "attempt_closed" for event in events_before) + 1
+    )
     attempt_events = [event for event in store.events() if event.attempt_id == attempt.attempt_id]
     assert attempt_events[-1].kind == "attempt_closed"
     assert attempt_events[-1].actor == "astra"
@@ -75,6 +107,71 @@ def test_pre_review_retry_closes_implemented_and_preserves_evidence(
     reopened = store.open_attempt(hypothesis.hypothesis_id, source)
 
     assert reopened.number == attempt.number + 1
+
+
+def test_pre_review_retry_preserves_hypothesis_attempt_cap(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, source, hypothesis = campaign
+    limited = replace(hypothesis, max_attempts=1)
+    payload = limited.to_json()
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE hypotheses SET max_attempts=?,payload_json=?,payload_sha256=? "
+            "WHERE hypothesis_id=?",
+            (
+                limited.max_attempts,
+                payload,
+                hashlib.sha256(payload.encode()).hexdigest(),
+                hypothesis.hypothesis_id,
+            ),
+        )
+        conn.commit()
+
+    _store, _source, _hypothesis, attempt, _record = _implemented_attempt(campaign)
+    store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
+
+    with pytest.raises(IllegalTransition, match="MAX_ATTEMPTS"):
+        store.open_attempt(hypothesis.hypothesis_id, source)
+    assert store.get_hypothesis(hypothesis.hypothesis_id).max_attempts == 1
+
+
+def test_pre_review_retry_preserves_campaign_attempt_cap(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, source, hypothesis = campaign
+    store.set_campaign_policy(1, None, "retry-cap-test")
+    _store, _source, _hypothesis, attempt, _record = _implemented_attempt(campaign)
+    campaign_before = dict(store._campaign_row())
+
+    store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
+
+    with pytest.raises(StoreConflict, match="campaign attempt cap exceeded"):
+        store.open_attempt(hypothesis.hypothesis_id, source)
+    assert dict(store._campaign_row()) == campaign_before
+
+
+@pytest.mark.parametrize("decision", (AttemptDecision.FINISH, AttemptDecision.PAUSE))
+def test_store_rejects_pre_review_non_retry_without_mutation(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], decision: AttemptDecision
+) -> None:
+    store, _source, _hypothesis, attempt, _record = _implemented_attempt(campaign)
+    before = store.get_attempt(attempt.attempt_id)
+    campaign_before = dict(store._campaign_row())
+    events_before = store.events()
+    evidence_before = {
+        kind: store.evidence(attempt.attempt_id, kind) for kind in ("implementation", "run_plan")
+    }
+
+    with pytest.raises(IllegalTransition):
+        store.close_attempt(attempt.attempt_id, decision, "not a retry")
+
+    assert store.get_attempt(attempt.attempt_id) == before
+    assert dict(store._campaign_row()) == campaign_before
+    assert store.events() == events_before
+    assert {
+        kind: store.evidence(attempt.attempt_id, kind) for kind in evidence_before
+    } == evidence_before
 
 
 @pytest.mark.parametrize(
