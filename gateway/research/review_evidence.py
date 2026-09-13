@@ -410,11 +410,26 @@ def build_review_bundle(
     diff = _git_diff(source, hypothesis.base_commit, attempt.commit)
     if len(diff) > MAX_BUNDLE_BYTES:
         raise BundleError("implementation diff exceeds the bundle limit")
+    verdict_example = json.dumps(
+        {
+            "verdict": "FAIL",
+            "attempt_id": attempt.attempt_id,
+            "commit": attempt.commit,
+            "spec_sha256": hypothesis.spec_sha256,
+            "findings": [
+                "severity=high; location=source/example.py:1; explanation=Example finding."
+            ],
+        },
+        separators=(",", ":"),
+    )
     text = instructions or (
-        "Review only the committed source under source/. Your entire final response must be one "
-        "bare JSON object: first character { and last character }, with no markdown or prose, "
-        f"with verdict, attempt_id={attempt.attempt_id}, commit={attempt.commit}, "
-        f"spec_sha256={hypothesis.spec_sha256}, and findings."
+        "Review only the committed source under source/. Your terminal response must be exactly "
+        "one bare JSON object with exactly these keys: verdict, attempt_id, commit, spec_sha256, "
+        "findings. Do not include markdown or surrounding prose. Verdict must be PASS or FAIL; "
+        f"use these exact bindings: attempt_id={attempt.attempt_id}, commit={attempt.commit}, "
+        f"spec_sha256={hypothesis.spec_sha256}. Findings must be an array of nonempty strings, "
+        "never objects, nested arrays, or null; encode severity, location, and explanation within "
+        f"each string, or use [] when there are no findings. Valid JSON example:\n{verdict_example}"
     )
     if tracked.excluded and instructions is None:
         text += (

@@ -291,6 +291,40 @@ def test_real_bundle_build_and_revalidation_accept_generated_patch_above_file_ca
     assert replay.bundle_sha256 == reservation.bundle_sha256
 
 
+def test_default_bundle_instructions_include_parseable_strict_verdict_example(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+
+    reservation = reserve_review(store, attempt_id, bundle, "owner")
+    instructions = (bundle / "instructions.md").read_text()
+    marker = "Valid JSON example:\n"
+    before, separator, example = instructions.partition(marker)
+
+    assert separator == marker
+    assert "findings must be an array of nonempty strings" in before.lower()
+    payload = json.loads(example)
+    assert set(payload) == {"verdict", "attempt_id", "commit", "spec_sha256", "findings"}
+    assert payload["verdict"] in {"PASS", "FAIL"}
+    assert payload["attempt_id"] == attempt_id
+    assert payload["commit"] == reservation.commit
+    assert payload["spec_sha256"] == hypothesis.spec_sha256
+    assert payload["findings"] == [
+        "severity=high; location=source/example.py:1; explanation=Example finding."
+    ]
+
+    event = {
+        "message": {
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": example}],
+        }
+    }
+    verdict, findings, _ = review_evidence._final_verdict(event, reservation)
+
+    assert verdict == "FAIL"
+    assert findings == tuple(payload["findings"])
+
+
 def test_reservation_builds_actual_read_only_bundle_and_ack_replays(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
@@ -648,7 +682,16 @@ def test_collect_wrong_owner_is_unresolved_and_pauses_campaign(
 
 @pytest.mark.parametrize(
     "format_name",
-    ("fenced", "prose", "trailing", "duplicate", "extra", "multiple", "tool_call"),
+    (
+        "fenced",
+        "prose",
+        "trailing",
+        "duplicate",
+        "extra",
+        "multiple",
+        "object_findings",
+        "tool_call",
+    ),
 )
 def test_collect_rejects_non_bare_or_non_exact_verdicts(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
@@ -675,6 +718,10 @@ def test_collect_rejects_non_bare_or_non_exact_verdicts(
         verdict_text = json.dumps(verdict)
     elif format_name == "multiple":
         verdict_text = f"{verdict_text} {verdict_text}"
+    elif format_name == "object_findings":
+        verdict = json.loads(verdict_text)
+        verdict["findings"] = [{"severity": "high", "explanation": "reject"}]
+        verdict_text = json.dumps(verdict)
     else:
         event["message"]["content"] = [{"type": "tool_use", "id": "tool"}]
     if format_name != "tool_call":
