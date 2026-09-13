@@ -49,7 +49,7 @@ from .host_records import (
 from .store import ResearchStore, StoreConflict, now_utc
 
 MAX_BUNDLE_FILE_BYTES = 8 * 1024 * 1024
-MAX_BUNDLE_BYTES = 64 * 1024 * 1024
+MAX_BUNDLE_BYTES = 128 * 1024 * 1024
 MAX_TEST_EVIDENCE_BYTES = 8 * 1024 * 1024
 CLOCK_TOLERANCE_MS = 2_000
 REVIEW_MODEL = "claude-opus-5"

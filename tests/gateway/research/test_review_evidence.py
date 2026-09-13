@@ -205,6 +205,15 @@ def _prepare_review(
     return store, attempt_id, bundle, core, sessions, projects
 
 
+def test_bundle_aggregate_budget_is_128_mib() -> None:
+    assert review_evidence.MAX_BUNDLE_BYTES == 128 * 1024 * 1024
+
+
+def test_bundle_per_file_and_test_evidence_limits_remain_8_mib() -> None:
+    assert review_evidence.MAX_BUNDLE_FILE_BYTES == 8 * 1024 * 1024
+    assert review_evidence.MAX_TEST_EVIDENCE_BYTES == 8 * 1024 * 1024
+
+
 def test_bundle_digest_allows_root_generated_patch_above_file_cap(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
