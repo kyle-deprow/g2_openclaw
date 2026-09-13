@@ -82,7 +82,11 @@ OpenClaw runs a **single embedded agent runtime** derived from pi-mono. It runs 
 ### Timeouts
 
 - `agent.wait` default: 30s (just the wait)
-- Agent runtime: `agents.defaults.timeoutSeconds` default 600s
+- Agent runtime: `agents.defaults.timeoutSeconds` defaults to 172800s (48h)
+- Completion announcements: `agents.defaults.subagents.announceTimeoutMs` defaults
+  to 120000ms; this repository sets it to 900000ms for longer parent-announcement
+  delivery. This is separate from the durable agent run timeout and wait-only
+  `agent.wait` boundary.
 
 ## Context Management
 

@@ -1773,6 +1773,7 @@ def test_repo_openclaw_config_has_g2_interface_and_bounded_research_owner() -> N
     assert config["plugins"]["slots"]["memory"] == "none"
     assert config["agents"]["defaults"]["maxConcurrent"] == 2
     assert config["agents"]["defaults"]["subagents"]["maxConcurrent"] == 1
+    assert config["agents"]["defaults"]["subagents"]["announceTimeoutMs"] == 900000
     assert "maxChildrenPerAgent" not in config["agents"]["defaults"]["subagents"]
     assert config["agents"]["ownership"] == "explicit"
     assert "list" not in config["agents"]

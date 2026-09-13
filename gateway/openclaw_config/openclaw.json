@@ -176,6 +176,7 @@
       "subagents": {
         "maxConcurrent": 1,
         "maxSpawnDepth": 1,
+        "announceTimeoutMs": 900000,
         "runTimeoutSeconds": 1800
       }
     },
