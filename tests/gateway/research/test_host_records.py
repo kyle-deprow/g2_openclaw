@@ -145,6 +145,14 @@ def host_fixture(tmp_path: Path) -> dict[str, Path | str]:
               requester_agent_id TEXT, run_id TEXT, label TEXT, status TEXT,
               created_at INTEGER, started_at INTEGER, ended_at INTEGER, error TEXT
             );
+            CREATE TABLE subagent_runs (
+              run_id TEXT NOT NULL PRIMARY KEY,
+              child_session_key TEXT NOT NULL,
+              controller_session_key TEXT,
+              requester_session_key TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              payload_json TEXT NOT NULL DEFAULT '{}'
+            ) STRICT;
             """
         )
         connection.execute(
@@ -197,7 +205,21 @@ def host_fixture(tmp_path: Path) -> dict[str, Path | str]:
         "title": "review H0001-A001",
         "messages": [{"User": {"content": []}}],
         "acpx": {
-            "desired_config_options": {"effort": "high"},
+            "current_model_id": "opus[1m]",
+            "available_models": [
+                "default",
+                "opus[1m]",
+                "claude-fable-5-1[1m]",
+                "sonnet",
+                "haiku",
+            ],
+            "model_control": "config_option",
+            "config_options": [
+                {"id": "mode", "currentValue": "default"},
+                {"id": "model", "currentValue": "opus[1m]"},
+                {"id": "effort", "name": "Effort", "currentValue": "high"},
+                {"id": "fast", "currentValue": "off"},
+            ],
             "session_options": {"model": "claude-opus-5"},
         },
     }
@@ -208,6 +230,85 @@ def host_fixture(tmp_path: Path) -> dict[str, Path | str]:
     transcript.parent.mkdir(parents=True)
     transcript.write_bytes(b'{"type":"assistant","bytes":[0,255]}\n')
     return {"db": db, "sessions": sessions, "projects": projects, "transcript": transcript}
+
+
+def _insert_subagent(
+    host_fixture: dict[str, Path | str],
+    *,
+    payload_updates: dict[str, object] | None = None,
+    row_run_id: str = RUN_ID,
+    row_child_session_key: str = CHILD_KEY,
+    row_controller_session_key: str | None = OWNER,
+    row_requester_session_key: str = OWNER,
+    row_created_at: int = RESERVED_AT + 100,
+) -> None:
+    payload: dict[str, object] = {
+        "runId": row_run_id,
+        "taskRunId": row_run_id,
+        "childSessionKey": row_child_session_key,
+        "controllerSessionKey": OWNER,
+        "requesterSessionKey": OWNER,
+        "requesterAgentId": "research-orchestrator",
+        "task": "Review the immutable committed research bundle",
+        "cleanup": "keep",
+        "expectsCompletionMessage": True,
+        "spawnMode": "run",
+        "label": LABEL,
+        "createdAt": row_created_at,
+        "execution": {
+            "status": "terminal",
+            "startedAt": RESERVED_AT + 200,
+            "endedAt": RESERVED_AT + 300,
+            "outcome": {
+                "status": "ok",
+                "startedAt": RESERVED_AT + 200,
+                "endedAt": RESERVED_AT + 300,
+                "elapsedMs": 100,
+            },
+        },
+    }
+    if payload_updates is not None:
+        payload.update(payload_updates)
+    with sqlite3.connect(host_fixture["db"]) as connection:
+        connection.execute(
+            """
+            INSERT INTO subagent_runs (
+              run_id, child_session_key, controller_session_key,
+              requester_session_key, created_at, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row_run_id,
+                row_child_session_key,
+                row_controller_session_key,
+                row_requester_session_key,
+                row_created_at,
+                json.dumps(payload),
+            ),
+        )
+
+
+def _use_subagent_fallback(
+    host_fixture: dict[str, Path | str],
+    *,
+    payload_updates: dict[str, object] | None = None,
+    row_run_id: str = RUN_ID,
+    row_child_session_key: str = CHILD_KEY,
+    row_controller_session_key: str | None = OWNER,
+    row_requester_session_key: str = OWNER,
+    row_created_at: int = RESERVED_AT + 100,
+) -> None:
+    with sqlite3.connect(host_fixture["db"]) as connection:
+        connection.execute("DELETE FROM task_runs")
+    _insert_subagent(
+        host_fixture,
+        payload_updates=payload_updates,
+        row_run_id=row_run_id,
+        row_child_session_key=row_child_session_key,
+        row_controller_session_key=row_controller_session_key,
+        row_requester_session_key=row_requester_session_key,
+        row_created_at=row_created_at,
+    )
 
 
 def test_task_lookup_returns_exact_row_and_pending_status(
@@ -223,6 +324,155 @@ def test_task_lookup_returns_exact_row_and_pending_status(
     assert record.child_session_key == CHILD_KEY
     assert record.status == "running"
     assert record.is_pending
+    assert record.source == "task_runs"
+
+
+def test_subagent_fallback_reads_terminal_runtime_record(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    _use_subagent_fallback(host_fixture)
+
+    record = _read_task(host_fixture["db"], ack_child_session_key=CHILD_KEY, ack_run_id=RUN_ID)
+
+    assert record.status == "succeeded"
+    assert record.source == "subagent_runs"
+    assert record.task_id == RUN_ID
+    assert record.started_at_ms == RESERVED_AT + 200
+    assert record.ended_at_ms == RESERVED_AT + 300
+    assert record.agent_id == "claude"
+    assert record.runtime == "acp"
+
+
+def test_subagent_fallback_nonterminal_record_is_pending(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    _use_subagent_fallback(
+        host_fixture,
+        payload_updates={"execution": {"status": "running", "startedAt": RESERVED_AT + 200}},
+    )
+
+    record = _read_task(host_fixture["db"])
+
+    assert record.status == "running"
+    assert record.is_pending
+    assert record.started_at_ms == RESERVED_AT + 200
+    assert record.ended_at_ms is None
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_status"),
+    [("error", "failed"), ("timeout", "timed_out"), ("cancelled", "cancelled")],
+)
+def test_subagent_fallback_maps_terminal_outcomes(
+    host_fixture: dict[str, Path | str], outcome: str, expected_status: str
+) -> None:
+    _use_subagent_fallback(
+        host_fixture,
+        payload_updates={
+            "execution": {
+                "status": "terminal",
+                "startedAt": RESERVED_AT + 200,
+                "endedAt": RESERVED_AT + 300,
+                "outcome": {"status": outcome},
+            }
+        },
+    )
+
+    assert _read_task(host_fixture["db"]).status == expected_status
+
+
+def test_subagent_fallback_rejects_unknown_outcome(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    _use_subagent_fallback(
+        host_fixture,
+        payload_updates={
+            "execution": {
+                "status": "terminal",
+                "startedAt": RESERVED_AT + 200,
+                "endedAt": RESERVED_AT + 300,
+                "outcome": {"status": "lost"},
+            }
+        },
+    )
+
+    with pytest.raises(HostRecordError, match="outcome status is unknown"):
+        _read_task(host_fixture["db"])
+
+
+@pytest.mark.parametrize(
+    ("payload_updates", "row_created_at", "row_child_session_key"),
+    [
+        ({"label": "other-label"}, RESERVED_AT + 100, CHILD_KEY),
+        ({"requesterSessionKey": "other-owner"}, RESERVED_AT + 100, CHILD_KEY),
+        ({"spawnMode": "thread"}, RESERVED_AT + 100, CHILD_KEY),
+        ({"createdAt": RESERVED_AT - 1}, RESERVED_AT - 1, CHILD_KEY),
+        (None, RESERVED_AT + 100, "agent:codex:acp:child-001"),
+        ({"taskRunId": "different-run"}, RESERVED_AT + 100, CHILD_KEY),
+    ],
+)
+def test_subagent_fallback_rejects_identity_and_lifecycle_mismatches(
+    host_fixture: dict[str, Path | str],
+    payload_updates: dict[str, object] | None,
+    row_created_at: int,
+    row_child_session_key: str,
+) -> None:
+    _use_subagent_fallback(
+        host_fixture,
+        payload_updates=payload_updates,
+        row_created_at=row_created_at,
+        row_child_session_key=row_child_session_key,
+    )
+
+    with pytest.raises(HostRecordError):
+        _read_task(host_fixture["db"])
+
+
+def test_subagent_fallback_rejects_ack_run_mismatch(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    _use_subagent_fallback(host_fixture)
+
+    with pytest.raises(HostRecordError, match="ACK"):
+        _read_task(host_fixture["db"], ack_run_id="wrong-run")
+
+
+def test_subagent_fallback_rejects_multiple_matching_rows(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    _use_subagent_fallback(host_fixture)
+    _insert_subagent(host_fixture, row_run_id="run-002")
+
+    with pytest.raises(HostRecordError, match="exactly one"):
+        _read_task(host_fixture["db"])
+
+
+def test_task_run_row_wins_over_subagent_fallback(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    _insert_subagent(host_fixture)
+
+    record = _read_task(host_fixture["db"])
+
+    assert record.source == "task_runs"
+    assert record.task_id == TASK_ID
+
+
+def test_task_run_ambiguity_does_not_fall_back_to_subagent_row(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    _insert_subagent(host_fixture)
+    with sqlite3.connect(host_fixture["db"]) as connection:
+        connection.execute(
+            "INSERT INTO task_runs SELECT task_id || '-2', runtime, task_kind, source_id, "
+            "requester_session_key, owner_key, scope_kind, child_session_key, agent_id, "
+            "requester_agent_id, run_id || '-2', label, status, created_at, started_at, "
+            "ended_at, error "
+            "FROM task_runs"
+        )
+
+    with pytest.raises(HostRecordError, match="host task lookup requires exactly one"):
+        _read_task(host_fixture["db"])
 
 
 @pytest.mark.parametrize("status", ["queued", "running", "finalizing"])
@@ -535,6 +785,47 @@ def test_acp_identity_uses_runtime_options_cwd_and_exact_child_session(
     assert record.effort == "high"
     assert record.acpx_candidate_count == 1
     assert record.acpx_record_path.name.endswith("10551e01-0503-456f-9e61-6993c912d478.json")
+
+
+def test_acpx_effort_is_read_from_config_options(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    assert _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD).effort == "high"
+
+
+@pytest.mark.parametrize(
+    "config_options",
+    [
+        [],
+        [{"id": "mode", "currentValue": "default"}],
+        [
+            {"id": "effort", "currentValue": "high"},
+            {"id": "effort", "currentValue": "high"},
+        ],
+    ],
+)
+def test_acpx_effort_option_must_be_unique(
+    host_fixture: dict[str, Path | str], config_options: list[dict[str, object]]
+) -> None:
+    source = next(Path(host_fixture["sessions"]).iterdir())
+    payload = json.loads(source.read_text())
+    payload["acpx"]["config_options"] = config_options
+    source.write_text(json.dumps(payload))
+
+    with pytest.raises(HostRecordError, match="effort option is ambiguous"):
+        _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
+
+
+def test_acpx_medium_effort_is_rejected(
+    host_fixture: dict[str, Path | str],
+) -> None:
+    source = next(Path(host_fixture["sessions"]).iterdir())
+    payload = json.loads(source.read_text())
+    payload["acpx"]["config_options"][2]["currentValue"] = "medium"
+    source.write_text(json.dumps(payload))
+
+    with pytest.raises(HostRecordError, match="model or effort"):
+        _read_acp(host_fixture["sessions"], CHILD_KEY, EXPECTED_CWD)
 
 
 def test_acpx_identity_excludes_null_or_different_run_candidates(

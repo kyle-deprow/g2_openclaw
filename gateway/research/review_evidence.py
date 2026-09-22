@@ -980,6 +980,7 @@ def verify_review(
             "child_session_key": task.child_session_key,
             "run_id": task.run_id,
             "task_status": task.status,
+            "task_source": task.source,
             "task_started_at": task.started_at_ms,
             "task_ended_at": task.ended_at_ms,
             "acpx_record_id": identity.acpx_record_id,

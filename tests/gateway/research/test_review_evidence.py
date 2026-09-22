@@ -29,6 +29,7 @@ from gateway.research.review_evidence import (
     acknowledge_review,
     cancel_review,
     collect_review,
+    reconcile_review,
     reserve_review,
 )
 from gateway.research.store import ResearchStore, StoreConflict
@@ -108,6 +109,14 @@ def _host_fixture(
               run_id TEXT, label TEXT, status TEXT, created_at INTEGER,
               started_at INTEGER, ended_at INTEGER
             );
+            CREATE TABLE subagent_runs (
+              run_id TEXT NOT NULL PRIMARY KEY,
+              child_session_key TEXT NOT NULL,
+              controller_session_key TEXT,
+              requester_session_key TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              payload_json TEXT NOT NULL DEFAULT '{}'
+            ) STRICT;
             """
         )
         conn.execute(
@@ -149,7 +158,21 @@ def _host_fixture(
         "title": f"review {attempt_id}",
         "messages": [{"User": {"content": []}}],
         "acpx": {
-            "desired_config_options": {"effort": "high"},
+            "current_model_id": "opus[1m]",
+            "available_models": [
+                "default",
+                "opus[1m]",
+                "claude-fable-5-1[1m]",
+                "sonnet",
+                "haiku",
+            ],
+            "model_control": "config_option",
+            "config_options": [
+                {"id": "mode", "currentValue": "default"},
+                {"id": "model", "currentValue": "opus[1m]"},
+                {"id": "effort", "name": "Effort", "currentValue": "high"},
+                {"id": "fast", "currentValue": "off"},
+            ],
             "session_options": {"model": "claude-opus-5"},
         },
     }
@@ -187,6 +210,43 @@ def _transcript_path(projects: Path) -> Path:
     paths = list(projects.rglob("*.jsonl"))
     assert len(paths) == 1
     return paths[0]
+
+
+def _insert_subagent(core: Path, label: str, reserved_ms: int) -> None:
+    payload = {
+        "runId": "run-1",
+        "taskRunId": "run-1",
+        "childSessionKey": "agent:claude:acp:child",
+        "controllerSessionKey": "owner",
+        "requesterSessionKey": "owner",
+        "requesterAgentId": "research-orchestrator",
+        "spawnMode": "run",
+        "label": label,
+        "createdAt": reserved_ms + 1000,
+        "execution": {
+            "status": "terminal",
+            "startedAt": reserved_ms + 2000,
+            "endedAt": reserved_ms + 3000,
+            "outcome": {"status": "ok"},
+        },
+    }
+    with sqlite3.connect(core) as conn:
+        conn.execute(
+            """
+            INSERT INTO subagent_runs (
+              run_id, child_session_key, controller_session_key,
+              requester_session_key, created_at, payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "run-1",
+                "agent:claude:acp:child",
+                "owner",
+                "owner",
+                reserved_ms + 1000,
+                json.dumps(payload),
+            ),
+        )
 
 
 def _prepare_review(
@@ -648,6 +708,9 @@ def test_collect_requires_terminal_host_evidence_and_is_idempotent(
         collect_review(store, attempt_id, core, sessions, projects).state
         == AttemptState.REVIEW_PASSED
     )
+    assert json.loads(store.evidence(attempt_id, "review_host_evidence"))["task_source"] == (
+        "task_runs"
+    )
     attempt_dir = store.root / "hypotheses" / "H0001" / "attempts" / attempt_id
     (attempt_dir / "review.json").unlink()
     (attempt_dir / "review_host_evidence.json").unlink()
@@ -659,6 +722,47 @@ def test_collect_requires_terminal_host_evidence_and_is_idempotent(
     assert (attempt_dir / "review_host_evidence.json").is_file()
     assert len([row for row in store.events() if row.kind == "review_collected"]) == 1
     assert _queue(store, attempt_id, "job-evidence").state == AttemptState.RUN_QUEUED
+
+
+def test_collect_recovers_from_pruned_task_run_using_subagent_run(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
+    reservation = json.loads(store.evidence(attempt_id, "review_reservation"))
+    reserved_ms = int(
+        datetime.fromisoformat(str(reservation["reserved_at"]).replace("Z", "+00:00")).timestamp()
+        * 1000
+    )
+    with sqlite3.connect(core) as conn:
+        conn.execute("DELETE FROM task_runs")
+    _insert_subagent(core, str(reservation["label"]), reserved_ms)
+
+    result = collect_review(store, attempt_id, core, sessions, projects)
+
+    assert result.state == AttemptState.REVIEW_PASSED
+    assert json.loads(store.evidence(attempt_id, "review_host_evidence"))["task_source"] == (
+        "subagent_runs"
+    )
+
+
+def test_reconcile_review_recovers_ack_from_subagent_run(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    reservation = reserve_review(store, attempt_id, bundle, "owner")
+    core, _sessions, _projects = _host_fixture(store, attempt_id, bundle, tmp_path)
+    reservation_ms = int(
+        datetime.fromisoformat(reservation.reserved_at.replace("Z", "+00:00")).timestamp() * 1000
+    )
+    with sqlite3.connect(core) as conn:
+        conn.execute("DELETE FROM task_runs")
+    _insert_subagent(core, reservation.label, reservation_ms)
+
+    ack = reconcile_review(store, attempt_id, core)
+
+    assert ack is not None
+    assert ack.run_id == "run-1"
+    assert ack.child_session_key == "agent:claude:acp:child"
 
 
 def test_collect_nonterminal_is_pending_and_bundle_mutation_is_rejected(

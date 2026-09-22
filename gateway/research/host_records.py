@@ -58,6 +58,7 @@ class TaskRunHostRecord:
     created_at_ms: int
     started_at_ms: int | None
     ended_at_ms: int | None
+    source: Literal["task_runs", "subagent_runs"]
 
     @property
     def is_terminal(self) -> bool:
@@ -150,6 +151,13 @@ SELECT task_id, runtime, task_kind, source_id, requester_session_key,
    AND runtime = ? AND scope_kind = ? AND agent_id = ?
 """
 
+_SUBAGENT_RUN_QUERY = """
+SELECT run_id, child_session_key, controller_session_key, requester_session_key,
+       created_at, payload_json
+  FROM subagent_runs
+ WHERE requester_session_key = ? AND json_extract(payload_json, '$.label') = ?
+"""
+
 
 def _required_text(value: object, field: str) -> str:
     if not isinstance(value, str) or not value:
@@ -238,6 +246,261 @@ def _readonly_database(database_path: Path | str) -> Iterator[sqlite3.Connection
         connection.close()
 
 
+def _finalize_task_run(
+    *,
+    task_id: str,
+    runtime: str,
+    task_kind: str | None,
+    source_id: str | None,
+    requester_session_key: str | None,
+    owner_key: str,
+    scope_kind: str,
+    child_session_key: str,
+    agent_id: str,
+    requester_agent_id: str | None,
+    run_id: str,
+    label: str,
+    status: str,
+    created_at_ms: int,
+    started_at_ms: int | None,
+    ended_at_ms: int | None,
+    reserved_at_ms: int,
+    ack_child_session_key: str | None,
+    ack_run_id: str | None,
+    source: Literal["task_runs", "subagent_runs"],
+) -> TaskRunHostRecord:
+    if created_at_ms < reserved_at_ms:
+        raise HostRecordError("host task was created before the reservation")
+    if started_at_ms is not None and started_at_ms < created_at_ms:
+        raise HostRecordError("host task started before it was created")
+    if ended_at_ms is not None:
+        if ended_at_ms < created_at_ms:
+            raise HostRecordError("host task ended before it was created")
+        if started_at_ms is not None and ended_at_ms < started_at_ms:
+            raise HostRecordError("host task ended before it started")
+    if ack_child_session_key is not None and child_session_key != ack_child_session_key:
+        raise HostRecordError("host task child session conflicts with the spawn ACK")
+    if ack_run_id is not None and run_id != ack_run_id:
+        raise HostRecordError("host task run id conflicts with the spawn ACK")
+
+    return TaskRunHostRecord(
+        task_id=task_id,
+        runtime=runtime,
+        task_kind=task_kind,
+        source_id=source_id,
+        requester_session_key=requester_session_key,
+        owner_key=owner_key,
+        scope_kind=scope_kind,
+        child_session_key=child_session_key,
+        agent_id=agent_id,
+        requester_agent_id=requester_agent_id,
+        run_id=run_id,
+        label=label,
+        status=status,
+        created_at_ms=created_at_ms,
+        started_at_ms=started_at_ms,
+        ended_at_ms=ended_at_ms,
+        source=source,
+    )
+
+
+def _task_runs_record(
+    row: sqlite3.Row,
+    *,
+    owner_key: str,
+    reservation_label: str,
+    reserved_at_ms: int,
+    expected_runtime: str,
+    expected_scope_kind: str,
+    expected_agent_id: str,
+    ack_child_session_key: str | None,
+    ack_run_id: str | None,
+) -> TaskRunHostRecord:
+    task_id = _required_text(_row_value(row, "task_id"), "task_id")
+    runtime = _required_text(_row_value(row, "runtime"), "runtime")
+    task_kind = _optional_nonempty_text(_row_value(row, "task_kind"), "task_kind")
+    source_id = _optional_nonempty_text(_row_value(row, "source_id"), "source_id")
+    requester_session_key = _optional_text(
+        _row_value(row, "requester_session_key"), "requester_session_key"
+    )
+    stored_owner_key = _required_text(_row_value(row, "owner_key"), "owner_key")
+    scope_kind = _required_text(_row_value(row, "scope_kind"), "scope_kind")
+    child_session_key = _required_text(_row_value(row, "child_session_key"), "child_session_key")
+    agent_id = _required_text(_row_value(row, "agent_id"), "agent_id")
+    requester_agent_id = _optional_nonempty_text(
+        _row_value(row, "requester_agent_id"), "requester_agent_id"
+    )
+    run_id = _required_text(_row_value(row, "run_id"), "run_id")
+    label = _required_text(_row_value(row, "label"), "label")
+    status = _required_text(_row_value(row, "status"), "status")
+    created_at_ms = _required_epoch_ms(_row_value(row, "created_at"), "created_at")
+    started_at_ms = _optional_epoch_ms(_row_value(row, "started_at"), "started_at")
+    ended_at_ms = _optional_epoch_ms(_row_value(row, "ended_at"), "ended_at")
+
+    if stored_owner_key != owner_key or label != reservation_label:
+        raise HostRecordError("host task identity does not match the exact lookup")
+    if requester_session_key and requester_session_key != owner_key:
+        raise HostRecordError("host task requester session does not match owner_key")
+    if (
+        runtime != expected_runtime
+        or scope_kind != expected_scope_kind
+        or agent_id != expected_agent_id
+    ):
+        raise HostRecordError("host task identity has an unexpected runtime, scope, or agent")
+
+    return _finalize_task_run(
+        task_id=task_id,
+        runtime=runtime,
+        task_kind=task_kind,
+        source_id=source_id,
+        requester_session_key=requester_session_key,
+        owner_key=stored_owner_key,
+        scope_kind=scope_kind,
+        child_session_key=child_session_key,
+        agent_id=agent_id,
+        requester_agent_id=requester_agent_id,
+        run_id=run_id,
+        label=label,
+        status=status,
+        created_at_ms=created_at_ms,
+        started_at_ms=started_at_ms,
+        ended_at_ms=ended_at_ms,
+        reserved_at_ms=reserved_at_ms,
+        ack_child_session_key=ack_child_session_key,
+        ack_run_id=ack_run_id,
+        source="task_runs",
+    )
+
+
+def _json_object_value(value: object, field: str) -> dict[str, object]:
+    if isinstance(value, str):
+        try:
+            raw = value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise HostRecordError(f"{field} is not valid JSON") from exc
+    elif isinstance(value, bytes):
+        raw = value
+    else:
+        raise HostRecordError(f"{field} is not valid JSON")
+    return _json_object_bytes(raw, field)
+
+
+def _subagent_runs_record(
+    row: sqlite3.Row,
+    *,
+    owner_key: str,
+    reservation_label: str,
+    reserved_at_ms: int,
+    expected_runtime: str,
+    expected_scope_kind: str,
+    expected_agent_id: str,
+    ack_child_session_key: str | None,
+    ack_run_id: str | None,
+) -> TaskRunHostRecord:
+    payload = _json_object_value(_row_value(row, "payload_json"), "host subagent payload")
+    row_run_id = _required_text(_row_value(row, "run_id"), "subagent.run_id")
+    row_child_session_key = _required_text(
+        _row_value(row, "child_session_key"), "subagent.child_session_key"
+    )
+    row_controller_session_key = _optional_text(
+        _row_value(row, "controller_session_key"), "subagent.controller_session_key"
+    )
+    row_requester_session_key = _required_text(
+        _row_value(row, "requester_session_key"), "subagent.requester_session_key"
+    )
+    row_created_at_ms = _required_epoch_ms(_row_value(row, "created_at"), "subagent.created_at")
+
+    payload_run_id = _required_text(payload.get("runId"), "subagent.payload.runId")
+    payload_task_run_id = _required_text(payload.get("taskRunId"), "subagent.payload.taskRunId")
+    payload_child_session_key = _required_text(
+        payload.get("childSessionKey"), "subagent.payload.childSessionKey"
+    )
+    payload_requester_session_key = _required_text(
+        payload.get("requesterSessionKey"), "subagent.payload.requesterSessionKey"
+    )
+    payload_controller_session_key = _optional_text(
+        payload.get("controllerSessionKey"), "subagent.payload.controllerSessionKey"
+    )
+    payload_label = _required_text(payload.get("label"), "subagent.payload.label")
+    spawn_mode = _required_text(payload.get("spawnMode"), "subagent.payload.spawnMode")
+    payload_created_at_ms = _required_epoch_ms(
+        payload.get("createdAt"), "subagent.payload.createdAt"
+    )
+    requester_agent_id = _optional_nonempty_text(
+        payload.get("requesterAgentId"), "subagent.payload.requesterAgentId"
+    )
+
+    if payload_run_id != payload_task_run_id or payload_task_run_id != row_run_id:
+        raise HostRecordError("host subagent run ids do not match")
+    if payload_child_session_key != row_child_session_key:
+        raise HostRecordError("host subagent child session does not match")
+    if payload_requester_session_key != owner_key or row_requester_session_key != owner_key:
+        raise HostRecordError("host subagent requester session does not match owner_key")
+    if payload_controller_session_key is not None and payload_controller_session_key != owner_key:
+        raise HostRecordError("host subagent controller session does not match owner_key")
+    if row_controller_session_key is not None and row_controller_session_key != owner_key:
+        raise HostRecordError("host subagent controller session does not match owner_key")
+    if payload_label != reservation_label:
+        raise HostRecordError("host subagent label does not match the exact lookup")
+    if spawn_mode != "run":
+        raise HostRecordError("host subagent spawn mode is not run")
+    if payload_created_at_ms != row_created_at_ms:
+        raise HostRecordError("host subagent created timestamps do not match")
+    if not row_child_session_key.startswith(f"agent:{expected_agent_id}:acp:"):
+        raise HostRecordError("host subagent child session does not bind the expected ACP agent")
+
+    execution = payload.get("execution")
+    if not isinstance(execution, dict):
+        raise HostRecordError("host subagent execution must be an object")
+    if execution.get("status") != "terminal":
+        status = "running"
+        started_at_ms = _optional_epoch_ms(
+            execution.get("startedAt"), "subagent.execution.startedAt"
+        )
+        ended_at_ms = None
+    else:
+        outcome = execution.get("outcome")
+        if not isinstance(outcome, dict):
+            raise HostRecordError("host subagent execution outcome must be an object")
+        outcome_status = outcome.get("status")
+        status_by_outcome = {
+            "ok": "succeeded",
+            "error": "failed",
+            "timeout": "timed_out",
+            "cancelled": "cancelled",
+        }
+        if not isinstance(outcome_status, str) or outcome_status not in status_by_outcome:
+            raise HostRecordError("host subagent outcome status is unknown")
+        status = status_by_outcome[outcome_status]
+        started_at_ms = _required_epoch_ms(
+            execution.get("startedAt"), "subagent.execution.startedAt"
+        )
+        ended_at_ms = _required_epoch_ms(execution.get("endedAt"), "subagent.execution.endedAt")
+
+    return _finalize_task_run(
+        task_id=payload_task_run_id,
+        runtime=expected_runtime,
+        task_kind="subagent",
+        source_id=None,
+        requester_session_key=owner_key,
+        owner_key=owner_key,
+        scope_kind=expected_scope_kind,
+        child_session_key=row_child_session_key,
+        agent_id=expected_agent_id,
+        requester_agent_id=requester_agent_id,
+        run_id=row_run_id,
+        label=payload_label,
+        status=status,
+        created_at_ms=row_created_at_ms,
+        started_at_ms=started_at_ms,
+        ended_at_ms=ended_at_ms,
+        reserved_at_ms=reserved_at_ms,
+        ack_child_session_key=ack_child_session_key,
+        ack_run_id=ack_run_id,
+        source="subagent_runs",
+    )
+
+
 def read_exact_task_run(
     database_path: Path | str,
     owner_key: str,
@@ -279,76 +542,51 @@ def read_exact_task_run(
             ).fetchall()
         except sqlite3.Error as exc:
             raise HostRecordError("host task metadata could not be read") from exc
+        if len(rows) > 1:
+            raise HostRecordError(
+                "host task lookup requires exactly one matching row after identity filters; "
+                f"found {len(rows)}"
+            )
+        if len(rows) == 1:
+            task_rows = rows
+            subagent_rows: list[sqlite3.Row] = []
+        else:
+            try:
+                subagent_rows = connection.execute(
+                    _SUBAGENT_RUN_QUERY, (owner_key, reservation_label)
+                ).fetchall()
+            except sqlite3.Error as exc:
+                raise HostRecordError("host subagent metadata could not be read") from exc
+            if len(subagent_rows) != 1:
+                raise HostRecordError(
+                    "host subagent lookup requires exactly one matching row after "
+                    "identity filters; "
+                    f"found {len(subagent_rows)}"
+                )
+            task_rows = []
 
-    if len(rows) != 1:
-        raise HostRecordError(
-            "host task lookup requires exactly one matching row after identity filters; "
-            f"found {len(rows)}"
+    if task_rows:
+        return _task_runs_record(
+            task_rows[0],
+            owner_key=owner_key,
+            reservation_label=reservation_label,
+            reserved_at_ms=reserved_at_ms,
+            expected_runtime=expected_runtime,
+            expected_scope_kind=expected_scope_kind,
+            expected_agent_id=expected_agent_id,
+            ack_child_session_key=ack_child_session_key,
+            ack_run_id=ack_run_id,
         )
-    row = rows[0]
-
-    task_id = _required_text(_row_value(row, "task_id"), "task_id")
-    runtime = _required_text(_row_value(row, "runtime"), "runtime")
-    task_kind = _optional_nonempty_text(_row_value(row, "task_kind"), "task_kind")
-    source_id = _optional_nonempty_text(_row_value(row, "source_id"), "source_id")
-    requester_session_key = _optional_text(
-        _row_value(row, "requester_session_key"), "requester_session_key"
-    )
-    stored_owner_key = _required_text(_row_value(row, "owner_key"), "owner_key")
-    scope_kind = _required_text(_row_value(row, "scope_kind"), "scope_kind")
-    child_session_key = _required_text(_row_value(row, "child_session_key"), "child_session_key")
-    agent_id = _required_text(_row_value(row, "agent_id"), "agent_id")
-    requester_agent_id = _optional_nonempty_text(
-        _row_value(row, "requester_agent_id"), "requester_agent_id"
-    )
-    run_id = _required_text(_row_value(row, "run_id"), "run_id")
-    label = _required_text(_row_value(row, "label"), "label")
-    status = _required_text(_row_value(row, "status"), "status")
-    created_at_ms = _required_epoch_ms(_row_value(row, "created_at"), "created_at")
-    started_at_ms = _optional_epoch_ms(_row_value(row, "started_at"), "started_at")
-    ended_at_ms = _optional_epoch_ms(_row_value(row, "ended_at"), "ended_at")
-
-    if stored_owner_key != owner_key or label != reservation_label:
-        raise HostRecordError("host task identity does not match the exact lookup")
-    if requester_session_key and requester_session_key != owner_key:
-        raise HostRecordError("host task requester session does not match owner_key")
-    if (
-        runtime != expected_runtime
-        or scope_kind != expected_scope_kind
-        or agent_id != expected_agent_id
-    ):
-        raise HostRecordError("host task identity has an unexpected runtime, scope, or agent")
-    if created_at_ms < reserved_at_ms:
-        raise HostRecordError("host task was created before the reservation")
-    if started_at_ms is not None and started_at_ms < created_at_ms:
-        raise HostRecordError("host task started before it was created")
-    if ended_at_ms is not None:
-        if ended_at_ms < created_at_ms:
-            raise HostRecordError("host task ended before it was created")
-        if started_at_ms is not None and ended_at_ms < started_at_ms:
-            raise HostRecordError("host task ended before it started")
-    if ack_child_session_key is not None and child_session_key != ack_child_session_key:
-        raise HostRecordError("host task child session conflicts with the spawn ACK")
-    if ack_run_id is not None and run_id != ack_run_id:
-        raise HostRecordError("host task run id conflicts with the spawn ACK")
-
-    return TaskRunHostRecord(
-        task_id=task_id,
-        runtime=runtime,
-        task_kind=task_kind,
-        source_id=source_id,
-        requester_session_key=requester_session_key,
-        owner_key=stored_owner_key,
-        scope_kind=scope_kind,
-        child_session_key=child_session_key,
-        agent_id=agent_id,
-        requester_agent_id=requester_agent_id,
-        run_id=run_id,
-        label=label,
-        status=status,
-        created_at_ms=created_at_ms,
-        started_at_ms=started_at_ms,
-        ended_at_ms=ended_at_ms,
+    return _subagent_runs_record(
+        subagent_rows[0],
+        owner_key=owner_key,
+        reservation_label=reservation_label,
+        reserved_at_ms=reserved_at_ms,
+        expected_runtime=expected_runtime,
+        expected_scope_kind=expected_scope_kind,
+        expected_agent_id=expected_agent_id,
+        ack_child_session_key=ack_child_session_key,
+        ack_run_id=ack_run_id,
     )
 
 
@@ -494,12 +732,28 @@ def _acpx_record_candidate(
     acpx = record.get("acpx")
     if not isinstance(acpx, dict):
         raise HostRecordError("ACPX retained session record is missing acpx metadata")
-    desired = acpx.get("desired_config_options")
+    config_options = acpx.get("config_options")
     session_options = acpx.get("session_options")
-    if not isinstance(desired, dict) or not isinstance(session_options, dict):
+    if not isinstance(config_options, list) or not isinstance(session_options, dict):
         raise HostRecordError("ACPX retained session record has incomplete runtime options")
-    effort = _required_text(desired.get("effort"), "acpx.desired_config_options.effort")
-    model = _required_text(session_options.get("model"), "acpx.session_options.model")
+    effort_options = [
+        option
+        for option in config_options
+        if isinstance(option, dict) and option.get("id") == "effort"
+    ]
+    if len(effort_options) != 1:
+        raise HostRecordError("ACPX retained session record effort option is ambiguous")
+    effort_value = effort_options[0].get("currentValue")
+    model_value = session_options.get("model")
+    if (
+        not isinstance(effort_value, str)
+        or not effort_value
+        or not isinstance(model_value, str)
+        or not model_value
+    ):
+        raise HostRecordError("ACPX retained session record has incomplete runtime options")
+    effort = effort_value
+    model = model_value
     if model != "claude-opus-5" or effort != "high":
         raise HostRecordError("ACPX retained session record model or effort is not Opus 5/high")
     title = _required_text(record.get("title"), "title")
