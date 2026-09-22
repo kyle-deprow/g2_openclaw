@@ -77,10 +77,17 @@ from .review_evidence import (
     reserve_review,
 )
 from .store import OwnerLockHeld, ResearchStore, StoreConflict, now_utc
-from .wake import OpenClawWakeSender, compose_wake, deliver, poll_owner_turn
+from .wake import (
+    OpenClawWakeSender,
+    OwnerPollUnavailable,
+    compose_wake,
+    deliver,
+    poll_owner_turn,
+)
 
 app = typer.Typer(help="Durable, bounded Quantipy research driver.")
 _SERVE_FATAL_EXIT = 78
+_MAX_CONSECUTIVE_POLL_FAILURES = 30
 
 
 def _root(value: Path) -> Path:
@@ -1785,6 +1792,7 @@ def serve(
             os.environ.get("OPENCLAW_GATEWAY_TOKEN", ""),
         )
         store.acquire_owner_lock()
+        consecutive_poll_failures = 0
         while True:
             # A concurrent cancel/reconcile owns the short lifecycle lock;
             # leave canonical state untouched and try on the next turn.
@@ -1794,7 +1802,19 @@ def serve(
             plan = compose_wake(store)
             if plan is not None:
                 deliver(store, sender, plan, session_key)
-            poll_owner_turn(store, sender)
+            try:
+                poll_owner_turn(store, sender)
+            except OwnerPollUnavailable as exc:
+                consecutive_poll_failures += 1
+                typer.echo(
+                    "owner poll unavailable "
+                    f"({consecutive_poll_failures}/{_MAX_CONSECUTIVE_POLL_FAILURES}): {exc}",
+                    err=True,
+                )
+                if consecutive_poll_failures >= _MAX_CONSECUTIVE_POLL_FAILURES:
+                    raise
+            else:
+                consecutive_poll_failures = 0
             if once:
                 return
             time.sleep(max(1, poll_seconds))

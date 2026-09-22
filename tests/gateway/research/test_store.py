@@ -25,6 +25,12 @@ from tests.gateway.research.conftest import implementation, review, run_plan, ve
 from tests.gateway.research.test_admission import _admit, _document, _payload
 
 
+def _completed_wake(store: ResearchStore, pending_key: str = "status-key") -> str:
+    assert store.reserve_wake(pending_key, None, "DRAFT", store.campaign()[1])
+    store.complete_wake(pending_key, "run-status")
+    return pending_key
+
+
 def _implemented_attempt(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
     *,
@@ -172,6 +178,83 @@ def test_store_rejects_pre_review_non_retry_without_mutation(
     assert {
         kind: store.evidence(attempt.attempt_id, kind) for kind in evidence_before
     } == evidence_before
+
+
+def test_update_wake_status_repeated_timeout_only_records_one_transition(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _source, _hypothesis = campaign
+    pending_key = _completed_wake(store)
+    checked_at: list[str] = []
+
+    def fake_now_utc() -> str:
+        value = f"2026-01-01T00:00:{len(checked_at):02d}Z"
+        checked_at.append(value)
+        return value
+
+    monkeypatch.setattr("gateway.research.store.now_utc", fake_now_utc)
+
+    store.update_wake_status(pending_key, "timeout")
+    first_row = store.wake_row(pending_key)
+    assert first_row is not None
+    first_checked_at = first_row["turn_checked_at"]
+    store.update_wake_status(pending_key, "timeout")
+    second_row = store.wake_row(pending_key)
+    assert second_row is not None
+    second_checked_at = second_row["turn_checked_at"]
+    store.update_wake_status(pending_key, "timeout")
+    third_row = store.wake_row(pending_key)
+    assert third_row is not None
+    third_checked_at = third_row["turn_checked_at"]
+
+    assert first_checked_at != second_checked_at != third_checked_at
+    status_events = [event for event in store.events() if event.kind == "owner_turn_status"]
+    assert len(status_events) == 1
+    assert json.loads(status_events[0].detail) == {"status": "timeout"}
+
+
+def test_update_wake_status_timeout_then_ok_records_both_transitions(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, _hypothesis = campaign
+    pending_key = _completed_wake(store)
+
+    store.update_wake_status(pending_key, "timeout")
+    store.update_wake_status(pending_key, "ok")
+
+    status_events = [event for event in store.events() if event.kind == "owner_turn_status"]
+    assert [json.loads(event.detail) for event in status_events] == [
+        {"status": "timeout"},
+        {"status": "ok"},
+    ]
+
+
+def test_update_wake_status_repeated_error_only_records_one_failure(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, _hypothesis = campaign
+    pending_key = _completed_wake(store)
+
+    store.update_wake_status(pending_key, "error")
+    store.update_wake_status(pending_key, "error")
+
+    failed_events = [event for event in store.events() if event.kind == "owner_turn_failed"]
+    assert len(failed_events) == 1
+    assert json.loads(failed_events[0].detail) == {"status": "error"}
+
+
+def test_update_wake_status_repeated_ok_only_records_one_transition(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, _hypothesis = campaign
+    pending_key = _completed_wake(store)
+
+    store.update_wake_status(pending_key, "ok")
+    store.update_wake_status(pending_key, "ok")
+
+    status_events = [event for event in store.events() if event.kind == "owner_turn_status"]
+    assert len(status_events) == 1
+    assert json.loads(status_events[0].detail) == {"status": "ok"}
 
 
 @pytest.mark.parametrize(

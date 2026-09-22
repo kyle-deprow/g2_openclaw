@@ -1825,41 +1825,37 @@ class ResearchStore:
     def update_wake_status(self, pending_key: str, status: str) -> None:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT attempt_id,turn_status FROM wake_deliveries WHERE pending_key=?",
+                (pending_key,),
+            ).fetchone()
+            previous_status = row["turn_status"] if row is not None else None
             conn.execute(
                 "UPDATE wake_deliveries SET turn_status=?,turn_checked_at=? WHERE pending_key=?",
                 (status, now_utc(), pending_key),
             )
-            if status == "error":
-                row = conn.execute(
-                    "SELECT attempt_id,state FROM wake_deliveries WHERE pending_key=?",
-                    (pending_key,),
-                ).fetchone()
-                if row is not None:
-                    attempt_row = (
-                        conn.execute(
-                            "SELECT hypothesis_id FROM attempts WHERE attempt_id=?",
-                            (row["attempt_id"],),
-                        ).fetchone()
-                        if row["attempt_id"]
-                        else None
-                    )
-                    first = conn.execute(
-                        "SELECT hypothesis_id FROM hypotheses ORDER BY hypothesis_id LIMIT 1"
+            if row is not None and status == "error" and previous_status != "error":
+                attempt_row = (
+                    conn.execute(
+                        "SELECT hypothesis_id FROM attempts WHERE attempt_id=?",
+                        (row["attempt_id"],),
                     ).fetchone()
-                    hyp = (
-                        str(attempt_row[0])
-                        if attempt_row
-                        else (str(first[0]) if first else "H0001")
-                    )
-                    self._event(
-                        conn,
-                        hyp,
-                        row["attempt_id"],
-                        "owner_turn_failed",
-                        {"status": status},
-                        "driver",
-                    )
-            else:
+                    if row["attempt_id"]
+                    else None
+                )
+                first = conn.execute(
+                    "SELECT hypothesis_id FROM hypotheses ORDER BY hypothesis_id LIMIT 1"
+                ).fetchone()
+                hyp = str(attempt_row[0]) if attempt_row else (str(first[0]) if first else "H0001")
+                self._event(
+                    conn,
+                    hyp,
+                    row["attempt_id"],
+                    "owner_turn_failed",
+                    {"status": status},
+                    "driver",
+                )
+            elif row is not None and status != previous_status:
                 row = conn.execute(
                     "SELECT attempt_id FROM wake_deliveries WHERE pending_key=?", (pending_key,)
                 ).fetchone()

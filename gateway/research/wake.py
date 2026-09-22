@@ -26,6 +26,10 @@ class WakeUncertain(RuntimeError):
     """The gateway may have accepted a wake before transport failed."""
 
 
+class OwnerPollUnavailable(RuntimeError):
+    """The owner-turn observation failed due to an unavailable transport."""
+
+
 class WakeSender(Protocol):
     def send(self, message: str, session_key: str, idempotency_key: str) -> str: ...
 
@@ -238,7 +242,10 @@ def poll_owner_turn(store: ResearchStore, sender: WakeSender, *, required: bool 
     if not rows:
         return
     row = rows[-1]
-    result = poll(str(row["run_id"]))
+    try:
+        result = poll(str(row["run_id"]))
+    except (OpenClawTransportError, WakeUncertain) as exc:
+        raise OwnerPollUnavailable(f"owner poll unavailable: {exc}") from exc
     status = (
         result.get("status", result.get("state", "unknown"))
         if isinstance(result, Mapping)

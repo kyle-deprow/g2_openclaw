@@ -5,12 +5,14 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 from click.testing import Result
 from gateway.cli import app
+from gateway.openclaw_client import OpenClawTransportError
 from gateway.research import cli as research_cli
 from gateway.research.contracts import (
     Attempt,
@@ -392,6 +394,79 @@ def test_fatal_serve_iteration_pauses_and_repeated_invocation_stays_quiet(
     assert reconciled == ["called"]
     assert store.get_attempt(attempt.attempt_id).state == AttemptState.RUN_QUEUED
     assert compose_wake(store) is None
+
+
+def test_serve_once_paused_campaign_tolerates_unavailable_owner_poll(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _source, _hypothesis = campaign
+    pending_key = "paused-poll-key"
+    assert store.reserve_wake(pending_key, None, "DRAFT", store.campaign()[1])
+    store.complete_wake(pending_key, "run-paused-poll")
+    store.pause("operator pause")
+    event_count_before = len(store.events())
+
+    class UnavailableSender:
+        def owner_task_status(self, _run_id: str) -> dict[str, object]:
+            raise OpenClawTransportError("connection refused")
+
+    monkeypatch.setattr(research_cli, "OpenClawWakeSender", lambda *_args: UnavailableSender())
+    result = runner.invoke(
+        app,
+        [
+            "research",
+            "serve",
+            "--session-key",
+            "owner",
+            "--root",
+            str(store.root),
+            "--once",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "owner poll unavailable (1/30)" in result.stderr
+    assert store.campaign()[0] == "PAUSED"
+    assert len(store.events()) == event_count_before
+    assert not any(event.kind == "serve_failed" for event in store.events()[event_count_before:])
+    assert not any(event.kind == "campaign_paused" for event in store.events()[event_count_before:])
+
+
+def test_serve_owner_poll_unavailable_pauses_at_threshold(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _source, _hypothesis = campaign
+    pending_key = "threshold-poll-key"
+    assert store.reserve_wake(pending_key, None, "DRAFT", store.campaign()[1])
+    store.complete_wake(pending_key, "run-threshold-poll")
+    store.pause("operator pause")
+
+    class UnavailableSender:
+        def owner_task_status(self, _run_id: str) -> dict[str, object]:
+            raise OpenClawTransportError("connection refused")
+
+    monkeypatch.setattr(research_cli, "OpenClawWakeSender", lambda *_args: UnavailableSender())
+    monkeypatch.setattr(research_cli, "_MAX_CONSECUTIVE_POLL_FAILURES", 2)
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    result = runner.invoke(
+        app,
+        [
+            "research",
+            "serve",
+            "--session-key",
+            "owner",
+            "--root",
+            str(store.root),
+            "--poll-seconds",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 78, result.output
+    assert store.campaign()[0] == "PAUSED"
+    failed_events = [event for event in store.events() if event.kind == "serve_failed"]
+    assert len(failed_events) == 1
+    assert "OwnerPollUnavailable" in failed_events[0].detail
 
 
 def test_host_failure_terminal_uses_stable_check_name_and_detail(tmp_path: Path) -> None:

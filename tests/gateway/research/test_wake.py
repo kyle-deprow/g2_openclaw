@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from gateway.openclaw_client import OpenClawTransportError
 from gateway.research.contracts import (
     AttemptDecision,
     AttemptState,
@@ -13,6 +14,7 @@ from gateway.research.machine import queue_run, start_run
 from gateway.research.store import ResearchStore
 from gateway.research.wake import (
     OpenClawWakeSender,
+    OwnerPollUnavailable,
     WakeRejected,
     WakeUncertain,
     compose_wake,
@@ -163,6 +165,56 @@ def test_owner_poll_without_mapping_is_explicit_runtime_gate(
 
     poll_owner_turn(store, NoPoll())
     assert store.wake_rows()[-1]["turn_status"] == "pending_runtime_gate"
+
+
+def test_owner_poll_transport_failure_does_not_update_wake(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, _hypothesis = campaign
+    plan = compose_wake(store)
+    assert plan is not None
+    deliver(store, Sender(), plan, "owner")
+    before = store.wake_row(plan.pending_key)
+    assert before is not None
+    events_before = store.events()
+
+    class UnavailableSender(Sender):
+        def owner_task_status(self, _run_id: str) -> dict[str, object]:
+            raise OpenClawTransportError("connection refused")
+
+    with pytest.raises(OwnerPollUnavailable, match="connection refused"):
+        poll_owner_turn(store, UnavailableSender())
+
+    after = store.wake_row(plan.pending_key)
+    assert after is not None
+    assert after["turn_status"] == before["turn_status"]
+    assert after["turn_checked_at"] == before["turn_checked_at"]
+    assert store.events() == events_before
+
+
+def test_owner_poll_uncertain_failure_does_not_update_wake(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, _hypothesis = campaign
+    plan = compose_wake(store)
+    assert plan is not None
+    deliver(store, Sender(), plan, "owner")
+    before = store.wake_row(plan.pending_key)
+    assert before is not None
+    events_before = store.events()
+
+    class UncertainSender(Sender):
+        def owner_task_status(self, _run_id: str) -> dict[str, object]:
+            raise WakeUncertain("poll response unavailable")
+
+    with pytest.raises(OwnerPollUnavailable, match="poll response unavailable"):
+        poll_owner_turn(store, UncertainSender())
+
+    after = store.wake_row(plan.pending_key)
+    assert after is not None
+    assert after["turn_status"] == before["turn_status"]
+    assert after["turn_checked_at"] == before["turn_checked_at"]
+    assert store.events() == events_before
 
 
 def test_unknown_owner_turn_status_is_persisted_without_renudge(
