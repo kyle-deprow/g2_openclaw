@@ -1409,7 +1409,40 @@ def _prepare_push_script_home(
     openclaw_home.mkdir()
     core_database = openclaw_home / "state/openclaw.sqlite"
     core_database.parent.mkdir(parents=True)
-    core_database.write_bytes(b"synthetic core database fixture\n")
+    with sqlite3.connect(core_database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_meta (
+                meta_key TEXT NOT NULL PRIMARY KEY,
+                role TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                agent_id TEXT,
+                app_version TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            ) STRICT;
+            CREATE TABLE config_machine_state (
+                state_key TEXT NOT NULL PRIMARY KEY,
+                value_json TEXT NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            ) STRICT;
+            INSERT INTO schema_meta VALUES
+                ('primary', 'global', 15, NULL, '2026.9.2', 1, 1);
+            """
+        )
+        connection.executemany(
+            "INSERT INTO config_machine_state VALUES (?, ?, ?)",
+            [
+                ("auth.sharedStore", '{"location":"state-db"}', 1),
+                (
+                    "authProfiles.store",
+                    '{"version":1,"profiles":{"openai:fixture":{"provider":"openai",'
+                    '"type":"oauth","access":"access-sentinel","refresh":"refresh-sentinel"}}}',
+                    1,
+                ),
+                ("authProfiles.state", '{"version":1}', 1),
+            ],
+        )
     auth_db = openclaw_home / "agents/main/agent/openclaw-agent.sqlite"
     auth_db.parent.mkdir(parents=True)
     with sqlite3.connect(auth_db) as connection:
@@ -1436,9 +1469,16 @@ def _prepare_push_script_home(
             );
             INSERT INTO schema_meta VALUES
                 ('primary', 'agent', 19, 'main', '2026.9.2', 1, 1);
-            INSERT INTO auth_profile_store VALUES
-                ('openai:test', '{"provider":"openai","mode":"oauth"}', 1);
             """
+        )
+        connection.execute(
+            "INSERT INTO auth_profile_store VALUES (?, ?, ?)",
+            (
+                "primary",
+                '{"version":1,"profiles":{"openai:fixture":{"provider":"openai",'
+                '"type":"oauth","access":"access-sentinel","refresh":"refresh-sentinel"}}}',
+                1,
+            ),
         )
     target_db = openclaw_home / "agents/research-orchestrator/agent/openclaw-agent.sqlite"
     target_db.parent.mkdir(parents=True, exist_ok=True)
@@ -2956,7 +2996,7 @@ def test_push_script_paused_mode_publishes_gated_config_without_lifecycle_side_e
         "heartbeat" not in agent or agent["heartbeat"]["every"] == "0m"
         for agent in published["agents"]["entries"].values()
     )
-    assert "DEFERRED: paused mode skipped Codex auth-file synchronization." in result.stdout
+    assert "DEFERRED: paused mode skipped native Codex auth readiness check." in result.stdout
     assert "DEFERRED: paused mode skipped systemd user-manager daemon-reload." in result.stdout
 
     systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
@@ -5373,7 +5413,7 @@ def test_push_script_rejects_hardlinked_managed_sqlite_auth_store_before_mutatio
     assert result.returncode == 1
     assert "Destination path is a hard-linked regular file" in result.stderr
     assert str(target_db) in result.stderr
-    assert "syncing managed OpenClaw agent auth database" in result.stderr
+    assert "validating native OpenClaw agent database" in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
     assert external_alias.read_bytes() == b"external sqlite alias bytes\n"
     assert _mode(external_alias) == 0o640

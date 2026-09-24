@@ -13,9 +13,8 @@
 #   - jq (https://jqlang.github.io/jq/)
 #   - OpenClaw CLI exactly 2026.9.2
 #   - MemPalace installed with 'make mempalace-install'
-#   - For codex: run 'openclaw models auth login --provider openai' for main;
-#     this script syncs that OpenClaw-managed Codex OAuth profile into managed
-#     agent auth stores.
+#   - For codex: native OpenClaw shared OpenAI/Codex OAuth must already be
+#     configured; this script checks native readiness without copying credentials.
 #   - For azure: run 'az login' to authenticate (Entra ID tokens acquired automatically)
 
 set -euo pipefail
@@ -197,10 +196,10 @@ NATIVE_CRASH_HARDENING_LINES=(
   "OOMPolicy=kill"
   "RestartPreventExitStatus=SIGABRT SIGBUS SIGFPE SIGILL SIGQUIT SIGSEGV SIGSYS SIGTRAP SIGXCPU SIGXFSZ"
 )
-sync_managed_agent_codex_auth() {
+check_managed_agent_codex_auth_readiness() {
   PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-    "${PYTHON_BIN}" -m gateway.deployment.auth_sync sync \
-    -- "${OPENCLAW_PUSH_HOME}" "${REPO_CONFIG}" "${OPENCLAW_BIN_RESOLVED}"
+    "${PYTHON_BIN}" -m gateway.deployment.auth_readiness check \
+    -- "${OPENCLAW_PUSH_HOME}" "${REPO_CONFIG}"
 }
 
 build_string_array_json() {
@@ -2783,12 +2782,12 @@ fi
 if [[ "${PROVIDER}" == "codex" ]]; then
   if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
     echo "DEFERRED: paused mode skipped stale Azure user-manager environment cleanup."
-    echo "DEFERRED: paused mode skipped Codex auth-file synchronization."
+    echo "DEFERRED: paused mode skipped native Codex auth readiness check."
   else
     snapshot_managed_artifact_path "${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}"
     snapshot_stale_systemd_environment_paths
     remove_stale_azure_node_options_for_codex
-    sync_managed_agent_codex_auth
+    check_managed_agent_codex_auth_readiness
   fi
 fi
 
@@ -2922,7 +2921,7 @@ echo ""
 if [[ "${PROVIDER}" == "codex" ]]; then
   echo "── OpenAI / Codex ──"
   echo "Using model: ${MODEL_PRIMARY}"
-  echo "Required auth: openclaw models auth login --provider openai"
+  echo "Native auth readiness: shared OpenAI/Codex OAuth verified during publication."
   echo "Codex plugin is enabled; OpenAI provider runtime is pinned to codex."
   echo ""
 elif [[ "${PROVIDER}" == "azure" ]]; then
