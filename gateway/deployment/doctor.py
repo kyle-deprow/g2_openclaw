@@ -195,6 +195,7 @@ def validate() -> None:
             "managed by bun",
             "managed by npm",
             "managed by pnpm",
+            "managed by Vite+",
             "managed package root",
             "npm package root",
             "running package root",
@@ -208,6 +209,7 @@ def validate() -> None:
             and details.get("managed by bun") == "false"
             and details.get("managed by npm") == "true"
             and details.get("managed by pnpm") == "false"
+            and details.get("managed by Vite+") == "false"
             and details.get("managed package root") == str(app_server_package_root)
             and details.get("running package root") == str(app_server_package_root)
             and is_abs_path(details.get("npm package root"))

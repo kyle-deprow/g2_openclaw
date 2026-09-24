@@ -670,6 +670,7 @@ const checks = {
       "managed by bun": "false",
       "managed by npm": "true",
       "managed by pnpm": "false",
+      "managed by Vite+": "false",
       "managed package root": packageRoot,
       "npm package root": npmPackageRoot,
       "running package root": packageRoot
@@ -4298,6 +4299,22 @@ def test_push_script_rejects_allowed_codex_doctor_detail_key_drift(
     assert result.returncode != 0
     assert "unexpected fatal Codex doctor checks" in result.stderr
     assert f"{check_id}=" in result.stderr
+    assert "Done. Config pushed successfully." not in result.stdout
+
+
+def test_push_script_rejects_managed_vite_installation(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["MOCK_CODEX_DOCTOR_DETAIL_KEY"] = "managed by Vite+"
+    env["MOCK_CODEX_DOCTOR_DETAIL_VALUE"] = "true"
+    env["MOCK_CODEX_DOCTOR_EXTRA_DETAIL_CHECK"] = "installation"
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "unexpected fatal Codex doctor checks" in result.stderr
+    assert "installation=fail" in result.stderr
     assert "Done. Config pushed successfully." not in result.stdout
 
 
