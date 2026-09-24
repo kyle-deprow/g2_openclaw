@@ -568,9 +568,7 @@ def _write_push_script_fixture_bin(
     gateway_active_state: str = "inactive",
 ) -> Path:
     mock_bin = home / "mock-bin"
-    codex_package = (
-        home / "mock-openclaw-project/node_modules/@openclaw/codex/node_modules/@openai/codex"
-    )
+    codex_package = home / "mock-openclaw-project/node_modules/@openai/codex"
     codex_bin = codex_package / "bin"
     codex_bin.mkdir(parents=True)
     (codex_bin / "codex.js").write_text(
@@ -1482,9 +1480,7 @@ def _prepare_push_script_home(
         gateway_load_state=gateway_load_state,
         gateway_active_state=gateway_active_state,
     )
-    codex_root = (
-        home / "mock-openclaw-project/node_modules/@openclaw/codex/node_modules/@openai/codex"
-    )
+    codex_root = home / "mock-openclaw-project/node_modules/@openai/codex"
     (codex_root / "package.json").write_text(
         json.dumps(
             {
@@ -1604,8 +1600,7 @@ def _prepare_push_script_home(
             "FIND_LOG": str(home / "find.log"),
             "OPENCLAW_LOG": str(home / "openclaw.log"),
             "MOCK_CODEX_RESOLVED_PATH": str(
-                home
-                / "mock-openclaw-project/node_modules/@openclaw/codex/node_modules/@openai/codex"
+                home / "mock-openclaw-project/node_modules/@openai/codex"
             ),
             "MOCK_ACPX_PLUGIN_PATH": str(acpx_root),
             "RESEARCH_OWNER_PERSONA_SRC": str(persona_dir),
@@ -3581,11 +3576,7 @@ def test_push_script_allows_codex_doctor_newer_codex_update_probe_shape(
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     env["MOCK_CODEX_DOCTOR_UPDATE_CAPTURED_SHAPE"] = "1"
-    env["MOCK_CODEX_DOCTOR_UPDATE_RUNNING_PACKAGE_ROOT"] = str(
-        Path(env["HOME"])
-        / ".openclaw/npm/projects/openclaw-codex-fixture/node_modules/@openclaw/codex"
-        / "node_modules/@openai/codex"
-    )
+    env["MOCK_CODEX_DOCTOR_UPDATE_RUNNING_PACKAGE_ROOT"] = env["MOCK_CODEX_RESOLVED_PATH"]
 
     result = _run_push_script(env)
 
@@ -3602,11 +3593,7 @@ def test_push_script_allows_structural_latest_codex_semver(
     env = _prepare_push_script_home(tmp_path)
     env["MOCK_CODEX_DOCTOR_UPDATE_CAPTURED_SHAPE"] = "1"
     env["MOCK_CODEX_DOCTOR_UPDATE_LATEST_VERSION"] = latest_version
-    env["MOCK_CODEX_DOCTOR_UPDATE_RUNNING_PACKAGE_ROOT"] = str(
-        Path(env["HOME"])
-        / ".openclaw/npm/projects/openclaw-codex-fixture/node_modules/@openclaw/codex"
-        / "node_modules/@openai/codex"
-    )
+    env["MOCK_CODEX_DOCTOR_UPDATE_RUNNING_PACKAGE_ROOT"] = env["MOCK_CODEX_RESOLVED_PATH"]
 
     result = _run_push_script(env)
 
@@ -3621,11 +3608,7 @@ def test_push_script_rejects_codex_doctor_newer_update_probe_shape_drift(
 ) -> None:
     env = _prepare_push_script_home(tmp_path)
     env["MOCK_CODEX_DOCTOR_UPDATE_CAPTURED_SHAPE"] = "1"
-    env["MOCK_CODEX_DOCTOR_UPDATE_RUNNING_PACKAGE_ROOT"] = str(
-        Path(env["HOME"])
-        / ".openclaw/npm/projects/openclaw-codex-fixture/node_modules/@openclaw/codex"
-        / "node_modules/@openai/codex"
-    )
+    env["MOCK_CODEX_DOCTOR_UPDATE_RUNNING_PACKAGE_ROOT"] = env["MOCK_CODEX_RESOLVED_PATH"]
     if drift == "summary":
         env["MOCK_CODEX_DOCTOR_UPDATE_SUMMARY"] = "update would target another npm install"
     elif drift == "latest_version":

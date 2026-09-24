@@ -95,6 +95,7 @@ REQUIRED_CODEX_PLUGIN_VERSION="2026.9.2"
 REQUIRED_CODEX_APP_SERVER_VERSION="0.153.4"
 OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""
+CODEX_APP_SERVER_PACKAGE_ROOT=""
 CODEX_APP_SERVER_CLI_RESOLVED=""
 ACPX_ADAPTER_BIN=""
 RESEARCH_REVIEWER_LAUNCHER="${REPO_ROOT}/scripts/research-reviewer-cli.py"
@@ -1350,7 +1351,8 @@ require_codex_runtime_exact() {
     return 1
   fi
   IFS=$'\t' read -r plugin_version app_server_version app_server_path <<< "${inspect_json}"
-  CODEX_APP_SERVER_CLI_RESOLVED="${app_server_path}/bin/codex.js"
+  CODEX_APP_SERVER_PACKAGE_ROOT="${app_server_path}"
+  CODEX_APP_SERVER_CLI_RESOLVED="${CODEX_APP_SERVER_PACKAGE_ROOT}/bin/codex.js"
   echo "Codex runtime validated: @openclaw/codex ${plugin_version} embeds @openai/codex ${app_server_version}"
 }
 validate_repo_openclaw_config() {
@@ -2502,7 +2504,7 @@ validate_codex_doctor_owned_checks() {
 
   doctor_stdout="$(mktemp)"
   doctor_stderr="$(mktemp)"
-  app_server_package_root="$(dirname "$(dirname "${CODEX_APP_SERVER_CLI_RESOLVED}")")"
+  app_server_package_root="${CODEX_APP_SERVER_PACKAGE_ROOT}"
   if env -u NODE_OPTIONS CODEX_HOME="${codex_home}" \
     node "${CODEX_APP_SERVER_CLI_RESOLVED}" --strict-config doctor --json \
     >"${doctor_stdout}" 2>"${doctor_stderr}"; then
@@ -2711,7 +2713,7 @@ run_research_owner_command_contract_probe() {
   fi
   if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.command_probe probe \
-    -- "${codex_home}" "${CODEX_APP_SERVER_CLI_RESOLVED}"; then
+    -- "${codex_home}" "${CODEX_APP_SERVER_PACKAGE_ROOT}" "${CODEX_APP_SERVER_CLI_RESOLVED}"; then
     echo "ERROR: Research owner command-contract probe failed; rolling back managed deployment from backup ${BACKUP}." >&2
     return 1
   fi

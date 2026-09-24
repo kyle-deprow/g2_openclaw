@@ -12,20 +12,14 @@ from gateway.deployment.command_probe import CommandProbeError
 
 
 def _embedded_cli(tmp_path: Path) -> Path:
-    cli = (
-        tmp_path
-        / "node_modules"
-        / "@openclaw"
-        / "codex"
-        / "node_modules"
-        / "@openai"
-        / "codex"
-        / "bin"
-        / "codex.js"
-    )
+    cli = _embedded_package_root(tmp_path) / "bin/codex.js"
     cli.parent.mkdir(parents=True, exist_ok=True)
     cli.touch()
     return cli
+
+
+def _embedded_package_root(tmp_path: Path) -> Path:
+    return tmp_path / "node_modules/@openai/codex"
 
 
 def _unavailable_frame(*, available: bool = False) -> str:
@@ -68,7 +62,7 @@ def test_probe_rejects_unapproved_command_drift(
     )
 
     with pytest.raises(CommandProbeError, match="unsupported research status command contract"):
-        command_probe.run_probe(tmp_path, _embedded_cli(tmp_path))
+        command_probe.run_probe(tmp_path, _embedded_package_root(tmp_path), _embedded_cli(tmp_path))
 
 
 def test_probe_accepts_exact_unavailable_status_and_creates_no_fixture(
@@ -83,7 +77,9 @@ def test_probe_accepts_exact_unavailable_status_and_creates_no_fixture(
         return subprocess.CompletedProcess(args, 0, _unavailable_frame(), "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    result = command_probe.run_probe(tmp_path, _embedded_cli(tmp_path))
+    result = command_probe.run_probe(
+        tmp_path, _embedded_package_root(tmp_path), _embedded_cli(tmp_path)
+    )
 
     assert result == 0
     args, kwargs = calls[0]
@@ -120,7 +116,12 @@ def test_probe_provisions_only_isolated_command_profile(
         return subprocess.CompletedProcess(args, 0, _unavailable_frame(), "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert command_probe.run_probe(production_like_home, _embedded_cli(tmp_path)) == 0
+    assert (
+        command_probe.run_probe(
+            production_like_home, _embedded_package_root(tmp_path), _embedded_cli(tmp_path)
+        )
+        == 0
+    )
 
     assert observed["home"] != str(production_like_home)
     assert observed["cwd"] == observed["home"]
@@ -139,8 +140,14 @@ def test_probe_fails_closed_on_healthy_or_malformed_status(
         return subprocess.CompletedProcess(args, 0, outputs.pop(0), "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert command_probe.run_probe(tmp_path, _embedded_cli(tmp_path)) == 1
-    assert command_probe.run_probe(tmp_path, _embedded_cli(tmp_path)) == 1
+    assert (
+        command_probe.run_probe(tmp_path, _embedded_package_root(tmp_path), _embedded_cli(tmp_path))
+        == 1
+    )
+    assert (
+        command_probe.run_probe(tmp_path, _embedded_package_root(tmp_path), _embedded_cli(tmp_path))
+        == 1
+    )
     captured = capsys.readouterr().err
     assert "unexpected status frame shape" in captured
     assert "did not emit JSON" in captured
@@ -157,7 +164,10 @@ def test_probe_fails_if_status_command_creates_root(
         return subprocess.CompletedProcess(args, 0, _unavailable_frame(), "")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert command_probe.run_probe(tmp_path, _embedded_cli(tmp_path)) == 1
+    assert (
+        command_probe.run_probe(tmp_path, _embedded_package_root(tmp_path), _embedded_cli(tmp_path))
+        == 1
+    )
     assert "created the private missing root" in capsys.readouterr().err
 
 
@@ -170,7 +180,9 @@ def test_probe_fails_closed_on_nonzero_status_command(
         return subprocess.CompletedProcess(args, 2, "", "status command failed")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    result = command_probe.run_probe(tmp_path, _embedded_cli(tmp_path))
+    result = command_probe.run_probe(
+        tmp_path, _embedded_package_root(tmp_path), _embedded_cli(tmp_path)
+    )
 
     assert result == 1
     assert "exit code 2" in capsys.readouterr().err
@@ -187,7 +199,10 @@ def test_probe_fails_closed_on_timeout(
         raise subprocess.TimeoutExpired(args, timeout)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert command_probe.run_probe(tmp_path, _embedded_cli(tmp_path)) == 1
+    assert (
+        command_probe.run_probe(tmp_path, _embedded_package_root(tmp_path), _embedded_cli(tmp_path))
+        == 1
+    )
     assert "timed out" in capsys.readouterr().err
 
 
@@ -200,5 +215,34 @@ def test_probe_fails_closed_on_execution_error(
         raise OSError("sandbox executable unavailable")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    assert command_probe.run_probe(tmp_path, _embedded_cli(tmp_path)) == 1
+    assert (
+        command_probe.run_probe(tmp_path, _embedded_package_root(tmp_path), _embedded_cli(tmp_path))
+        == 1
+    )
     assert "could not execute" in capsys.readouterr().err
+
+
+def test_probe_rejects_cli_outside_verified_package_root(tmp_path: Path) -> None:
+    cli = _embedded_cli(tmp_path)
+    wrong_root = tmp_path / "other/node_modules/@openai/codex"
+
+    with pytest.raises(CommandProbeError, match="does not match verified package root"):
+        command_probe.run_probe(tmp_path, wrong_root, cli)
+
+
+def test_probe_rejects_wrong_cli_under_verified_package_root(tmp_path: Path) -> None:
+    package_root = _embedded_package_root(tmp_path)
+    wrong_cli = tmp_path / "other/codex.js"
+    wrong_cli.parent.mkdir(parents=True)
+    wrong_cli.touch()
+
+    with pytest.raises(CommandProbeError, match="does not match verified package root"):
+        command_probe.run_probe(tmp_path, package_root, wrong_cli)
+
+
+def test_probe_rejects_cli_from_verified_root_when_exact_cli_is_missing(tmp_path: Path) -> None:
+    package_root = _embedded_package_root(tmp_path)
+    missing_cli = package_root / "bin/codex.js"
+
+    with pytest.raises(CommandProbeError, match="embedded Codex CLI not found"):
+        command_probe.run_probe(tmp_path, package_root, missing_cli)

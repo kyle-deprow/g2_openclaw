@@ -101,12 +101,11 @@ def validate() -> None:
             and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?", value) is not None
         )
 
-    def is_openclaw_embedded_codex_root(value: object) -> bool:
-        if not is_abs_path(value):
-            return False
-        prefix = f"{Path.home() / '.openclaw' / 'npm'}/"
-        suffix = "/node_modules/@openclaw/codex/node_modules/@openai/codex"
-        return value.startswith(prefix) and value.endswith(suffix)
+    def is_verified_embedded_codex_root(
+        value: object,
+        app_server_package_root: Path,
+    ) -> bool:
+        return is_abs_path(value) and value == str(app_server_package_root)
 
     def is_string_list(value: object) -> TypeGuard[list[str]]:
         return isinstance(value, list) and all(isinstance(item, str) for item in value)
@@ -270,7 +269,9 @@ def validate() -> None:
             and is_semver(details.get("latest version"))
             and details.get("latest version status") == "newer version is available"
             and is_abs_path(details.get("npm package root"))
-            and is_openclaw_embedded_codex_root(details.get("running package root"))
+            and is_verified_embedded_codex_root(
+                details.get("running package root"), app_server_package_root
+            )
             and details.get("update action") == "npm install -g @openai/codex"
             and is_string_list(details.get("version cache"))
             and isinstance(check.get("remediation"), str)

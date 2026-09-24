@@ -29,16 +29,6 @@ enabled = false
 """
 _COMMAND_PROGRAM = "gateway-cli"
 _COMMAND_NAME = "research-status"
-_EMBEDDED_CODEX_SUFFIX = (
-    "node_modules",
-    "@openclaw",
-    "codex",
-    "node_modules",
-    "@openai",
-    "codex",
-    "bin",
-    "codex.js",
-)
 _STATUS_FIELDS = frozenset(
     {
         "type",
@@ -74,12 +64,15 @@ def extract_commanded_invocations(probe_root: Path | None = None) -> tuple[str, 
     return (f"{_COMMAND_PROGRAM} {_COMMAND_NAME} --root {shlex.quote(str(root))}",)
 
 
-def resolve_embedded_codex_binary(cli_path: Path) -> tuple[str, str]:
-    """Resolve the Node command and embedded Codex CLI like the doctor step."""
-    if tuple(cli_path.parts[-len(_EMBEDDED_CODEX_SUFFIX) :]) != _EMBEDDED_CODEX_SUFFIX:
+def resolve_embedded_codex_binary(
+    package_root: Path,
+    cli_path: Path,
+) -> tuple[str, str]:
+    """Resolve the Node command and CLI under the verified package root."""
+    expected_cli_path = package_root / "bin/codex.js"
+    if cli_path != expected_cli_path:
         raise CommandProbeError(
-            "embedded Codex CLI must be bin/codex.js under "
-            "@openclaw/codex/node_modules/@openai/codex"
+            f"embedded Codex CLI {cli_path} does not match verified package root {package_root}"
         )
     if not cli_path.is_file():
         raise CommandProbeError(f"embedded Codex CLI not found at {cli_path}")
@@ -155,9 +148,13 @@ def _provision_command_profile(parent: Path) -> Path:
     return codex_home
 
 
-def run_probe(codex_home: Path, embedded_codex_cli: Path) -> int:
+def run_probe(
+    codex_home: Path,
+    verified_package_root: Path,
+    embedded_codex_cli: Path,
+) -> int:
     """Run the replacement status command and return a deployment status."""
-    node_binary, cli = resolve_embedded_codex_binary(embedded_codex_cli)
+    node_binary, cli = resolve_embedded_codex_binary(verified_package_root, embedded_codex_cli)
     failures: list[tuple[str, str, str]] = []
 
     with tempfile.TemporaryDirectory(prefix="g2-research-status-probe-") as temp_parent:
@@ -236,6 +233,7 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     probe_parser = subparsers.add_parser("probe")
     probe_parser.add_argument("codex_home", type=Path)
+    probe_parser.add_argument("verified_package_root", type=Path)
     probe_parser.add_argument("embedded_codex_cli", type=Path)
     return parser
 
@@ -244,7 +242,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:
-        return run_probe(args.codex_home, args.embedded_codex_cli)
+        return run_probe(args.codex_home, args.verified_package_root, args.embedded_codex_cli)
     except (CommandProbeError, OSError) as exc:
         print(f"command-contract probe failed: {exc}", file=sys.stderr)
         return 1
