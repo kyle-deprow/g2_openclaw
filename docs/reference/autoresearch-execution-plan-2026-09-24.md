@@ -2,6 +2,15 @@
 
 Authority: user requests implementation of the 2026-09-24 handoff, accepted changes on both repositories' main branches, frequent origin pushes, safe worktree cleanup, and continued Luna/Sol implementation and monitoring until a useful historical end-to-end result. This plan supplements the current handoff; it does not alter frozen research science or the application's Opus review gate.
 
+## Verified progress
+
+- `ec1600e`: worktree-independent review collection and one-time host-failure supersession, including atomic trigger migration. Luna fix/Sol READY; parent 557 research tests and Ruff/format/mypy passed; pushed to origin/main.
+- `34fa94c`: in-sandbox provenance gate and historical reserved-bundle integration. Luna fix/Sol READY; parent 581 research tests including real containment and Ruff/format/mypy passed; pushed to origin/main.
+- Quantipy main `44c77a8` pushed to origin/main; no scientific source changes promoted by the operator.
+- All 16 registered secondary worktrees were archived, compared against their originals, checksum-verified again immediately before removal, and removed. Only the two main checkouts remain registered. Recovery details: `autoresearch-cleanup-2026-09-24.md`.
+- Deployment is not yet accepted: default resolution selected stale OpenClaw2026.7.1-2; explicit supported `OPENCLAW_BIN=/home/dev/.local/bin/openclaw` selects installed2026.9.2 but publication's Codex self-check rejected managed versus global npm package locations. Publication rolled back. Diagnosis is delegated; no runtime guard bypass or provider change is authorized.
+- Campaign remains paused33/cap13; no historical job or trading result yet. Three supplied historical planning documents remain untracked and unchanged rather than being published without a separate content review.
+
 ## Ordered work and acceptance
 
 1. Reconcile actual worktrees/processes against the handoff. Preserve all dirty work, immutable research evidence, and archive refs. Do not restart an existing live worker.
