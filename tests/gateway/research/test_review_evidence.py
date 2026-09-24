@@ -88,6 +88,7 @@ def _host_fixture(
     *,
     status: str = "succeeded",
     verdict: str = "PASS",
+    findings: tuple[str, ...] = (),
 ) -> tuple[Path, Path, Path]:
     reservation_payload = json.loads(store.evidence(attempt_id, "review_reservation"))
     label = str(reservation_payload["label"])
@@ -187,7 +188,7 @@ def _host_fixture(
         "attempt_id": attempt_id,
         "commit": str(reservation_payload["commit"]),
         "spec_sha256": str(reservation_payload["hypothesis_spec_sha256"]),
-        "findings": [],
+        "findings": list(findings),
     }
     transcript = {
         "type": "assistant",
@@ -255,12 +256,19 @@ def _prepare_review(
     *,
     status: str = "succeeded",
     verdict: str = "PASS",
+    findings: tuple[str, ...] = (),
 ) -> tuple[ResearchStore, str, Path, Path, Path, Path]:
     store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
     reserve_review(store, attempt_id, bundle, "owner")
     acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
     core, sessions, projects = _host_fixture(
-        store, attempt_id, bundle, tmp_path, status=status, verdict=verdict
+        store,
+        attempt_id,
+        bundle,
+        tmp_path,
+        status=status,
+        verdict=verdict,
+        findings=findings,
     )
     return store, attempt_id, bundle, core, sessions, projects
 
@@ -728,6 +736,7 @@ def test_collect_recovers_from_pruned_task_run_using_subagent_run(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
     store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
+    attempt = store.get_attempt(attempt_id)
     reservation = json.loads(store.evidence(attempt_id, "review_reservation"))
     reserved_ms = int(
         datetime.fromisoformat(str(reservation["reserved_at"]).replace("Z", "+00:00")).timestamp()
@@ -736,13 +745,137 @@ def test_collect_recovers_from_pruned_task_run_using_subagent_run(
     with sqlite3.connect(core) as conn:
         conn.execute("DELETE FROM task_runs")
     _insert_subagent(core, str(reservation["label"]), reserved_ms)
+    worktree = Path(attempt.worktree_path)
+    for path in worktree.rglob("*"):
+        path.chmod(path.stat().st_mode | 0o700)
+    worktree.chmod(worktree.stat().st_mode | 0o700)
+    shutil.rmtree(attempt.worktree_path)
 
     result = collect_review(store, attempt_id, core, sessions, projects)
 
     assert result.state == AttemptState.REVIEW_PASSED
-    assert json.loads(store.evidence(attempt_id, "review_host_evidence"))["task_source"] == (
-        "subagent_runs"
+    review = json.loads(store.evidence(attempt_id, "review"))
+    host = json.loads(store.evidence(attempt_id, "review_host_evidence"))
+    assert review["verdict"] == "PASS"
+    assert review["findings"] == []
+    assert host["task_source"] == "subagent_runs"
+    assert "reason" not in host
+
+
+def test_collect_records_transcript_bound_bundle_mutation_failure(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, attempt_id, bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
+    bundle.chmod(0o755)
+    instructions = bundle / "instructions.md"
+    instructions.chmod(0o644)
+    instructions.write_text("changed", encoding="utf-8")
+    instructions.chmod(0o444)
+    bundle.chmod(0o555)
+
+    result = collect_review(store, attempt_id, core, sessions, projects)
+
+    assert result.state == AttemptState.REVIEW_FAILED
+    review = json.loads(store.evidence(attempt_id, "review"))
+    host = json.loads(store.evidence(attempt_id, "review_host_evidence"))
+    assert review["verdict"] == "FAIL"
+    assert review["findings"] == ["bundle_mutated"]
+    assert host["reason"] == "bundle_mutated"
+    assert host["transcript_sha256"]
+
+
+def test_collect_supersedes_failed_verification_once(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
+
+    def fail_reserved_bundle(_root: Path, _expected_digest: str) -> str:
+        raise BundleError("x")
+
+    monkeypatch.setattr(review_evidence, "_verify_reserved_bundle", fail_reserved_bundle)
+    first = collect_review(store, attempt_id, core, sessions, projects)
+    assert first.state == AttemptState.REVIEW_FAILED
+    assert json.loads(store.evidence(attempt_id, "review"))["findings"] == ["bundle_invalid: x"]
+
+    monkeypatch.undo()
+    second = collect_review(store, attempt_id, core, sessions, projects)
+
+    assert second.state == AttemptState.REVIEW_PASSED
+    assert json.loads(store.evidence(attempt_id, "review"))["verdict"] == "PASS"
+    assert json.loads(store.evidence(attempt_id, "review_host_evidence"))["verdict"] == "PASS"
+    attempt_dir = store.root / "hypotheses" / "H0001" / "attempts" / attempt_id
+    assert (attempt_dir / "review_superseded.json").is_file()
+    assert (attempt_dir / "review_host_evidence_superseded.json").is_file()
+    with store._connect() as conn:
+        kinds = [
+            str(row[0])
+            for row in conn.execute(
+                "SELECT kind FROM attempt_evidence WHERE attempt_id=? ORDER BY kind",
+                (attempt_id,),
+            ).fetchall()
+        ]
+    assert "review_superseded" in kinds
+    assert "review_host_evidence_superseded" in kinds
+    assert len([event for event in store.events() if event.kind == "review_recollected"]) == 1
+
+    events_before = store.events()
+    replay = collect_review(store, attempt_id, core, sessions, projects)
+    assert replay == second
+    assert store.events() == events_before
+
+
+def test_collect_supersedes_failed_verification_with_transcript_fail(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    findings = (
+        "severity=high; location=source/a.py:1; explanation=first finding",
+        "severity=medium; location=source/b.py:2; explanation=second finding",
+        "severity=low; location=source/c.py:3; explanation=third finding",
+        "severity=high; location=source/d.py:4; explanation=fourth finding",
     )
+    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(
+        campaign, tmp_path, verdict="FAIL", findings=findings
+    )
+
+    def fail_reserved_bundle(_root: Path, _expected_digest: str) -> str:
+        raise BundleError("x")
+
+    monkeypatch.setattr(review_evidence, "_verify_reserved_bundle", fail_reserved_bundle)
+    assert collect_review(store, attempt_id, core, sessions, projects).state == (
+        AttemptState.REVIEW_FAILED
+    )
+    monkeypatch.undo()
+
+    result = collect_review(store, attempt_id, core, sessions, projects)
+
+    assert result.state == AttemptState.REVIEW_FAILED
+    review = json.loads(store.evidence(attempt_id, "review"))
+    assert review["verdict"] == "FAIL"
+    assert review["findings"] == list(findings)
+    assert len([event for event in store.events() if event.kind == "review_recollected"]) == 1
+
+
+def test_transcript_verified_review_is_never_superseded(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
+    first = collect_review(store, attempt_id, core, sessions, projects)
+    events_before = store.events()
+
+    def fail_reserved_bundle(_root: Path, _expected_digest: str) -> str:
+        raise AssertionError("transcript-verified evidence must replay without re-verification")
+
+    monkeypatch.setattr(review_evidence, "_verify_reserved_bundle", fail_reserved_bundle)
+    replay = collect_review(store, attempt_id, core, sessions, projects)
+
+    assert replay == first
+    assert store.events() == events_before
 
 
 def test_reconcile_review_recovers_ack_from_subagent_run(
@@ -1017,7 +1150,8 @@ def test_bundle_mutation_verification_fails_closed(
         == AttemptState.REVIEW_FAILED
     )
     assert (
-        json.loads(store.evidence(attempt_id, "review_host_evidence"))["reason"] == "bundle_mutated"
+        json.loads(store.evidence(attempt_id, "review_host_evidence"))["reason"]
+        == "bundle_invalid: bundle directory is mutable"
     )
 
 

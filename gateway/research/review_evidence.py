@@ -40,6 +40,7 @@ from .contracts import (
 )
 from .host_records import (
     AcpIdentityHostRecord,
+    ClaudeTranscriptRecord,
     HostRecordError,
     TaskRunHostRecord,
     read_exact_acpx_identity,
@@ -59,6 +60,16 @@ REVIEW_TASK_SCOPE = "session"
 REVIEW_AGENT = "claude"
 REVIEW_BACKEND = "acpx"
 REVIEW_ACP_MODE = "oneshot"
+_BUNDLE_ENTRIES = {
+    "spec.json",
+    "diff.patch",
+    "test-evidence",
+    "instructions.md",
+    "source",
+    "run-plan.json",
+    "evaluation-spec-set.json",
+    "evaluation-specs",
+}
 
 
 class ReviewEvidenceError(RuntimeError):
@@ -504,21 +515,11 @@ def _validate_bundle(
     if not root.is_absolute() or not root.is_dir() or root.is_symlink():
         raise BundleError("bundle directory is missing or unsafe")
     _require_immutable(root, "bundle directory")
-    allowed = {
-        "spec.json",
-        "diff.patch",
-        "test-evidence",
-        "instructions.md",
-        "source",
-        "run-plan.json",
-        "evaluation-spec-set.json",
-        "evaluation-specs",
-    }
     run_plan_payload = _stored_json(store, attempt_id, "run_plan")
     if run_plan_payload is None:
         raise BundleError("review bundle requires immutable run-plan evidence")
     entries = {path.name for path in root.iterdir()}
-    if entries != allowed:
+    if entries != _BUNDLE_ENTRIES:
         raise BundleError("bundle contains an unexpected file or directory")
     for path in root.rglob("*"):
         if path.is_symlink():
@@ -592,6 +593,30 @@ def _validate_bundle(
             raise BundleError(f"bundle evaluation spec digest differs: {entry.spec_id}")
     digest = _bundle_digest(root)
     if expected_digest is not None and digest != expected_digest:
+        raise BundleError("reserved review bundle was modified")
+    return digest
+
+
+def _verify_reserved_bundle(root: Path, expected_digest: str) -> str:
+    """Verify the frozen review snapshot without reopening its source worktree."""
+
+    if not isinstance(expected_digest, str) or len(expected_digest) != 64:
+        raise BundleError("reserved review bundle digest is malformed")
+    try:
+        int(expected_digest, 16)
+    except ValueError as exc:
+        raise BundleError("reserved review bundle digest is malformed") from exc
+    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+        raise BundleError("bundle directory is missing or unsafe")
+    _require_immutable(root, "bundle directory")
+    if {path.name for path in root.iterdir()} != _BUNDLE_ENTRIES:
+        raise BundleError("bundle contains an unexpected file or directory")
+    for path in root.rglob("*"):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise BundleError("bundle contains a symlink or non-file entry")
+        _require_immutable(path, f"bundle entry {path.relative_to(root).as_posix()}")
+    digest = _bundle_digest(root)
+    if digest != expected_digest:
         raise BundleError("reserved review bundle was modified")
     return digest
 
@@ -925,6 +950,9 @@ def verify_review(
             task,
         )
     identity: AcpIdentityHostRecord | None = None
+    transcript: ClaudeTranscriptRecord | None = None
+    events: list[dict[str, object]] = []
+    verdict_json = ""
     try:
         identity = read_exact_acpx_identity(
             acpx_sessions_dir,
@@ -966,14 +994,11 @@ def verify_review(
             efforts.add(REVIEW_EFFORT)
         verdict, findings, verdict_json = _final_verdict(events[-1], reservation)
         try:
-            _validate_bundle(
-                store,
-                attempt_id,
-                Path(reservation.bundle_dir),
-                expected_digest=reservation.bundle_sha256,
-            )
+            _verify_reserved_bundle(Path(reservation.bundle_dir), reservation.bundle_sha256)
         except BundleError as exc:
-            raise ReviewEvidenceError("bundle_mutated") from exc
+            if str(exc) == "reserved review bundle was modified":
+                raise ReviewEvidenceError("bundle_mutated") from exc
+            raise ReviewEvidenceError(f"bundle_invalid: {exc}") from exc
         host = {
             "task_id": task.task_id,
             "task_owner_key": task.owner_key,
@@ -1034,6 +1059,10 @@ def verify_review(
             reason,
             reason,
             task,
+            transcript_path=str(transcript.path) if transcript is not None else "",
+            transcript_sha256=transcript.sha256 if transcript is not None else "",
+            verdict_json=verdict_json,
+            assistant_events=len(events),
         )
 
 
@@ -1043,20 +1072,26 @@ def _failed_verification(
     reason: str,
     detail: str,
     task: TaskRunHostRecord | None = None,
+    *,
+    transcript_path: str = "",
+    transcript_sha256: str = "",
+    verdict_json: str = "",
+    assistant_events: int = 0,
 ) -> ReviewVerification:
     collected = now_utc()
     host: dict[str, object] = {
         "task_id": task.task_id if task else "",
         "task_status": task.status if task else "unresolved",
+        "task_source": task.source if task else "unresolved",
         "task_started_at": task.started_at_ms if task else None,
         "task_ended_at": task.ended_at_ms if task else None,
         "acp_session_uuid": session_id,
-        "transcript_path": "",
-        "transcript_sha256": "",
-        "assistant_events": 0,
+        "transcript_path": transcript_path,
+        "transcript_sha256": transcript_sha256,
+        "assistant_events": assistant_events,
         "models_seen": [],
         "efforts_seen": [],
-        "verdict_json": "",
+        "verdict_json": verdict_json,
         "bound_commit": reservation.commit,
         "bound_spec_sha256": reservation.hypothesis_spec_sha256,
         "collected_at": collected,
@@ -1263,20 +1298,44 @@ def collect_review(
         review_payload = _stored_json(store, attempt_id, "review")
         if review_payload is not None:
             parsed = ReviewRecord.from_json(to_json(review_payload))
-            return store.collect_review_evidence(
+            stored = ReviewEvidence(
+                parsed.attempt_id,
+                parsed.commit,
+                parsed.spec_sha256,
+                parsed.verdict,
+                parsed.findings,
+                parsed.reported_reviewer_model,
+                parsed.reported_reviewer_actual_model,
+                parsed.acp_session_id,
+                parsed.submitted_at,
+            )
+            reason = existing.get("reason")
+            if (
+                current.state != AttemptState.REVIEW_FAILED
+                or not isinstance(reason, str)
+                or not reason
+            ):
+                return store.collect_review_evidence(
+                    attempt_id, stored, store.evidence(attempt_id, "review_host_evidence")
+                )
+            verification = verify_review(
+                store,
                 attempt_id,
-                ReviewEvidence(
-                    parsed.attempt_id,
-                    parsed.commit,
-                    parsed.spec_sha256,
-                    parsed.verdict,
-                    parsed.findings,
-                    parsed.reported_reviewer_model,
-                    parsed.reported_reviewer_actual_model,
-                    parsed.acp_session_id,
-                    parsed.submitted_at,
-                ),
-                store.evidence(attempt_id, "review_host_evidence"),
+                core_database,
+                acpx_sessions_dir,
+                claude_projects_root,
+                expected_backend=expected_backend,
+                expected_mode=expected_mode,
+            )
+            replacement_host = json.loads(verification.host_payload)
+            if not isinstance(replacement_host, dict):
+                raise StoreConflict("review host evidence must be an object")
+            if "reason" not in replacement_host:
+                return store.supersede_failed_review(
+                    attempt_id, verification.review, verification.host_payload
+                )
+            return store.collect_review_evidence(
+                attempt_id, stored, store.evidence(attempt_id, "review_host_evidence")
             )
         if current.state in {AttemptState.REVIEW_PASSED, AttemptState.REVIEW_FAILED}:
             raise StoreConflict("review host evidence has no matching review payload")

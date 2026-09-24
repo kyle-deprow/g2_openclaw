@@ -253,6 +253,18 @@ class ResearchStore:
                 BEGIN SELECT RAISE(ABORT, 'closed attempt is immutable'); END;
                 CREATE TRIGGER IF NOT EXISTS immutable_attempt_evidence
                 BEFORE UPDATE ON attempt_evidence
+                WHEN NOT (
+                  NEW.attempt_id = OLD.attempt_id AND
+                  NEW.kind = OLD.kind AND
+                  OLD.kind IN ('review', 'review_host_evidence') AND
+                  EXISTS (
+                    SELECT 1 FROM attempt_evidence AS archived
+                    WHERE archived.attempt_id = OLD.attempt_id
+                    AND archived.kind = OLD.kind || '_superseded'
+                    AND archived.payload_json = OLD.payload_json
+                    AND archived.payload_sha256 = OLD.payload_sha256
+                  )
+                )
                 BEGIN SELECT RAISE(ABORT, 'attempt evidence is insert-only'); END;
                 CREATE TRIGGER IF NOT EXISTS immutable_attempt_evidence_delete
                 BEFORE DELETE ON attempt_evidence
@@ -291,6 +303,47 @@ class ResearchStore:
             for name, statement in additions:
                 if name not in columns:
                     conn.execute(statement)
+            if conn.in_transaction:
+                conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                trigger = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                    "AND name='immutable_attempt_evidence'"
+                ).fetchone()
+                old_trigger_sql = (
+                    "create trigger immutable_attempt_evidence before update on attempt_evidence "
+                    "begin select raise(abort, 'attempt evidence is insert-only'); end"
+                )
+                if (
+                    trigger is not None
+                    and isinstance(trigger["sql"], str)
+                    and " ".join(trigger["sql"].split()).casefold().rstrip(";") == old_trigger_sql
+                ):
+                    conn.execute("DROP TRIGGER immutable_attempt_evidence")
+                    conn.execute(
+                        """
+                        CREATE TRIGGER immutable_attempt_evidence
+                        BEFORE UPDATE ON attempt_evidence
+                        WHEN NOT (
+                          NEW.attempt_id = OLD.attempt_id AND
+                          NEW.kind = OLD.kind AND
+                          OLD.kind IN ('review', 'review_host_evidence') AND
+                          EXISTS (
+                            SELECT 1 FROM attempt_evidence AS archived
+                            WHERE archived.attempt_id = OLD.attempt_id
+                            AND archived.kind = OLD.kind || '_superseded'
+                            AND archived.payload_json = OLD.payload_json
+                            AND archived.payload_sha256 = OLD.payload_sha256
+                          )
+                        )
+                        BEGIN SELECT RAISE(ABORT, 'attempt evidence is insert-only'); END
+                        """
+                    )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
             conn.execute(
                 "INSERT OR IGNORE INTO campaign(singleton,status,resume_seq) VALUES (1, 'ACTIVE', 0)"
             )
@@ -1378,6 +1431,165 @@ class ResearchStore:
             / "review.json",
             review_payload,
         )
+        return updated
+
+    def supersede_failed_review(
+        self, attempt_id: str, record: ReviewEvidence, host_payload: str
+    ) -> Attempt:
+        """Replace one retryable review failure while retaining its exact evidence."""
+
+        if not isinstance(record, ReviewEvidence):
+            raise TypeError("review supersession requires ReviewEvidence")
+        try:
+            host_object = json.loads(host_payload)
+        except json.JSONDecodeError as exc:
+            raise StoreConflict("review host evidence is not JSON") from exc
+        if not isinstance(host_object, dict):
+            raise StoreConflict("review host evidence must be an object")
+        if (
+            host_object.get("bound_commit") != record.commit
+            or host_object.get("bound_spec_sha256") != record.spec_sha256
+            or host_object.get("verdict") != record.verdict
+            or host_object.get("acp_session_uuid") != record.acp_session_id
+            or "reason" in host_object
+        ):
+            raise StoreConflict("review host evidence binding differs from verdict")
+        transcript_sha256 = host_object.get("transcript_sha256")
+        if not isinstance(transcript_sha256, str) or not transcript_sha256:
+            raise StoreConflict("replacement review is not transcript-bound")
+        review_payload = record.to_json()
+        host_digest = _digest(host_payload)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current_row = conn.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if current_row is None:
+                raise ValueError(f"unknown attempt: {attempt_id}")
+            current = self._attempt_from_row(current_row)
+            hypothesis_row = conn.execute(
+                "SELECT * FROM hypotheses WHERE hypothesis_id=?", (current.hypothesis_id,)
+            ).fetchone()
+            if hypothesis_row is None:
+                raise StoreConflict("attempt hypothesis is missing")
+            hypothesis = self._hypothesis_from_row(hypothesis_row)
+            if current.state != AttemptState.REVIEW_FAILED:
+                raise StoreConflict("review supersession requires a failed review")
+            if (
+                record.attempt_id != attempt_id
+                or record.commit != current.commit
+                or record.spec_sha256 != hypothesis.spec_sha256
+            ):
+                raise StoreConflict("replacement review does not match the frozen attempt")
+            old_review = conn.execute(
+                "SELECT payload_json,payload_sha256 FROM attempt_evidence "
+                "WHERE attempt_id=? AND kind='review'",
+                (attempt_id,),
+            ).fetchone()
+            old_host = conn.execute(
+                "SELECT payload_json,payload_sha256 FROM attempt_evidence "
+                "WHERE attempt_id=? AND kind='review_host_evidence'",
+                (attempt_id,),
+            ).fetchone()
+            if old_review is None or old_host is None:
+                raise StoreConflict("failed review has incomplete evidence")
+            old_review_payload = str(old_review["payload_json"])
+            old_host_payload = str(old_host["payload_json"])
+            if _digest(old_review_payload) != str(old_review["payload_sha256"]) or _digest(
+                old_host_payload
+            ) != str(old_host["payload_sha256"]):
+                raise StoreConflict("failed review evidence digest mismatch")
+            prior = conn.execute(
+                "SELECT 1 FROM attempt_evidence WHERE attempt_id=? "
+                "AND kind IN ('review_superseded', 'review_host_evidence_superseded') LIMIT 1",
+                (attempt_id,),
+            ).fetchone()
+            if prior is not None:
+                raise StoreConflict("review evidence was already superseded once")
+            try:
+                old_host_object = json.loads(old_host_payload)
+            except json.JSONDecodeError as exc:
+                raise StoreConflict("failed review evidence is malformed") from exc
+            if not isinstance(old_host_object, dict):
+                raise StoreConflict("failed review evidence is malformed")
+            superseded_reason = old_host_object.get("reason")
+            if not isinstance(superseded_reason, str) or not superseded_reason:
+                raise StoreConflict("stored review is transcript-verified and cannot be superseded")
+            old_session = old_host_object.get("acp_session_uuid")
+            if (
+                not isinstance(old_session, str)
+                or not old_session
+                or host_object.get("acp_session_uuid") != old_session
+            ):
+                raise StoreConflict("failed review is not transcript-bound to the replacement")
+            conn.execute(
+                "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+                (
+                    attempt_id,
+                    "review_superseded",
+                    old_review_payload,
+                    str(old_review["payload_sha256"]),
+                ),
+            )
+            conn.execute(
+                "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+                (
+                    attempt_id,
+                    "review_host_evidence_superseded",
+                    old_host_payload,
+                    str(old_host["payload_sha256"]),
+                ),
+            )
+            conn.execute(
+                "UPDATE attempt_evidence SET payload_json=?,payload_sha256=? "
+                "WHERE attempt_id=? AND kind='review'",
+                (review_payload, _digest(review_payload), attempt_id),
+            )
+            conn.execute(
+                "UPDATE attempt_evidence SET payload_json=?,payload_sha256=? "
+                "WHERE attempt_id=? AND kind='review_host_evidence'",
+                (host_payload, host_digest, attempt_id),
+            )
+            # The REVIEW_FAILED guard authorizes this retry through submit_review's normal checks.
+            current = replace(current, state=AttemptState.IMPLEMENTED)
+            updated = submit_review(current, record, hypothesis.spec_sha256, now_utc())
+            updated_payload = updated.to_json()
+            conn.execute(
+                "UPDATE attempts SET state=?,review_verdict=?,review_commit=?,review_spec_sha256=?,"
+                "reported_reviewer_model=?,reported_reviewer_actual_model=?,updated_at=?,"
+                "payload_json=?,payload_sha256=? WHERE attempt_id=?",
+                (
+                    updated.state.value,
+                    updated.review_verdict,
+                    updated.review_commit,
+                    updated.review_spec_sha256,
+                    updated.reported_reviewer_model,
+                    updated.reported_reviewer_actual_model,
+                    updated.updated_at,
+                    updated_payload,
+                    _digest(updated_payload),
+                    attempt_id,
+                ),
+            )
+            self._event(
+                conn,
+                current.hypothesis_id,
+                attempt_id,
+                "review_recollected",
+                {
+                    "verdict": record.verdict,
+                    "superseded_reason": superseded_reason,
+                    "superseded_review_sha256": str(old_review["payload_sha256"]),
+                    "transcript_sha256": transcript_sha256,
+                },
+                "driver",
+            )
+            conn.commit()
+        attempt_dir = self.root / "hypotheses" / current.hypothesis_id / "attempts" / attempt_id
+        self._projection(attempt_dir / "review_superseded.json", old_review_payload)
+        self._projection(attempt_dir / "review_host_evidence_superseded.json", old_host_payload)
+        self._projection(attempt_dir / "review.json", review_payload)
+        self._projection(attempt_dir / "review_host_evidence.json", host_payload)
         return updated
 
     def submit_review(self, attempt_id: str, record: ReviewEvidence) -> Attempt:

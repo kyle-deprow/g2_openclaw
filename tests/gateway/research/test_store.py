@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 import subprocess
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from gateway.research.contracts import (
     EvaluationSpecSet,
     HypothesisSpec,
     ImplementationRecord,
+    ReviewEvidence,
 )
 from gateway.research.machine import IllegalTransition
 from gateway.research.store import OwnerLockHeld, ResearchStore, StoreConflict
@@ -61,6 +63,63 @@ def _insert_raw_evidence(store: ResearchStore, attempt_id: str, kind: str) -> No
             (attempt_id, kind, payload, hashlib.sha256(payload.encode()).hexdigest()),
         )
         conn.commit()
+
+
+def _failed_review_setup(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> tuple[ResearchStore, HypothesisSpec, Attempt]:
+    store, _source, hypothesis, attempt, _implementation = _implemented_attempt(campaign)
+    record = review(attempt.attempt_id, attempt.commit, hypothesis.spec_sha256, "FAIL")
+    host_payload = json.dumps(
+        {
+            "task_id": "failed-task",
+            "task_status": "succeeded",
+            "acp_session_uuid": "old-session",
+            "transcript_path": "/tmp/review.jsonl",
+            "transcript_sha256": "a" * 64,
+            "assistant_events": 1,
+            "verdict_json": record.to_json(),
+            "bound_commit": record.commit,
+            "bound_spec_sha256": record.spec_sha256,
+            "verdict": record.verdict,
+            "reason": "bundle_invalid: x",
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    store.collect_review_evidence(attempt.attempt_id, record, host_payload)
+    return store, hypothesis, attempt
+
+
+def _replacement_review(
+    hypothesis: HypothesisSpec,
+    attempt: Attempt,
+    *,
+    session_id: str = "old-session",
+    verdict: str = "PASS",
+) -> tuple[ReviewEvidence, str]:
+    record = replace(
+        review(attempt.attempt_id, attempt.commit, hypothesis.spec_sha256, verdict),
+        acp_session_id=session_id,
+        submitted_at="2026-01-02T00:00:00Z",
+    )
+    payload = json.dumps(
+        {
+            "task_id": "verified-task",
+            "task_status": "succeeded",
+            "acp_session_uuid": session_id,
+            "transcript_path": "/tmp/review.jsonl",
+            "transcript_sha256": "b" * 64,
+            "assistant_events": 1,
+            "verdict_json": record.to_json(),
+            "bound_commit": record.commit,
+            "bound_spec_sha256": record.spec_sha256,
+            "verdict": record.verdict,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return record, payload
 
 
 def test_pre_review_retry_closes_implemented_and_preserves_evidence(
@@ -552,6 +611,195 @@ def test_review_is_idempotent_repairs_projection_and_is_insert_only(
             "DELETE FROM attempt_evidence WHERE attempt_id=? AND kind='review'",
             (attempt.attempt_id,),
         )
+
+
+def test_supersede_failed_review_refuses_closed_attempt(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, hypothesis, attempt = _failed_review_setup(campaign)
+    replacement, host_payload = _replacement_review(hypothesis, attempt)
+    store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
+
+    with pytest.raises(StoreConflict):
+        store.supersede_failed_review(attempt.attempt_id, replacement, host_payload)
+
+
+def test_supersede_failed_review_refuses_stored_verified_record(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, hypothesis, attempt, _implementation = _implemented_attempt(campaign)
+    original = review(attempt.attempt_id, attempt.commit, hypothesis.spec_sha256, "FAIL")
+    verified_review(store, original)
+    replacement, host_payload = _replacement_review(hypothesis, attempt)
+
+    with pytest.raises(StoreConflict):
+        store.supersede_failed_review(attempt.attempt_id, replacement, host_payload)
+
+
+def test_supersede_failed_review_refuses_acp_session_mismatch(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, hypothesis, attempt = _failed_review_setup(campaign)
+    replacement, host_payload = _replacement_review(
+        hypothesis, attempt, session_id="different-session"
+    )
+
+    with pytest.raises(StoreConflict):
+        store.supersede_failed_review(attempt.attempt_id, replacement, host_payload)
+
+
+def test_supersede_failed_review_refuses_second_supersession(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, hypothesis, attempt = _failed_review_setup(campaign)
+    replacement, host_payload = _replacement_review(hypothesis, attempt, verdict="FAIL")
+    store.supersede_failed_review(attempt.attempt_id, replacement, host_payload)
+
+    with pytest.raises(StoreConflict, match="review evidence was already superseded once"):
+        store.supersede_failed_review(attempt.attempt_id, replacement, host_payload)
+
+
+def test_attempt_evidence_review_update_requires_superseded_archive(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, hypothesis, attempt = _failed_review_setup(campaign)
+    with pytest.raises(sqlite3.DatabaseError), store._connect() as conn:
+        conn.execute(
+            "UPDATE attempt_evidence SET payload_json=? WHERE attempt_id=? AND kind='review'",
+            ("tampered", attempt.attempt_id),
+        )
+
+    review_payload = store.evidence(attempt.attempt_id, "review")
+    with store._connect() as conn:
+        conn.execute(
+            "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+            (
+                attempt.attempt_id,
+                "review_superseded",
+                review_payload,
+                hashlib.sha256(review_payload.encode()).hexdigest(),
+            ),
+        )
+        conn.commit()
+    with pytest.raises(sqlite3.DatabaseError), store._connect() as conn:
+        conn.execute(
+            "UPDATE attempt_evidence SET kind='review-renamed' "
+            "WHERE attempt_id=? AND kind='review'",
+            (attempt.attempt_id,),
+        )
+    store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
+    second = store.open_attempt(hypothesis.hypothesis_id, Path(attempt.worktree_path))
+    with (
+        pytest.raises(sqlite3.DatabaseError, match="attempt evidence is insert-only"),
+        store._connect() as conn,
+    ):
+        conn.execute(
+            "UPDATE attempt_evidence SET attempt_id=? WHERE attempt_id=? AND kind='review'",
+            (second.attempt_id, attempt.attempt_id),
+        )
+
+
+def test_attempt_evidence_non_review_update_stays_blocked_with_archive(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, _source, _hypothesis, attempt, _implementation = _implemented_attempt(campaign)
+    _insert_raw_evidence(store, attempt.attempt_id, "implementation_superseded")
+
+    with pytest.raises(sqlite3.DatabaseError), store._connect() as conn:
+        conn.execute(
+            "UPDATE attempt_evidence SET payload_json='tampered' "
+            "WHERE attempt_id=? AND kind='implementation'",
+            (attempt.attempt_id,),
+        )
+
+
+def test_initialize_migrates_old_attempt_evidence_trigger(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, hypothesis, attempt = _failed_review_setup(campaign)
+    old_trigger = """
+        CREATE TRIGGER immutable_attempt_evidence
+        BEFORE UPDATE ON attempt_evidence
+        BEGIN SELECT RAISE(ABORT, 'attempt evidence is insert-only'); END;
+    """
+    with store._connect() as conn:
+        conn.execute("DROP TRIGGER immutable_attempt_evidence")
+        conn.execute(old_trigger)
+        conn.commit()
+
+    store.initialize()
+
+    with store._connect() as conn:
+        trigger_sql = str(
+            conn.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type='trigger' AND name='immutable_attempt_evidence'"
+            ).fetchone()[0]
+        )
+    assert "OLD.kind IN" in trigger_sql
+    assert "review_host_evidence" in trigger_sql
+    replacement, host_payload = _replacement_review(hypothesis, attempt)
+    assert store.supersede_failed_review(attempt.attempt_id, replacement, host_payload).state == (
+        AttemptState.REVIEW_PASSED
+    )
+
+
+def test_initialize_trigger_migration_holds_write_lock(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _hypothesis, _attempt = _failed_review_setup(campaign)
+    old_trigger = """
+        CREATE TRIGGER immutable_attempt_evidence
+        BEFORE UPDATE ON attempt_evidence
+        BEGIN SELECT RAISE(ABORT, 'attempt evidence is insert-only'); END;
+    """
+    with store._connect() as conn:
+        conn.execute("DROP TRIGGER immutable_attempt_evidence")
+        conn.execute(old_trigger)
+        conn.commit()
+
+    migration_paused = threading.Event()
+    release_migration = threading.Event()
+    migration_errors: list[BaseException] = []
+    original_connect = store._connect
+
+    def blocking_connect() -> sqlite3.Connection:
+        conn = original_connect()
+
+        def trace(statement: str) -> None:
+            normalized = " ".join(statement.split()).upper()
+            if (
+                normalized.startswith("CREATE TRIGGER IMMUTABLE_ATTEMPT_EVIDENCE ")
+                and "IF NOT EXISTS" not in normalized
+            ):
+                migration_paused.set()
+                if not release_migration.wait(5):
+                    raise RuntimeError("migration test release timed out")
+
+        conn.set_trace_callback(trace)
+        return conn
+
+    monkeypatch.setattr(store, "_connect", blocking_connect)
+
+    def migrate() -> None:
+        try:
+            store.initialize()
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            migration_errors.append(exc)
+
+    thread = threading.Thread(target=migrate)
+    thread.start()
+    assert migration_paused.wait(5)
+    with (
+        sqlite3.connect(store.root / "state.sqlite3", timeout=0) as contender,
+        pytest.raises(sqlite3.OperationalError, match="locked"),
+    ):
+        contender.execute("UPDATE campaign SET status=status WHERE singleton=1")
+    release_migration.set()
+    thread.join(5)
+    assert not thread.is_alive()
+    assert migration_errors == []
 
 
 def test_reconcile_repairs_missing_projection_without_launching(
