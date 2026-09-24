@@ -19,7 +19,7 @@ Authority: user requests implementation of the 2026-09-24 handoff, accepted chan
 - fixD Luna may change only `gateway/research/review_evidence.py`, `gateway/research/store.py`, `tests/gateway/research/test_review_evidence.py`, `tests/gateway/research/test_store.py` in `/home/dev/repos/g2_openclaw-worktrees/fixD`.
 - fixC Luna may change only its existing handoff diff: research CLI/containment/provenance/worker/store/review-evidence/wake modules, the new `gateway/research/containment_provenance/` recorder, corresponding `tests/gateway/research/` tests, and the three already-modified runtime/mirror skill docs in `/home/dev/repos/g2_openclaw-worktrees/fixC`. Exact changed-file inventory and original scratchpad C plans govern each bounded round.
 - Sol reviewers are read-only. Workers must not commit, push, deploy, edit live state, change campaign caps, alter frozen contracts, or modify unrelated files. Root owns integration and Git operations.
-- Read the original scratchpad phase/fix plans fully before editing, plus applicable AGENTS/skills. If those plans are missing, report rather than inventing requirements.
+- Read the phase/fix plans fully before editing, plus applicable AGENTS/skills. Exact scratchpad-plan copies are preserved in `docs/reference/autoresearch-recovery-2026-09-24/`; use those durable copies if the temporary scratchpad disappears. Report missing requirements rather than inventing them.
 - Preserve existing main-checkout untracked documentation. No live trading, new providers/fallbacks, MemPalace writes, data downloads, environment clones, gate waivers, or automatic cap extensions beyond14.
 
 ## Verification
