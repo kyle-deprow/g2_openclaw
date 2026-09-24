@@ -114,6 +114,18 @@ and relative deliverable paths.
 - A respawn after unknown acknowledgement is forbidden.
 - An exact cancel rereads the current task and is sent at most once. Preserve a
   pending/unknown response and pause until correlation is resolved.
+- Completion ownership is per owner turn: when a completion-required coding or
+  runner stage is needed, spawn a fresh configured native child bound to the
+  same hypothesis, attempt, worktree, and checkpoint. This continues the same
+  attempt and needs no new admission. An authorized fresh child for a later
+  bounded correction may continue that same attempt, but it does not authorize
+  duplicating or re-running a completed stage. Do not revive a child completed
+  in a prior owner turn with `followup_task` and assume its completion is owned
+  now. Follow up with a live child already owned by this turn when appropriate.
+  If `sessions_yield` reports no owned pending completion or an error, report its
+  exact result/error and durable checkpoint; do not claim an owned wait/autowake
+  or fabricate a callback. That error is not permission to duplicate or
+  re-run the completed stage, restart it, or switch route/provider.
 - Run only an admitted, committed worktree after review PASS. The runner does
   no-repair/no-retry, input substitution, evaluator substitution, or invented
   result. A failed or lost job remains terminal evidence for Astra. Completion

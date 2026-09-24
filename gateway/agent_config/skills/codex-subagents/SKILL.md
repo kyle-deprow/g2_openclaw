@@ -36,6 +36,19 @@ digest. Collect a strict bound verdict. Never retype a verdict or respawn after
 an unknown acknowledgement. An exact cancel rereads the current task and is
 sent once; unknown correlation remains pending and pauses the owner.
 
+When a new owner turn needs a completion-required coding or runner stage, spawn
+a fresh configured native child bound to the same hypothesis, attempt, worktree,
+and checkpoint; this is the same attempt and needs no new admission. An
+authorized fresh child for a later bounded correction may continue that same
+attempt, but it does not authorize duplicating or re-running a completed stage.
+Do not revive a child completed in a prior owner turn with `followup_task` and
+assume its completion is owned by the new turn. Followups to a live child already
+owned by the current turn remain allowed. If `sessions_yield` reports no owned
+pending completion or an error, report its exact result/error and durable
+checkpoint; do not claim an owned wait/autowake or fabricate a callback. That
+error is not permission to duplicate or re-run the completed stage, restart it,
+or switch route/provider.
+
 Every completion-required child handoff receives a non-empty normal Astra
 acknowledgement, including while another required child remains pending. Do not
 use a tool-only wait, conceal an error, send an autonomous G2 announcement, or

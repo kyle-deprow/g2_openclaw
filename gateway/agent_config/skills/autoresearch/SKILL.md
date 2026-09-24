@@ -96,6 +96,18 @@ verify its acknowledgement, child identity, commit, specification digest, and
 strict verdict. Never respawn after an unknown acknowledgement or retype a
 verdict.
 
+Completion ownership is per owner turn: a completion-required coding or runner
+stage spawns a fresh configured native child bound to the same hypothesis,
+attempt, worktree, and checkpoint; this is the same attempt and needs no new
+admission. An authorized fresh child for a later bounded correction may continue
+that same attempt, but it does not authorize duplicating or re-running a
+completed stage. Do not revive a prior-turn child with `followup_task` and
+assume its completion is owned now; followups to a live child owned by the
+current turn remain allowed. On `sessions_yield`, report the exact result/error
+and durable checkpoint; no owned pending completion is not an owned wait/autowake,
+and do not fabricate a callback. That error is not permission to duplicate or
+re-run the completed stage, restart it, or switch route/provider.
+
 Run only an admitted committed worktree after review PASS. The runner performs
 no repair, retry, substitution, evaluator substitution, or invented result. A
 failed or lost job is terminal evidence for Astra. Completion of the last

@@ -110,6 +110,19 @@ An exact cancel is at most once, with unknown correlation left pending and
 paused. Never retype a verdict, respawn after unknown acknowledgement, or launch
 without operator policy and proven route. The runner runs admitted committed work
 only, with no-repair/no-retry, substitution, or invented result.
+
+- Completion ownership is per owner turn: a completion-required coding or runner
+  stage spawns a fresh configured native child bound to the same hypothesis,
+  attempt, worktree, and checkpoint; this is the same attempt and needs no new
+  admission. An authorized fresh child for a later bounded correction may
+  continue that same attempt, but it does not authorize duplicating or re-running
+  a completed stage. Do not revive a prior-turn child with `followup_task` and
+  assume its completion is owned now. Live-child followups owned by the current
+  turn remain allowed. On `sessions_yield`, report the exact result/error and
+  durable checkpoint; no owned pending completion is not an owned wait/autowake,
+  and do not fabricate a callback. That error is not permission to duplicate or
+  re-run the completed stage, restart it, or switch route/provider.
+
 Synthetic-versus-installed proof boundary: smoke or synthetic data does not
 prove installed readiness. Make no alpha claim from smoke or synthetic data.
 
