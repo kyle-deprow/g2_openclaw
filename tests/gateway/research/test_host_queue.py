@@ -32,7 +32,7 @@ from gateway.research.jobs import JobError, JobRecord
 from gateway.research.store import ResearchStore, StoreConflict
 from typer.testing import CliRunner
 
-from tests.gateway.research.conftest import review, verified_review
+from tests.gateway.research.conftest import provenance_evidence, review, verified_review
 from tests.gateway.research.conftest import run_plan as fixture_run_plan
 from tests.gateway.research.test_admission import _admit, _document, _payload
 from tests.gateway.research.test_readiness import configure_real_readiness
@@ -64,7 +64,12 @@ def _ready(
     )
     if run_plan is None:
         run_plan = fixture_run_plan(store, attempt, implementation_record)
-    store.submit_implementation(attempt.attempt_id, implementation_record, run_plan=run_plan)
+    store.submit_implementation(
+        attempt.attempt_id,
+        implementation_record,
+        run_plan=run_plan,
+        containment_provenance=provenance_evidence(attempt.attempt_id, commit),
+    )
     verified_review(store, review(attempt.attempt_id, commit, hypothesis.spec_sha256))
     return store.get_attempt(attempt.attempt_id)
 

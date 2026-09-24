@@ -10,11 +10,30 @@ from pathlib import Path
 from typing import cast
 
 import pytest
-from gateway.research import jobs, worker
+from gateway.research import containment, jobs, provenance, worker
 from gateway.research.containment import StagePlan, rewrite_targets_argv, stage_plan
 from gateway.research.contracts import AnalysisPlan, RunPlan, RunScenario
+from gateway.research.provenance import ProvenanceError
 
 run = worker._run
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_provenance_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    def verify(*_args: object, **kwargs: object) -> dict[str, object]:
+        return {
+            "stage": kwargs["stage"],
+            "record_count": 1,
+            "recorder_sha256": "0" * 64,
+            "snapshot_modules": [],
+            "work_modules": [],
+            "runtime_modules": [],
+            "work_top_levels": [],
+            "argv": [],
+            "pids": [],
+        }
+
+    monkeypatch.setattr(worker, "verify_stage_provenance", verify)
 
 
 def test_worker_always_writes_terminal_on_digest_mismatch(tmp_path: Path) -> None:
@@ -241,6 +260,8 @@ def test_real_target_fixture_executes_inside_containment_boundary(tmp_path: Path
     max_rss = job["max_rss_mb"]
     assert isinstance(max_rss, int)
     pins = worker._pins_from_job(job)
+    provenance_dir = target_dir / "provenance"
+    provenance_dir.mkdir()
     rewritten = rewrite_targets_argv(
         tuple(raw_targets),
         shared_python=pins.shared_python,
@@ -259,6 +280,7 @@ def test_real_target_fixture_executes_inside_containment_boundary(tmp_path: Path
         receipt=Path(str(artifact_paths["receipt"])),
         worktree=worktree,
         targets_stage=target_dir,
+        provenance_dir=provenance_dir,
     )
 
     exit_code, timed_out = worker._stage(
@@ -268,6 +290,42 @@ def test_real_target_fixture_executes_inside_containment_boundary(tmp_path: Path
     assert exit_code == 0
     assert not timed_out
     assert (target_dir / "targets.json").read_text(encoding="utf-8") == "{}"
+    records = sorted(provenance_dir.glob("*.json"))
+    assert len(records) >= 1
+    record = json.loads(records[0].read_text(encoding="utf-8"))
+    assert record["contract"] == "research-containment-provenance-v1"
+    assert record["stage"] == "targets-s000"
+    flags = record["flags"]
+    assert isinstance(flags, dict)
+    assert isinstance(flags["safe_path"], bool)
+    assert isinstance(flags["no_user_site"], bool)
+    recorder = record["recorder"]
+    assert isinstance(recorder, dict)
+    assert recorder["sha256"] == containment.recorder_sha256()
+    pythonpath = record["pythonpath"]
+    assert isinstance(pythonpath, str)
+    assert pythonpath.startswith("/provenance:/snapshot/src")
+    commit = job["expected_commit"]
+    assert isinstance(commit, str)
+    summary = provenance.verify_stage_provenance(
+        provenance_dir,
+        stage="targets-s000",
+        pins=pins,
+        worktree=worktree,
+        commit=commit,
+        work_top_levels=frozenset(),
+        require_quantipy=False,
+        require_interpreter_flags=False,
+    )
+    assert isinstance(summary["record_count"], int)
+    assert summary["record_count"] >= 1
+    assert summary["interpreter_flags"] == flags
+    modules = record["modules"]
+    assert isinstance(modules, list)
+    if any(isinstance(module, dict) and module.get("origin") == "snapshot" for module in modules):
+        snapshot_modules = summary["snapshot_modules"]
+        assert isinstance(snapshot_modules, list)
+        assert len(snapshot_modules) >= 1
 
 
 def test_worker_rechecks_frozen_inputs_between_stages(
@@ -754,6 +812,72 @@ def test_worker_rechecks_frozen_inputs_after_analysis(
     assert outcome["status"] == "input_digest_mismatch"
     terminal = json.loads((run_dir / "terminal.json").read_text(encoding="utf-8"))
     assert terminal["status"] == "input_digest_mismatch"
+
+
+def test_worker_marks_missing_analysis_provenance_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    job, _evaluator, _eval_spec, _digest = _job(tmp_path)
+    run_dir = Path(str(job["run_dir"]))
+    artifact_digests = job["artifact_digests"]
+    assert isinstance(artifact_digests, dict)
+
+    def fake_stage(plan: StagePlan, _cwd: Path, out: Path, _deadline: float) -> tuple[int, bool]:
+        if plan.stage.startswith("validate"):
+            out.write_text(
+                json.dumps(
+                    {
+                        "verdict": "PASS",
+                        "spec_sha256_semantic": "a" * 64,
+                        "spec_sha256_raw": artifact_digests["evaluation_spec"],
+                        "panel_sha256": artifact_digests["panel"],
+                        "receipt_sha256": artifact_digests["receipt"],
+                        "universe_file_sha256": job["universe_sha256"],
+                        "dividends_sha256": artifact_digests["dividends"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+        elif plan.stage.startswith("targets"):
+            target = run_dir / "scenarios" / "s000" / "targets-stage" / "targets.json"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("{}", encoding="utf-8")
+        elif plan.stage.startswith("evaluate"):
+            output = run_dir / "scenarios" / "s000" / "evaluator-stage" / "out"
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "result.json").write_text(
+                json.dumps(
+                    {
+                        "evaluator_version": "research-evaluator-v2",
+                        "spec_sha256": "a" * 64,
+                        "dividends_sha256": artifact_digests["dividends"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output / "trades.parquet").write_bytes(b"trades")
+            (output / "daily.parquet").write_bytes(b"daily")
+        else:
+            (run_dir / "analysis-stage" / "analysis" / "result.json").write_text(
+                "{}", encoding="utf-8"
+            )
+        return 0, False
+
+    def invalid_provenance(*_args: object, **kwargs: object) -> dict[str, object]:
+        if kwargs["stage"] == "analysis":
+            raise ProvenanceError("no provenance records")
+        return {"stage": kwargs["stage"]}
+
+    monkeypatch.setattr(worker, "_stage", fake_stage)
+    monkeypatch.setattr(worker, "verify_stage_provenance", invalid_provenance)
+
+    outcome = run(job)
+
+    assert outcome["status"] == "provenance_invalid"
+    assert outcome["error"] == "analysis provenance invalid: no provenance records"
+    evidence = json.loads((run_dir / "run-evidence.json").read_text(encoding="utf-8"))
+    assert evidence["status"] == "provenance_invalid"
+    assert evidence["error"] == "analysis provenance invalid: no provenance records"
 
 
 def test_worker_rejects_stage_timeout_aggregate_above_job_timeout(

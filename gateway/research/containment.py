@@ -32,6 +32,10 @@ _MAX_TARGET_BYTES: Final[int] = 16 * 1024 * 1024
 _BWRAP: Final[str] = "/usr/bin/bwrap"
 _SYSTEMD_RUN: Final[str] = "/usr/bin/systemd-run"
 _SYSTEMCTL: Final[str] = "/usr/bin/systemctl"
+PROVENANCE_MOUNT: Final[str] = "/provenance"
+PROVENANCE_STAGE_DIR: Final[str] = "/stage/provenance"
+PROVENANCE_RECORDER_SOURCE: Final[Path] = Path(__file__).resolve().parent / "containment_provenance"
+PROVENANCE_CONTRACT: Final[str] = "research-containment-provenance-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +118,11 @@ def file_sha256(path: Path) -> str:
             return digest.hexdigest()
     except OSError as exc:
         raise ContainmentError(f"unable to hash trusted file: {path}") from exc
+
+
+def recorder_sha256() -> str:
+    """Return the digest of the recorder deployed into every sandbox."""
+    return file_sha256(PROVENANCE_RECORDER_SOURCE / "sitecustomize.py")
 
 
 def _lstat(path: Path, label: str) -> os.stat_result:
@@ -384,6 +393,9 @@ def _base_argv(pins: RuntimePins) -> list[str]:
         "--ro-bind",
         str(pins.snapshot_dir),
         "/snapshot",
+        "--ro-bind",
+        str(PROVENANCE_RECORDER_SOURCE),
+        PROVENANCE_MOUNT,
     ]
     seen: set[str] = set()
     _add_parent_dirs(argv, pins.venv_dir, seen)
@@ -407,7 +419,7 @@ def _base_argv(pins: RuntimePins) -> list[str]:
             "/tmp",
             "--setenv",
             "PYTHONPATH",
-            "/snapshot/src",
+            f"{PROVENANCE_MOUNT}:/snapshot/src",
             "--setenv",
             "OMP_NUM_THREADS",
             "1",
@@ -443,11 +455,25 @@ def bwrap_argv(
     inputs_dir: Path | None = None,
     evaluation_specs: Mapping[str, Path] | None = None,
     analysis_inputs: Mapping[str, Path] | None = None,
+    provenance_dir: Path | None = None,
 ) -> tuple[str, ...]:
     """Build the fixed bubblewrap command for one research stage."""
     _require_stage(stage)
-    argv = _base_argv(pins)
     base_stage = stage.split("-", 1)[0]
+    needs_provenance = base_stage in {"targets", "evaluate", "analysis"}
+    if needs_provenance and provenance_dir is None:
+        raise ContainmentError(f"provenance directory is required for {stage}")
+    if not needs_provenance and provenance_dir is not None:
+        raise ContainmentError(f"provenance directory is not allowed for {stage}")
+    if provenance_dir is not None and (
+        not provenance_dir.is_absolute()
+        or provenance_dir.is_symlink()
+        or not provenance_dir.is_dir()
+    ):
+        raise ContainmentError(
+            f"provenance directory is not an absolute regular directory: {provenance_dir}"
+        )
+    argv = _base_argv(pins)
     if base_stage in {"validate", "targets", "evaluate"}:
         if panel is None or receipt is None:
             raise ContainmentError("panel and receipt are required in every stage")
@@ -500,7 +526,7 @@ def bwrap_argv(
                 "/work",
                 "--setenv",
                 "PYTHONPATH",
-                "/snapshot/src:/work",
+                "/provenance:/snapshot/src:/work",
             )
         )
         argv.append("--dir")
@@ -519,6 +545,20 @@ def bwrap_argv(
             argv.extend(("--ro-bind", str(input_path), f"/inputs/{relative}"))
     else:
         argv.extend(("--chdir", "/snapshot"))
+    if provenance_dir is not None:
+        argv.extend(
+            (
+                "--bind",
+                str(provenance_dir),
+                PROVENANCE_STAGE_DIR,
+                "--setenv",
+                "RESEARCH_PROVENANCE_DIR",
+                PROVENANCE_STAGE_DIR,
+                "--setenv",
+                "RESEARCH_PROVENANCE_STAGE",
+                stage,
+            )
+        )
     argv.extend(command)
     return tuple(argv)
 

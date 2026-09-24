@@ -23,7 +23,7 @@ from gateway.research.jobs import cancel as cancel_job
 from gateway.research.status import ResearchStatus, build_status_frame, read_status
 from gateway.research.store import ResearchStore
 
-from tests.gateway.research.conftest import run_plan
+from tests.gateway.research.conftest import provenance_evidence, run_plan
 
 
 def _db(root: Path) -> sqlite3.Connection:
@@ -286,7 +286,10 @@ def _attempt_fixture(root: Path, *, review: bool = True) -> tuple[ResearchStore,
     )
     (root / "tests.json").write_text("{}", encoding="utf-8")
     attempt = store.submit_implementation(
-        attempt.attempt_id, implementation, run_plan=run_plan(store, attempt, implementation)
+        attempt.attempt_id,
+        implementation,
+        run_plan=run_plan(store, attempt, implementation),
+        containment_provenance=provenance_evidence(attempt.attempt_id, implementation.commit),
     )
     if review:
         review_record = ReviewEvidence(

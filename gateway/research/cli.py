@@ -60,6 +60,7 @@ from .jobs import (
     preflight,
 )
 from .jobs import cancel as cancel_job
+from .provenance import validate_provenance_evidence
 from .readiness import (
     budget_execution_ready,
     host_execution_ready,
@@ -256,12 +257,20 @@ def implementation_submit(
     root: Path = typer.Option(..., "--root"),
     file: Path = typer.Option(..., "--file"),
     run_plan: Path = typer.Option(..., "--run-plan"),
+    provenance_evidence: Path = typer.Option(..., "--provenance-evidence"),
 ) -> None:
     try:
         record = ImplementationRecord.from_json(file.read_text(encoding="utf-8"))
         plan = RunPlan.from_json(run_plan.read_text(encoding="utf-8"))
+        store = ResearchStore(_root(root))
+        provenance = validate_provenance_evidence(store, attempt_id, plan, provenance_evidence)
         typer.echo(
-            ResearchStore(_root(root)).submit_implementation(attempt_id, record, plan).state.value
+            store.submit_implementation(
+                attempt_id,
+                record,
+                plan,
+                containment_provenance=provenance,
+            ).state.value
         )
     except Exception as exc:
         _fail(exc)

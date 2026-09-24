@@ -32,6 +32,7 @@ from .containment import (
 )
 from .contracts import RunPlan
 from .jobs import lifecycle_lock
+from .provenance import ProvenanceError, verify_stage_provenance
 
 
 def _now() -> str:
@@ -368,6 +369,15 @@ def _require_empty_directory(path: Path, label: str) -> None:
         raise ContainmentError(f"{label} contains output from an earlier stage")
 
 
+def _work_top_levels(plan: RunPlan) -> frozenset[str]:
+    top_levels = {plan.analysis.module.partition(".")[0]}
+    for scenario in plan.scenarios:
+        argv = scenario.targets_argv
+        if len(argv) > 2 and argv[1] == "-m":
+            top_levels.add(argv[2].partition(".")[0])
+    return frozenset(top_levels)
+
+
 def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
     """Execute one immutable multi-spec plan through the fixed stage boundary."""
     global _WORKER_INTERRUPTED
@@ -377,7 +387,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
     started = _now()
     stages: list[dict[str, object]] = []
     checks: list[dict[str, object]] = []
-    scenarios_evidence: dict[str, object] = {}
+    scenarios_evidence: dict[str, dict[str, object]] = {}
     completed: list[str] = []
     status = "containment_unavailable"
     error: str | None = None
@@ -386,6 +396,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
     plan_digest = str(job.get("run_plan_sha256", ""))
     output_hashes: dict[str, object] = {"scenarios": {}, "analysis": {}}
     validated_digest: str | None = None
+    analysis_provenance: dict[str, object] | None = None
     pending_evidence: dict[str, object] | None = None
     active_scenario_id: str | None = None
     try:
@@ -536,6 +547,8 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             target_path, result_path, trades_path, daily_path = _scenario_outputs(scenario_dir)
             target_dir = target_path.parent
             _require_empty_directory(target_dir, "scenario targets stage")
+            target_provenance_dir = target_dir / "provenance"
+            _owned_directory(target_provenance_dir, "target provenance")
             from .containment import rewrite_targets_argv
 
             validate_targets_argv(
@@ -564,6 +577,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 receipt=receipt,
                 worktree=worktree,
                 targets_stage=target_dir,
+                provenance_dir=target_provenance_dir,
             )
             tick = time.monotonic()
             target_exit, target_timeout = _stage(
@@ -587,8 +601,34 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 }
                 raise ContainmentError(f"targets failed for {scenario.scenario_id}")
             target_digest = _sha(target_path)
+            try:
+                target_provenance = verify_stage_provenance(
+                    target_provenance_dir,
+                    stage=f"targets-{scenario.scenario_id}",
+                    pins=pins,
+                    worktree=worktree,
+                    commit=plan.commit,
+                    work_top_levels=_work_top_levels(plan),
+                    require_quantipy=False,
+                    require_interpreter_flags=False,
+                )
+            except ProvenanceError as exc:
+                status = "provenance_invalid"
+                raise ContainmentError(
+                    f"targets provenance invalid for {scenario.scenario_id}: {exc}"
+                ) from exc
+            scenario_evidence: dict[str, object] = {
+                "spec_id": scenario.spec_id,
+                "spec_sha256": spec_digests[scenario.spec_id],
+                "targets_sha256": target_digest,
+                "targets_exit": target_exit,
+                "targets_provenance": target_provenance,
+            }
+            scenarios_evidence[scenario.scenario_id] = scenario_evidence
             evaluator_dir = scenario_dir / "evaluator-stage"
             _require_empty_directory(evaluator_dir, "scenario evaluator stage")
+            evaluator_provenance_dir = evaluator_dir / "provenance"
+            _owned_directory(evaluator_provenance_dir, "evaluator provenance")
             evaluator_command = (
                 str(pins.shared_python),
                 "-P",
@@ -623,6 +663,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 dividends=dividends,
                 evaluator_stage=evaluator_dir,
                 targets_file=target_path,
+                provenance_dir=evaluator_provenance_dir,
             )
             tick = time.monotonic()
             evaluator_exit, evaluator_timeout = _stage(
@@ -642,6 +683,23 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             if evaluator_timeout or evaluator_exit != 0:
                 status = "timed_out" if evaluator_timeout else "scenario_failed"
                 raise ContainmentError(f"evaluator failed for {scenario.scenario_id}")
+            try:
+                evaluator_provenance = verify_stage_provenance(
+                    evaluator_provenance_dir,
+                    stage=f"evaluate-{scenario.scenario_id}",
+                    pins=pins,
+                    worktree=worktree,
+                    commit=plan.commit,
+                    work_top_levels=_work_top_levels(plan),
+                    require_quantipy=True,
+                    require_interpreter_flags=True,
+                )
+            except ProvenanceError as exc:
+                status = "provenance_invalid"
+                raise ContainmentError(
+                    f"evaluator provenance invalid for {scenario.scenario_id}: {exc}"
+                ) from exc
+            scenario_evidence["evaluator_provenance"] = evaluator_provenance
             output_dir = result_path.parent
             output_entries = list(output_dir.iterdir()) if output_dir.is_dir() else []
             if {path.name for path in output_entries} != {
@@ -662,17 +720,15 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 raise ContainmentError(
                     f"scenario result binding invalid for {scenario.scenario_id}"
                 )
-            scenarios_evidence[scenario.scenario_id] = {
-                "spec_id": scenario.spec_id,
-                "spec_sha256": spec_digests[scenario.spec_id],
-                "targets_sha256": target_digest,
-                "targets_exit": target_exit,
-                "evaluator_exit": evaluator_exit,
-                "result_path": str(result_path),
-                "result_sha256": _sha(result_path),
-                "trades_sha256": _sha(trades_path),
-                "daily_sha256": _sha(daily_path),
-            }
+            scenario_evidence.update(
+                {
+                    "evaluator_exit": evaluator_exit,
+                    "result_path": str(result_path),
+                    "result_sha256": _sha(result_path),
+                    "trades_sha256": _sha(trades_path),
+                    "daily_sha256": _sha(daily_path),
+                }
+            )
             completed.append(scenario.scenario_id)
             verify_runtime_pins(pins)
             _plan_artifacts(job)
@@ -686,6 +742,8 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             )
         analysis_dir = run_dir / "analysis-stage"
         _require_empty_directory(analysis_dir, "analysis stage")
+        analysis_provenance_dir = analysis_dir / "provenance"
+        _owned_directory(analysis_provenance_dir, "analysis provenance")
         analysis_out = analysis_dir / "analysis"
         _owned_directory(analysis_out, "analysis output stage")
         primary_scenario = next(
@@ -725,6 +783,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             analysis_stage=analysis_dir,
             analysis_inputs=analysis_inputs,
             evaluation_specs=spec_paths,
+            provenance_dir=analysis_provenance_dir,
         )
         tick = time.monotonic()
         analysis_exit, analysis_timeout = _stage(
@@ -740,11 +799,27 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
         if analysis_exit != 0:
             status = "analysis_failed"
             raise ContainmentError("analysis stage failed")
+        try:
+            analysis_provenance = verify_stage_provenance(
+                analysis_provenance_dir,
+                stage="analysis",
+                pins=pins,
+                worktree=worktree,
+                commit=plan.commit,
+                work_top_levels=_work_top_levels(plan),
+                require_quantipy=True,
+                require_interpreter_flags=True,
+            )
+        except ProvenanceError as exc:
+            status = "provenance_invalid"
+            raise ContainmentError(f"analysis provenance invalid: {exc}") from exc
         verify_runtime_pins(pins)
         _plan_artifacts(job)
         declared = set(plan.analysis.artifacts)
         actual: set[str] = set()
         for path in analysis_dir.rglob("*"):
+            if analysis_provenance_dir == path or analysis_provenance_dir in path.parents:
+                continue
             if path == analysis_out:
                 continue
             if path.is_symlink() or not path.is_file():
@@ -779,6 +854,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             "started_at": started,
             "finished_at": _now(),
         }
+        evidence["analysis_provenance"] = analysis_provenance
         pending_evidence = evidence
         return evidence
     except (
@@ -801,18 +877,23 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 status = "input_digest_mismatch"
             elif "run plan" in error:
                 status = "run_plan_mismatch"
-        if active_scenario_id is not None and active_scenario_id not in scenarios_evidence:
-            scenarios_evidence[active_scenario_id] = {
-                "status": "failed",
-                "spec_id": next(
-                    scenario.spec_id
-                    for scenario in plan.scenarios
-                    if scenario.scenario_id == active_scenario_id
-                )
-                if plan is not None
-                else None,
-                "error": error,
-            }
+        if active_scenario_id is not None:
+            active_evidence = scenarios_evidence.get(active_scenario_id)
+            if active_evidence is None:
+                scenarios_evidence[active_scenario_id] = {
+                    "status": "failed",
+                    "spec_id": next(
+                        scenario.spec_id
+                        for scenario in plan.scenarios
+                        if scenario.scenario_id == active_scenario_id
+                    )
+                    if plan is not None
+                    else None,
+                    "error": error,
+                }
+            else:
+                active_evidence["status"] = "failed"
+                active_evidence["error"] = error
         evidence = {
             "contract": "research-run-evidence-v1",
             "status": status,
@@ -831,6 +912,8 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             "started_at": started,
             "finished_at": _now(),
         }
+        if analysis_provenance is not None:
+            evidence["analysis_provenance"] = analysis_provenance
         pending_evidence = evidence
         return evidence
     finally:

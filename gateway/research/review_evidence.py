@@ -67,9 +67,11 @@ _BUNDLE_ENTRIES = {
     "instructions.md",
     "source",
     "run-plan.json",
+    "containment-provenance.json",
     "evaluation-spec-set.json",
     "evaluation-specs",
 }
+_LEGACY_BUNDLE_ENTRIES = _BUNDLE_ENTRIES - {"containment-provenance.json"}
 
 
 class ReviewEvidenceError(RuntimeError):
@@ -401,6 +403,9 @@ def build_review_bundle(
     run_plan_payload = _stored_json(store, attempt_id, "run_plan")
     if run_plan_payload is None:
         raise BundleError("review bundle requires immutable run-plan evidence")
+    containment_provenance = _stored_containment_provenance(store, attempt_id)
+    if containment_provenance is None:
+        raise BundleError("review bundle requires containment provenance evidence")
     try:
         run_plan = RunPlan.from_json(
             json.dumps(run_plan_payload, sort_keys=True, separators=(",", ":"))
@@ -440,7 +445,9 @@ def build_review_bundle(
         f"use these exact bindings: attempt_id={attempt.attempt_id}, commit={attempt.commit}, "
         f"spec_sha256={hypothesis.spec_sha256}. Findings must be an array of nonempty strings, "
         "never objects, nested arrays, or null; encode severity, location, and explanation within "
-        f"each string, or use [] when there are no findings. Valid JSON example:\n{verdict_example}"
+        "each string, or use [] when there are no findings.\n"
+        "containment-provenance.json is the host-verified in-sandbox import provenance "
+        f"for the tested commit.\nValid JSON example:\n{verdict_example}"
     )
     if tracked.excluded and instructions is None:
         text += (
@@ -482,6 +489,9 @@ def build_review_bundle(
         if tracked.excluded:
             (temporary / "source" / "EXCLUDED").write_bytes(_excluded_bytes(tracked.excluded))
         (temporary / "run-plan.json").write_text(run_plan.to_json(), encoding="utf-8")
+        (temporary / "containment-provenance.json").write_text(
+            to_json(containment_provenance), encoding="utf-8"
+        )
         (temporary / "evaluation-spec-set.json").write_text(spec_set.to_json(), encoding="utf-8")
         for entry in spec_set.specs:
             destination = temporary / "evaluation-specs" / f"{entry.spec_id}.json"
@@ -518,6 +528,9 @@ def _validate_bundle(
     run_plan_payload = _stored_json(store, attempt_id, "run_plan")
     if run_plan_payload is None:
         raise BundleError("review bundle requires immutable run-plan evidence")
+    containment_provenance = _stored_containment_provenance(store, attempt_id)
+    if containment_provenance is None:
+        raise BundleError("review bundle requires containment provenance evidence")
     entries = {path.name for path in root.iterdir()}
     if entries != _BUNDLE_ENTRIES:
         raise BundleError("bundle contains an unexpected file or directory")
@@ -569,6 +582,20 @@ def _validate_bundle(
     _require_immutable(root / "run-plan.json", "bundle run plan")
     if run_plan.to_json() != stored_plan.to_json():
         raise BundleError("bundle run plan differs from immutable evidence")
+    provenance_path = root / "containment-provenance.json"
+    _require_immutable(provenance_path, "bundle containment provenance")
+    try:
+        stored_provenance = json.loads(
+            _read_bounded(
+                provenance_path,
+                MAX_BUNDLE_FILE_BYTES,
+                "bundle containment provenance",
+            ).decode("utf-8")
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BundleError("bundle containment provenance is invalid") from exc
+    if stored_provenance != containment_provenance:
+        raise BundleError("bundle containment provenance differs from immutable evidence")
     spec_set = store.evaluation_spec_set(hypothesis.hypothesis_id)
     _require_immutable(root / "evaluation-spec-set.json", "bundle evaluation spec set")
     if (root / "evaluation-spec-set.json").read_text(encoding="utf-8") != spec_set.to_json():
@@ -609,7 +636,8 @@ def _verify_reserved_bundle(root: Path, expected_digest: str) -> str:
     if not root.is_absolute() or not root.is_dir() or root.is_symlink():
         raise BundleError("bundle directory is missing or unsafe")
     _require_immutable(root, "bundle directory")
-    if {path.name for path in root.iterdir()} != _BUNDLE_ENTRIES:
+    entries = {path.name for path in root.iterdir()}
+    if entries not in (_BUNDLE_ENTRIES, _LEGACY_BUNDLE_ENTRIES):
         raise BundleError("bundle contains an unexpected file or directory")
     for path in root.rglob("*"):
         if path.is_symlink() or not (path.is_file() or path.is_dir()):
@@ -750,6 +778,22 @@ def _stored_json(store: ResearchStore, attempt_id: str, kind: str) -> dict[str, 
     if not isinstance(raw, dict):
         raise StoreConflict(f"{kind} evidence must be an object")
     return cast(dict[str, object], raw)
+
+
+def _stored_containment_provenance(
+    store: ResearchStore, attempt_id: str
+) -> dict[str, object] | None:
+    try:
+        payload = _stored_json(store, attempt_id, "containment_provenance")
+    except (StoreConflict, json.JSONDecodeError) as exc:
+        raise BundleError("containment provenance evidence is malformed") from exc
+    if payload is not None and (
+        payload.get("contract") != "research-provenance-evidence-v1"
+        or not isinstance(payload.get("stages"), list)
+        or not payload["stages"]
+    ):
+        raise BundleError("containment provenance evidence is malformed")
+    return payload
 
 
 def _reservation_from_payload(payload: Mapping[str, object]) -> ReviewReservation:

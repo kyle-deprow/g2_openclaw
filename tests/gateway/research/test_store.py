@@ -23,7 +23,13 @@ from gateway.research.contracts import (
 from gateway.research.machine import IllegalTransition
 from gateway.research.store import OwnerLockHeld, ResearchStore, StoreConflict
 
-from tests.gateway.research.conftest import implementation, review, run_plan, verified_review
+from tests.gateway.research.conftest import (
+    implementation,
+    provenance_evidence,
+    review,
+    run_plan,
+    verified_review,
+)
 from tests.gateway.research.test_admission import _admit, _document, _payload
 
 
@@ -43,7 +49,10 @@ def _implemented_attempt(
     attempt = store.open_attempt(hypothesis.hypothesis_id, source, admission=admission)
     record = implementation(attempt.attempt_id, "a" * 40)
     attempt = store.submit_implementation(
-        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
+        attempt.attempt_id,
+        record,
+        run_plan=run_plan(store, attempt, record),
+        containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
     )
     return store, source, hypothesis, attempt, record
 
@@ -465,7 +474,12 @@ def test_store_evidence_is_idempotent_and_repairs_projection(
         record.submitted_at,
     )
     plan = run_plan(store, attempt, record)
-    store.submit_implementation(attempt.attempt_id, record, run_plan=plan)
+    store.submit_implementation(
+        attempt.attempt_id,
+        record,
+        run_plan=plan,
+        containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
+    )
     projection = (
         store.root
         / "hypotheses"
@@ -476,7 +490,12 @@ def test_store_evidence_is_idempotent_and_repairs_projection(
     )
     projection.unlink()
     assert (
-        store.submit_implementation(attempt.attempt_id, record, run_plan=plan).state
+        store.submit_implementation(
+            attempt.attempt_id,
+            record,
+            run_plan=plan,
+            containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
+        ).state
         == AttemptState.IMPLEMENTED
     )
     assert projection.is_file()
@@ -494,7 +513,50 @@ def test_store_evidence_is_idempotent_and_repairs_projection(
                 record.submitted_at,
             ),
             run_plan=plan,
+            containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
         )
+
+
+def test_submit_persists_and_replays_containment_provenance(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+) -> None:
+    store, source, hypothesis = campaign
+    store.freeze(hypothesis.hypothesis_id)
+    attempt = store.open_attempt(hypothesis.hypothesis_id, source)
+    record = implementation(attempt.attempt_id, "a" * 40)
+    plan = run_plan(store, attempt, record)
+
+    submitted = store.submit_implementation(
+        attempt.attempt_id,
+        record,
+        run_plan=plan,
+        containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
+    )
+
+    projection = (
+        store.root
+        / "hypotheses"
+        / hypothesis.hypothesis_id
+        / "attempts"
+        / attempt.attempt_id
+        / "containment-provenance.json"
+    )
+    provenance = provenance_evidence(attempt.attempt_id, record.commit)
+    assert json.loads(store.evidence(attempt.attempt_id, "containment_provenance")) == json.loads(
+        provenance
+    )
+    assert projection.read_text(encoding="utf-8") == provenance
+    projection.unlink()
+
+    replayed = store.submit_implementation(
+        attempt.attempt_id,
+        record,
+        run_plan=plan,
+        containment_provenance=provenance,
+    )
+
+    assert replayed == submitted
+    assert projection.read_text(encoding="utf-8") == provenance
 
 
 def test_submit_requires_plan_and_rejects_primary_or_unbound_spec_binding(
@@ -506,7 +568,11 @@ def test_submit_requires_plan_and_rejects_primary_or_unbound_spec_binding(
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     record = implementation(attempt.attempt_id, commit)
     with pytest.raises(StoreConflict, match="run plan evidence"):
-        store.submit_implementation(attempt.attempt_id, record)
+        store.submit_implementation(
+            attempt.attempt_id,
+            record,
+            containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
+        )
 
     plan = run_plan(store, attempt, record)
     changed_record = replace(record, targets_argv=("python", "-m", "different"))
@@ -515,7 +581,12 @@ def test_submit_requires_plan_and_rejects_primary_or_unbound_spec_binding(
         implementation_sha256=hashlib.sha256(changed_record.to_json().encode()).hexdigest(),
     )
     with pytest.raises(StoreConflict, match="primary scenario argv"):
-        store.submit_implementation(attempt.attempt_id, changed_record, run_plan=changed_plan)
+        store.submit_implementation(
+            attempt.attempt_id,
+            changed_record,
+            run_plan=changed_plan,
+            containment_provenance=provenance_evidence(attempt.attempt_id, changed_record.commit),
+        )
 
     unbound_plan = replace(
         plan,
@@ -529,7 +600,12 @@ def test_submit_requires_plan_and_rejects_primary_or_unbound_spec_binding(
         ),
     )
     with pytest.raises(StoreConflict, match="scenario spec does not match evidence"):
-        store.submit_implementation(attempt.attempt_id, record, run_plan=unbound_plan)
+        store.submit_implementation(
+            attempt.attempt_id,
+            record,
+            run_plan=unbound_plan,
+            containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
+        )
 
 
 def test_frozen_hypothesis_and_closed_attempt_are_sqlite_immutable(
@@ -556,7 +632,12 @@ def test_owner_lock_and_closed_attempt_trigger(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
-    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
+    store.submit_implementation(
+        attempt.attempt_id,
+        impl,
+        run_plan=run_plan(store, attempt, impl),
+        containment_provenance=provenance_evidence(attempt.attempt_id, impl.commit),
+    )
     verified_review(
         store,
         review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"),
@@ -576,7 +657,12 @@ def test_review_is_idempotent_repairs_projection_and_is_insert_only(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
-    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
+    store.submit_implementation(
+        attempt.attempt_id,
+        impl,
+        run_plan=run_plan(store, attempt, impl),
+        containment_provenance=provenance_evidence(attempt.attempt_id, impl.commit),
+    )
     record = review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256)
     verified_review(store, record)
     projection = (
@@ -810,7 +896,10 @@ def test_reconcile_repairs_missing_projection_without_launching(
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     record = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(
-        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
+        attempt.attempt_id,
+        record,
+        run_plan=run_plan(store, attempt, record),
+        containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
     )
     projection = (
         store.root
@@ -821,7 +910,7 @@ def test_reconcile_repairs_missing_projection_without_launching(
         / "implementation.json"
     )
     projection.unlink()
-    assert store.repair_projections() == 2
+    assert store.repair_projections() == 1
     assert projection.is_file()
 
 
@@ -860,7 +949,12 @@ def test_run_reservation_is_atomic_before_worker_launch(
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     record = implementation(attempt.attempt_id, "a" * 40)
     plan = run_plan(store, attempt, record)
-    store.submit_implementation(attempt.attempt_id, record, run_plan=plan)
+    store.submit_implementation(
+        attempt.attempt_id,
+        record,
+        run_plan=plan,
+        containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
+    )
     verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256))
     run_dir = (
         store.root
@@ -913,7 +1007,10 @@ def test_pause_close_commits_attempt_and_campaign_together(
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     record = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(
-        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
+        attempt.attempt_id,
+        record,
+        run_plan=run_plan(store, attempt, record),
+        containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
     )
     verified_review(
         store,

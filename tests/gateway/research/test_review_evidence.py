@@ -25,6 +25,7 @@ from gateway.research.contracts import (
 from gateway.research.review_evidence import (
     BundleError,
     ReviewPending,
+    ReviewReservation,
     ReviewUnresolved,
     acknowledge_review,
     cancel_review,
@@ -35,7 +36,7 @@ from gateway.research.review_evidence import (
 from gateway.research.store import ResearchStore, StoreConflict
 from typer.testing import CliRunner
 
-from tests.gateway.research.conftest import run_plan
+from tests.gateway.research.conftest import provenance_evidence, run_plan
 
 runner = CliRunner()
 
@@ -67,10 +68,40 @@ def _setup(
         "2026-01-01T00:00:00Z",
     )
     store.submit_implementation(
-        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
+        attempt.attempt_id,
+        record,
+        run_plan=run_plan(store, attempt, record),
+        containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
     )
     bundle = tmp_path / "review-bundle"
     return store, source, hypothesis, attempt.attempt_id, bundle
+
+
+def _reserve_legacy_bundle(
+    store: ResearchStore, attempt_id: str, bundle: Path
+) -> ReviewReservation:
+    review_evidence.build_review_bundle(store, attempt_id, bundle)
+    bundle.chmod(0o755)
+    (bundle / "containment-provenance.json").unlink()
+    review_evidence._readonly_tree(bundle)
+    attempt = store.get_attempt(attempt_id)
+    hypothesis = store.get_hypothesis(attempt.hypothesis_id)
+    assert attempt.commit is not None
+    reservation = ReviewReservation(
+        attempt_id=attempt_id,
+        commit=attempt.commit,
+        hypothesis_spec_sha256=hypothesis.spec_sha256,
+        bundle_dir=str(bundle.resolve()),
+        bundle_sha256=review_evidence._bundle_digest(bundle),
+        reserved_at="2026-01-01T00:00:00Z",
+        owner_session_key="owner",
+        label=f"{attempt_id}-legacy",
+        reservation_nonce="legacy",
+    )
+    store.insert_review_evidence(
+        attempt_id, "review_reservation", reservation.to_json(), "review_reserved"
+    )
+    return reservation
 
 
 def _commit_source(source: Path, message: str) -> None:
@@ -352,7 +383,7 @@ def test_real_bundle_build_and_revalidation_accept_generated_patch_above_file_ca
     subprocess.run(["git", "commit", "-qm", "generated patch"], cwd=source, check=True)
     source.chmod(0o555)
 
-    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 1024)
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 2048)
     monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", 64 * 1024)
     store, source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
     attempt = store.get_attempt(attempt_id)
@@ -380,6 +411,11 @@ def test_default_bundle_instructions_include_parseable_strict_verdict_example(
 
     assert separator == marker
     assert "findings must be an array of nonempty strings" in before.lower()
+    assert "containment-provenance.json" in before
+    assert (
+        "containment-provenance.json is the host-verified in-sandbox import provenance "
+        "for the tested commit."
+    ) in before
     payload = json.loads(example)
     assert set(payload) == {"verdict", "attempt_id", "commit", "spec_sha256", "findings"}
     assert payload["verdict"] in {"PASS", "FAIL"}
@@ -402,6 +438,18 @@ def test_default_bundle_instructions_include_parseable_strict_verdict_example(
     assert findings == tuple(payload["findings"])
 
 
+def test_new_bundle_without_provenance_is_refused(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    monkeypatch.setattr(review_evidence, "_stored_containment_provenance", lambda *_: None)
+
+    with pytest.raises(BundleError, match="review bundle requires containment provenance evidence"):
+        review_evidence.build_review_bundle(store, attempt_id, bundle)
+
+
 def test_reservation_builds_actual_read_only_bundle_and_ack_replays(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
@@ -411,6 +459,11 @@ def test_reservation_builds_actual_read_only_bundle_and_ack_replays(
     ).reserve_review(store, attempt_id, bundle, "owner")
     assert reservation.label.startswith(attempt_id + "-")
     assert (bundle / "source" / "tracked.txt").read_text() == "tracked"
+    attempt = store.get_attempt(attempt_id)
+    assert attempt.commit is not None
+    assert json.loads((bundle / "containment-provenance.json").read_text()) == json.loads(
+        provenance_evidence(attempt_id, attempt.commit)
+    )
     instructions = (bundle / "instructions.md").read_text()
     assert f"attempt_id={attempt_id}" in instructions
     assert f"spec_sha256={hypothesis.spec_sha256}" in instructions
@@ -857,6 +910,70 @@ def test_collect_supersedes_failed_verification_with_transcript_fail(
     assert review["verdict"] == "FAIL"
     assert review["findings"] == list(findings)
     assert len([event for event in store.events() if event.kind == "review_recollected"]) == 1
+
+
+def test_historical_reserved_bundle_without_provenance_supersedes_without_worktree(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    findings = (
+        "severity=high; location=source/a.py:1; explanation=first finding",
+        "severity=medium; location=source/b.py:2; explanation=second finding",
+        "severity=low; location=source/c.py:3; explanation=third finding",
+        "severity=high; location=source/d.py:4; explanation=fourth finding",
+    )
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    reservation = _reserve_legacy_bundle(store, attempt_id, bundle)
+    assert not (bundle / "containment-provenance.json").exists()
+    acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
+    core, sessions, projects = _host_fixture(
+        store, attempt_id, bundle, tmp_path, verdict="FAIL", findings=findings
+    )
+    attempt = store.get_attempt(attempt_id)
+    worktree = Path(attempt.worktree_path)
+    for path in worktree.rglob("*"):
+        path.chmod(path.stat().st_mode | 0o700)
+    worktree.chmod(worktree.stat().st_mode | 0o700)
+    shutil.rmtree(worktree)
+
+    def fail_reserved_bundle(_root: Path, expected_digest: str) -> str:
+        assert expected_digest == reservation.bundle_sha256
+        raise BundleError("historical host failure")
+
+    monkeypatch.setattr(review_evidence, "_verify_reserved_bundle", fail_reserved_bundle)
+    first = collect_review(store, attempt_id, core, sessions, projects)
+    assert first.state == AttemptState.REVIEW_FAILED
+    assert json.loads(store.evidence(attempt_id, "review"))["findings"] == [
+        "bundle_invalid: historical host failure"
+    ]
+
+    monkeypatch.undo()
+    second = collect_review(store, attempt_id, core, sessions, projects)
+    assert second.state == AttemptState.REVIEW_FAILED
+    review = json.loads(store.evidence(attempt_id, "review"))
+    assert review["verdict"] == "FAIL"
+    assert review["findings"] == list(findings)
+    attempt_dir = store.root / "hypotheses" / "H0001" / "attempts" / attempt_id
+    assert json.loads((attempt_dir / "review_superseded.json").read_text())["findings"] == [
+        "bundle_invalid: historical host failure"
+    ]
+    assert (attempt_dir / "review_host_evidence_superseded.json").is_file()
+    with store._connect() as conn:
+        counts = {
+            str(row[0]): int(row[1])
+            for row in conn.execute(
+                "SELECT kind, COUNT(*) FROM attempt_evidence WHERE attempt_id=? GROUP BY kind",
+                (attempt_id,),
+            ).fetchall()
+        }
+    assert counts["review_superseded"] == 1
+    assert counts["review_host_evidence_superseded"] == 1
+    assert len([event for event in store.events() if event.kind == "review_recollected"]) == 1
+
+    events_before = store.events()
+    assert collect_review(store, attempt_id, core, sessions, projects) == second
+    assert store.events() == events_before
 
 
 def test_transcript_verified_review_is_never_superseded(

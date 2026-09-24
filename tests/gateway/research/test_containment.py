@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 from gateway.research import worker
 from gateway.research.containment import (
+    PROVENANCE_RECORDER_SOURCE,
     ContainmentError,
     RuntimePins,
     bwrap_argv,
@@ -100,8 +101,10 @@ def test_bwrap_validate_has_only_readonly_inputs_and_no_worktree(tmp_path: Path)
     receipt = tmp_path / "receipt"
     spec = tmp_path / "spec"
     dividends = tmp_path / "dividends"
+    provenance = tmp_path / "provenance"
     for path in (panel, receipt, spec, dividends):
         path.write_text("{}")
+    provenance.mkdir()
     command = (str(pins.shared_python), "-P", "-s", str(pins.evaluator), "research")
     argv = bwrap_argv(
         pins,
@@ -123,6 +126,15 @@ def test_bwrap_validate_has_only_readonly_inputs_and_no_worktree(tmp_path: Path)
     )
     assert "--bind" not in argv
     assert "/work" not in argv
+    assert ("--ro-bind", str(PROVENANCE_RECORDER_SOURCE), "/provenance") == tuple(
+        argv[
+            argv.index(str(PROVENANCE_RECORDER_SOURCE)) - 1 : argv.index(
+                str(PROVENANCE_RECORDER_SOURCE)
+            )
+            + 2
+        ]
+    )
+    assert "/provenance:/snapshot/src" in argv
     panel_index = argv.index(str(panel))
     assert tuple(argv[panel_index - 1 : panel_index + 2]) == (
         "--ro-bind",
@@ -144,8 +156,12 @@ def test_bwrap_targets_and_evaluate_have_separate_writable_stage(tmp_path: Path)
         path.write_text("{}")
     targets_stage = tmp_path / "targets-stage"
     evaluator_stage = tmp_path / "evaluator-stage"
+    targets_provenance = targets_stage / "provenance"
+    evaluator_provenance = evaluator_stage / "provenance"
     targets_stage.mkdir()
     evaluator_stage.mkdir()
+    targets_provenance.mkdir()
+    evaluator_provenance.mkdir()
     target = bwrap_argv(
         pins,
         "targets",
@@ -154,6 +170,7 @@ def test_bwrap_targets_and_evaluate_have_separate_writable_stage(tmp_path: Path)
         receipt=receipt,
         worktree=worktree,
         targets_stage=targets_stage,
+        provenance_dir=targets_provenance,
     )
     evaluate = bwrap_argv(
         pins,
@@ -165,6 +182,7 @@ def test_bwrap_targets_and_evaluate_have_separate_writable_stage(tmp_path: Path)
         dividends=dividends,
         evaluator_stage=evaluator_stage,
         targets_file=targets_stage / "targets.json",
+        provenance_dir=evaluator_provenance,
     )
     assert "/work" in target
     bind_index = target.index("--bind")
@@ -183,6 +201,17 @@ def test_bwrap_targets_and_evaluate_have_separate_writable_stage(tmp_path: Path)
     assert ("--bind", str(evaluator_stage), "/stage") == tuple(
         evaluate[evaluate.index("--bind") : evaluate.index("--bind") + 3]
     )
+    assert evaluate[-13:-4] == (
+        "--bind",
+        str(evaluator_provenance),
+        "/stage/provenance",
+        "--setenv",
+        "RESEARCH_PROVENANCE_DIR",
+        "/stage/provenance",
+        "--setenv",
+        "RESEARCH_PROVENANCE_STAGE",
+        "evaluate",
+    )
     assert "/inputs/dividends.json" not in target
     assert "/universe.json" not in target
     assert "/inputs/spec.json" not in target
@@ -195,9 +224,11 @@ def test_bwrap_analysis_mount_is_scoped_to_declared_output_subdirectory(
     worktree = tmp_path / "worktree"
     scenarios = tmp_path / "scenarios"
     analysis_stage = tmp_path / "analysis-stage"
+    provenance = analysis_stage / "provenance"
     worktree.mkdir()
     scenarios.mkdir()
     analysis_stage.mkdir()
+    provenance.mkdir()
     panel = tmp_path / "panel"
     spec = tmp_path / "spec"
     panel.write_text("panel")
@@ -211,14 +242,63 @@ def test_bwrap_analysis_mount_is_scoped_to_declared_output_subdirectory(
         analysis_stage=analysis_stage,
         analysis_inputs={"panel.parquet": panel},
         evaluation_specs={"c000": spec},
+        provenance_dir=provenance,
     )
     assert ("--dir", "/stage") in pairwise(command)
+    pythonpath = "/provenance:/snapshot/src:/work"
+    assert command[command.index(pythonpath) - 1 : command.index(pythonpath) + 1] == (
+        "PYTHONPATH",
+        pythonpath,
+    )
     bind = ("--bind", str(analysis_stage / "analysis"), "/stage/analysis")
     assert bind == tuple(command[command.index("--bind") : command.index("--bind") + 3])
     assert not any(
         command[index : index + 3] == ("--bind", str(analysis_stage), "/stage")
         for index in range(len(command) - 2)
     )
+    assert ("--ro-bind", str(panel), "/inputs/panel.parquet") == tuple(
+        command[command.index(str(panel)) - 1 : command.index(str(panel)) + 2]
+    )
+
+
+def test_provenance_directory_is_required_and_scoped_to_stage(tmp_path: Path) -> None:
+    pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
+    panel = tmp_path / "panel"
+    receipt = tmp_path / "receipt"
+    panel.write_text("panel")
+    receipt.write_text("receipt")
+    with pytest.raises(ContainmentError, match="required"):
+        bwrap_argv(
+            pins,
+            "targets-s000",
+            (str(pins.shared_python), "-m", "strategy"),
+            panel=panel,
+            receipt=receipt,
+            worktree=tmp_path,
+            targets_stage=tmp_path,
+        )
+    provenance = tmp_path / "provenance"
+    provenance.mkdir()
+    with pytest.raises(ContainmentError, match="not allowed"):
+        bwrap_argv(
+            pins,
+            "validate-c000",
+            (str(pins.shared_python),),
+            panel=panel,
+            receipt=receipt,
+            provenance_dir=provenance,
+        )
+    with pytest.raises(ContainmentError, match="absolute"):
+        bwrap_argv(
+            pins,
+            "targets-s000",
+            (str(pins.shared_python), "-m", "strategy"),
+            panel=panel,
+            receipt=receipt,
+            worktree=tmp_path,
+            targets_stage=tmp_path,
+            provenance_dir=Path("relative"),
+        )
 
 
 def test_target_rewrite_maps_only_known_roots_and_rejects_escape(tmp_path: Path) -> None:
@@ -509,6 +589,11 @@ def test_contained_worker_runs_fixed_stages_and_binds_v2_result(
 
     monkeypatch.setattr(worker, "stage_plan", fake_plan)
     monkeypatch.setattr(worker, "_stage", fake_stage)
+    monkeypatch.setattr(
+        worker,
+        "verify_stage_provenance",
+        lambda _records_dir, *, stage, **_kwargs: {"stage": stage, "record_count": 1},
+    )
     assert worker._contained_run_plan(job)["status"] == expected_status
     assert calls == expected_calls
     terminal = json.loads((run_dir / "terminal.json").read_text())

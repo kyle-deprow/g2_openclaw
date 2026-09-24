@@ -137,6 +137,27 @@ def implementation(attempt_id: str, commit: str | None) -> ImplementationRecord:
     )
 
 
+def provenance_evidence(attempt_id: str, commit: str) -> str:
+    """Return a canonical fixture provenance index for implementation submissions."""
+    return json.dumps(
+        {
+            "attempt_id": attempt_id,
+            "commit": commit,
+            "contract": "research-provenance-evidence-v1",
+            "stages": [
+                {"records_dir": "/worktree/provenance/targets-s000", "stage": "targets-s000"},
+                {
+                    "records_dir": "/worktree/provenance/evaluate-s000",
+                    "stage": "evaluate-s000",
+                },
+                {"records_dir": "/worktree/provenance/analysis", "stage": "analysis"},
+            ],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def run_plan(
     store: ResearchStore,
     attempt: Attempt,

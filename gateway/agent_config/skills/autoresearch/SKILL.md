@@ -114,6 +114,15 @@ Each scenario's target command must write to its own canonical
 `run/scenarios/sNNN/targets-stage/targets.json`; do not use a shared run-root
 target path or another scenario's stage.
 
+## Containment provenance
+
+- Every targets/evaluate/analysis stage built through `gateway.research.containment.stage_plan` must pass `provenance_dir=` and receive deployed `PYTHONPATH=/provenance:/snapshot/src[:/work]`.
+- The sandbox writes `research-containment-provenance-v1` records to `/stage/provenance/`.
+- The implementer synthetic harness retains those record dirs inside the committed worktree and submits a `research-provenance-evidence-v1` index via `implementation-submit --provenance-evidence`.
+- Submission is refused when a stage lacks records, `quantipy` resolves outside `/snapshot/src`, or a `/work` module differs from the tested commit.
+- The historical worker applies the same verification and fails the run with `provenance_invalid`.
+- Evaluator and analysis stages run `python -P -s` and are verified for those interpreter flags, while target entrypoints are verified by module origin and hashes rather than interpreter flags.
+
 ## Scientific boundary
 
 The initial capability is price-panel-only and ETF-scoped. Require trusted

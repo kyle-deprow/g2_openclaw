@@ -955,6 +955,8 @@ class ResearchStore:
         attempt_id: str,
         record: ImplementationRecord,
         run_plan: RunPlan | None = None,
+        *,
+        containment_provenance: str,
     ) -> Attempt:
         attempt = self.get_attempt(attempt_id)
         if run_plan is None:
@@ -963,6 +965,8 @@ class ResearchStore:
             raise StoreConflict("run plan does not match implementation")
         if run_plan.implementation_sha256 != _digest(record.to_json()):
             raise StoreConflict("run plan implementation digest does not match implementation")
+        record_payload = record.to_json()
+        run_plan_payload = run_plan.to_json()
         try:
             spec_set = self.evaluation_spec_set(attempt.hypothesis_id)
         except (StoreConflict, ValueError) as exc:
@@ -984,78 +988,107 @@ class ResearchStore:
             for scenario in run_plan.scenarios
         ):
             raise StoreConflict("run plan scenario spec does not match evidence")
-        run_plan_payload = run_plan.to_json()
-        with self._connect() as conn:
-            old = conn.execute(
-                "SELECT payload_json FROM attempt_evidence WHERE attempt_id=? AND kind='implementation'",
-                (attempt_id,),
-            ).fetchone()
-        if old is not None:
-            if old[0] != record.to_json():
-                raise StoreConflict("implementation payload differs from stored payload")
-            existing_plan = conn.execute(
-                "SELECT payload_json FROM attempt_evidence WHERE attempt_id=? AND kind='run_plan'",
-                (attempt_id,),
-            ).fetchone()
-            if existing_plan is None or str(existing_plan[0]) != run_plan_payload:
-                raise StoreConflict("run plan payload differs from stored payload")
-            self._repair_evidence_projection(attempt, "implementation", record.to_json())
-            self._repair_evidence_projection(attempt, "run_plan", run_plan_payload)
-            return attempt
-        updated = submit_implementation(attempt, record, now_utc())
-        payload = updated.to_json()
+
+        replay = False
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
-                (attempt_id, "implementation", record.to_json(), _digest(record.to_json())),
-            )
-            conn.execute(
-                "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
-                (attempt_id, "run_plan", run_plan_payload, _digest(run_plan_payload)),
-            )
-            conn.execute(
-                'UPDATE attempts SET state=?,"commit"=?,implementation_sha256=?,review_verdict=NULL,review_commit=NULL,review_spec_sha256=NULL,reported_reviewer_model=NULL,reported_reviewer_actual_model=NULL,reported_coder_model=?,coder_effort=?,coder_service_tier=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=?',
-                (
-                    updated.state.value,
-                    updated.commit,
-                    updated.implementation_sha256,
-                    updated.reported_coder_model,
-                    updated.coder_effort,
-                    updated.coder_service_tier,
-                    updated.updated_at,
-                    payload,
-                    _digest(payload),
+            current_row = conn.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?", (attempt_id,)
+            ).fetchone()
+            if current_row is None:
+                raise ValueError(f"unknown attempt: {attempt_id}")
+            current = self._attempt_from_row(current_row)
+            old = conn.execute(
+                "SELECT payload_json,payload_sha256 FROM attempt_evidence "
+                "WHERE attempt_id=? AND kind='implementation'",
+                (attempt_id,),
+            ).fetchone()
+            existing_plan = conn.execute(
+                "SELECT payload_json,payload_sha256 FROM attempt_evidence "
+                "WHERE attempt_id=? AND kind='run_plan'",
+                (attempt_id,),
+            ).fetchone()
+            existing_provenance = conn.execute(
+                "SELECT payload_json,payload_sha256 FROM attempt_evidence "
+                "WHERE attempt_id=? AND kind='containment_provenance'",
+                (attempt_id,),
+            ).fetchone()
+            if old is not None:
+                if _digest(str(old[0])) != str(old[1]) or str(old[0]) != record_payload:
+                    raise StoreConflict("implementation payload differs from stored payload")
+                if (
+                    existing_plan is None
+                    or _digest(str(existing_plan[0])) != str(existing_plan[1])
+                    or str(existing_plan[0]) != run_plan_payload
+                ):
+                    raise StoreConflict("run plan payload differs from stored payload")
+                if (
+                    existing_provenance is None
+                    or _digest(str(existing_provenance[0])) != str(existing_provenance[1])
+                    or str(existing_provenance[0]) != containment_provenance
+                ):
+                    raise StoreConflict(
+                        "containment provenance payload differs from stored payload"
+                    )
+                conn.commit()
+                replay = True
+                updated = current
+            else:
+                updated = submit_implementation(current, record, now_utc())
+                payload = updated.to_json()
+                conn.execute(
+                    "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+                    (attempt_id, "implementation", record_payload, _digest(record_payload)),
+                )
+                conn.execute(
+                    "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+                    (attempt_id, "run_plan", run_plan_payload, _digest(run_plan_payload)),
+                )
+                conn.execute(
+                    "INSERT INTO attempt_evidence VALUES(?,?,?,?)",
+                    (
+                        attempt_id,
+                        "containment_provenance",
+                        containment_provenance,
+                        _digest(containment_provenance),
+                    ),
+                )
+                conn.execute(
+                    'UPDATE attempts SET state=?,"commit"=?,implementation_sha256=?,review_verdict=NULL,review_commit=NULL,review_spec_sha256=NULL,reported_reviewer_model=NULL,reported_reviewer_actual_model=NULL,reported_coder_model=?,coder_effort=?,coder_service_tier=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=?',
+                    (
+                        updated.state.value,
+                        updated.commit,
+                        updated.implementation_sha256,
+                        updated.reported_coder_model,
+                        updated.coder_effort,
+                        updated.coder_service_tier,
+                        updated.updated_at,
+                        payload,
+                        _digest(payload),
+                        attempt_id,
+                    ),
+                )
+                self._event(
+                    conn,
+                    current.hypothesis_id,
                     attempt_id,
-                ),
+                    "implementation_submitted",
+                    {"commit": record.commit},
+                    "astra",
+                )
+                conn.commit()
+
+        if replay:
+            self._repair_evidence_projection(attempt, "implementation", record_payload)
+            self._repair_evidence_projection(attempt, "run_plan", run_plan_payload)
+            self._repair_evidence_projection(
+                attempt, "containment_provenance", containment_provenance
             )
-            self._event(
-                conn,
-                attempt.hypothesis_id,
-                attempt_id,
-                "implementation_submitted",
-                {"commit": record.commit},
-                "astra",
-            )
-            conn.commit()
-        self._projection(
-            self.root
-            / "hypotheses"
-            / attempt.hypothesis_id
-            / "attempts"
-            / attempt_id
-            / "implementation.json",
-            record.to_json(),
-        )
-        self._projection(
-            self.root
-            / "hypotheses"
-            / attempt.hypothesis_id
-            / "attempts"
-            / attempt_id
-            / "run-plan.json",
-            run_plan_payload,
-        )
+        else:
+            attempt_dir = self.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id
+            self._projection(attempt_dir / "implementation.json", record_payload)
+            self._projection(attempt_dir / "run-plan.json", run_plan_payload)
+            self._projection(attempt_dir / "containment-provenance.json", containment_provenance)
         return updated
 
     def insert_review_evidence(self, attempt_id: str, kind: str, payload: str, event: str) -> None:
@@ -1891,7 +1924,13 @@ class ResearchStore:
                         / spec.hypothesis_id
                         / "attempts"
                         / attempt.attempt_id
-                        / f"{row['kind']}.json"
+                        / (
+                            "run-plan.json"
+                            if row["kind"] == "run_plan"
+                            else "containment-provenance.json"
+                            if row["kind"] == "containment_provenance"
+                            else f"{row['kind']}.json"
+                        )
                     )
                     if self._projection(path, str(row["payload_json"])):
                         repaired += 1
@@ -1915,7 +1954,13 @@ class ResearchStore:
             / attempt.hypothesis_id
             / "attempts"
             / attempt.attempt_id
-            / f"{kind}.json"
+            / (
+                "run-plan.json"
+                if kind == "run_plan"
+                else "containment-provenance.json"
+                if kind == "containment_provenance"
+                else f"{kind}.json"
+            )
         )
         if self._projection(path, payload):
             with self._connect() as conn:

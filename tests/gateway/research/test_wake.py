@@ -22,7 +22,13 @@ from gateway.research.wake import (
     poll_owner_turn,
 )
 
-from tests.gateway.research.conftest import implementation, review, run_plan, verified_review
+from tests.gateway.research.conftest import (
+    implementation,
+    provenance_evidence,
+    review,
+    run_plan,
+    verified_review,
+)
 
 
 class Sender:
@@ -66,10 +72,16 @@ def test_wake_composes_each_state_and_failed_owner_turn_is_recorded(
     store.freeze(hypothesis.hypothesis_id)
     assert compose_wake(store).state == "FROZEN"  # type: ignore[union-attr]
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
-    assert compose_wake(store).state == "OPENED"  # type: ignore[union-attr]
+    opened_wake = compose_wake(store)
+    assert opened_wake is not None and opened_wake.state == "OPENED"
+    assert "--run-plan run-plan.json" in opened_wake.message
+    assert "--provenance-evidence provenance.json" in opened_wake.message
     impl = implementation(attempt.attempt_id, "a" * 40)
     implemented = store.submit_implementation(
-        attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl)
+        attempt.attempt_id,
+        impl,
+        run_plan=run_plan(store, attempt, impl),
+        containment_provenance=provenance_evidence(attempt.attempt_id, impl.commit),
     )
     assert implemented.state == AttemptState.IMPLEMENTED
     assert compose_wake(store).state == "IMPLEMENTED"  # type: ignore[union-attr]
@@ -305,14 +317,24 @@ def test_wake_compose_terminal_states_requests_close_decision(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
-    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
+    store.submit_implementation(
+        attempt.attempt_id,
+        impl,
+        run_plan=run_plan(store, attempt, impl),
+        containment_provenance=provenance_evidence(attempt.attempt_id, impl.commit),
+    )
     verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
     assert compose_wake(store).state == "REVIEW_FAILED"  # type: ignore[union-attr]
     closed = store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
     assert closed.state.value == "CLOSED"
     reopened = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(reopened.attempt_id, "b" * 40)
-    store.submit_implementation(reopened.attempt_id, impl, run_plan=run_plan(store, reopened, impl))
+    store.submit_implementation(
+        reopened.attempt_id,
+        impl,
+        run_plan=run_plan(store, reopened, impl),
+        containment_provenance=provenance_evidence(reopened.attempt_id, impl.commit),
+    )
     passed = verified_review(store, review(reopened.attempt_id, "b" * 40, hypothesis.spec_sha256))
     queued = queue_run(passed, "2026-01-01T00:00:00Z")
     running = start_run(queued, "job-x", "2026-01-01T00:00:00Z")
@@ -327,7 +349,12 @@ def test_wake_after_finished_attempt_requests_hypothesis_decision(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
-    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
+    store.submit_implementation(
+        attempt.attempt_id,
+        impl,
+        run_plan=run_plan(store, attempt, impl),
+        containment_provenance=provenance_evidence(attempt.attempt_id, impl.commit),
+    )
     verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
     store.close_attempt(attempt.attempt_id, AttemptDecision.FINISH, "finished")
 
@@ -347,7 +374,12 @@ def test_wake_after_retry_requests_next_attempt(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
-    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
+    store.submit_implementation(
+        attempt.attempt_id,
+        impl,
+        run_plan=run_plan(store, attempt, impl),
+        containment_provenance=provenance_evidence(attempt.attempt_id, impl.commit),
+    )
     verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
     store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
 
@@ -365,7 +397,12 @@ def test_wake_after_pause_remains_quiet(
     store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
-    store.submit_implementation(attempt.attempt_id, impl, run_plan=run_plan(store, attempt, impl))
+    store.submit_implementation(
+        attempt.attempt_id,
+        impl,
+        run_plan=run_plan(store, attempt, impl),
+        containment_provenance=provenance_evidence(attempt.attempt_id, impl.commit),
+    )
     verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
     store.close_attempt(attempt.attempt_id, AttemptDecision.PAUSE, "pause")
 
@@ -417,7 +454,12 @@ def test_wake_identity_changes_across_retry_and_finish_without_rewriting_unknown
 
     first = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(first.attempt_id, "a" * 40)
-    store.submit_implementation(first.attempt_id, impl, run_plan=run_plan(store, first, impl))
+    store.submit_implementation(
+        first.attempt_id,
+        impl,
+        run_plan=run_plan(store, first, impl),
+        containment_provenance=provenance_evidence(first.attempt_id, impl.commit),
+    )
     verified_review(store, review(first.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
     store.close_attempt(first.attempt_id, AttemptDecision.RETRY, "retry")
     retry = compose_wake(store)
@@ -427,7 +469,12 @@ def test_wake_identity_changes_across_retry_and_finish_without_rewriting_unknown
 
     second = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(second.attempt_id, "b" * 40)
-    store.submit_implementation(second.attempt_id, impl, run_plan=run_plan(store, second, impl))
+    store.submit_implementation(
+        second.attempt_id,
+        impl,
+        run_plan=run_plan(store, second, impl),
+        containment_provenance=provenance_evidence(second.attempt_id, impl.commit),
+    )
     verified_review(store, review(second.attempt_id, "b" * 40, hypothesis.spec_sha256, "FAIL"))
     store.close_attempt(second.attempt_id, AttemptDecision.FINISH, "finished")
     finish = compose_wake(store)
@@ -446,13 +493,23 @@ def test_wake_uses_highest_numbered_closed_attempt_decision(
     store.freeze(hypothesis.hypothesis_id)
     first = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(first.attempt_id, "a" * 40)
-    store.submit_implementation(first.attempt_id, impl, run_plan=run_plan(store, first, impl))
+    store.submit_implementation(
+        first.attempt_id,
+        impl,
+        run_plan=run_plan(store, first, impl),
+        containment_provenance=provenance_evidence(first.attempt_id, impl.commit),
+    )
     verified_review(store, review(first.attempt_id, "a" * 40, hypothesis.spec_sha256, "FAIL"))
     store.close_attempt(first.attempt_id, AttemptDecision.FINISH, "finished")
 
     second = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(second.attempt_id, "b" * 40)
-    store.submit_implementation(second.attempt_id, impl, run_plan=run_plan(store, second, impl))
+    store.submit_implementation(
+        second.attempt_id,
+        impl,
+        run_plan=run_plan(store, second, impl),
+        containment_provenance=provenance_evidence(second.attempt_id, impl.commit),
+    )
     verified_review(store, review(second.attempt_id, "b" * 40, hypothesis.spec_sha256, "FAIL"))
     store.close_attempt(second.attempt_id, AttemptDecision.RETRY, "retry")
 

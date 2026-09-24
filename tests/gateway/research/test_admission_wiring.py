@@ -36,7 +36,13 @@ from gateway.research.store import MAX_EXPOSURE_LEDGER_BYTES, ResearchStore, Sto
 from gateway.research.wake import compose_wake
 from typer.testing import CliRunner
 
-from tests.gateway.research.conftest import implementation, review, run_plan, verified_review
+from tests.gateway.research.conftest import (
+    implementation,
+    provenance_evidence,
+    review,
+    run_plan,
+    verified_review,
+)
 from tests.gateway.research.test_admission import _admit, _document, _payload
 from tests.gateway.research.test_review_evidence import _prepare_review
 
@@ -692,7 +698,12 @@ def test_dispatch_policy_race_releases_pending_attempt_without_readiness_or_budg
     attempt = store.open_attempt(hypothesis.hypothesis_id, source, admission=admitted)
     record = implementation(attempt.attempt_id, "a" * 40)
     plan = run_plan(store, attempt, record)
-    store.submit_implementation(attempt.attempt_id, record, run_plan=plan)
+    store.submit_implementation(
+        attempt.attempt_id,
+        record,
+        run_plan=plan,
+        containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
+    )
     verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256))
     run_dir = (
         store.root
@@ -740,7 +751,10 @@ def test_attempt_cap_pause_cancel_and_status_remain_safe(
         attempt = store.open_attempt(hypothesis.hypothesis_id, source)
         record = implementation(attempt.attempt_id, "a" * 40)
         store.submit_implementation(
-            attempt.attempt_id, record, run_plan=run_plan(store, attempt, record)
+            attempt.attempt_id,
+            record,
+            run_plan=run_plan(store, attempt, record),
+            containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
         )
         store.collect_review_evidence(
             attempt.attempt_id,
@@ -757,7 +771,12 @@ def test_attempt_cap_pause_cancel_and_status_remain_safe(
     final = store.open_attempt(hypothesis.hypothesis_id, source)
     final_record = implementation(final.attempt_id, "a" * 40)
     final_plan = run_plan(store, final, final_record)
-    store.submit_implementation(final.attempt_id, final_record, run_plan=final_plan)
+    store.submit_implementation(
+        final.attempt_id,
+        final_record,
+        run_plan=final_plan,
+        containment_provenance=provenance_evidence(final.attempt_id, final_record.commit),
+    )
     verified_review(store, review(final.attempt_id, "a" * 40, hypothesis.spec_sha256))
     run_dir = (
         store.root / "hypotheses" / hypothesis.hypothesis_id / "attempts" / final.attempt_id / "run"
@@ -783,10 +802,17 @@ def test_attempt_cap_pause_cancel_and_status_remain_safe(
 
 
 def test_final_allocated_attempt_completes_review_run_collect_and_decision(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from gateway.research.review_evidence import collect_review
 
+    monkeypatch.setitem(
+        _prepare_review.__globals__,
+        "_PROVENANCE",
+        provenance_evidence("H0001-A001", "0" * 40),
+    )
     store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
     assert (
         collect_review(store, attempt_id, core, sessions, projects).state

@@ -23,11 +23,12 @@ from gateway.research.contracts import (
     RunScenario,
 )
 from gateway.research.jobs import JobRecord, _starttime
+from gateway.research.provenance import ProvenanceError
 from gateway.research.store import ResearchStore
 from gateway.research.wake import compose_wake
 from typer.testing import CliRunner
 
-from tests.gateway.research.conftest import review, run_plan, verified_review
+from tests.gateway.research.conftest import provenance_evidence, review, run_plan, verified_review
 from tests.gateway.research.test_admission import _admit, _document, _payload
 from tests.gateway.research.test_readiness import configure_real_readiness
 
@@ -155,10 +156,64 @@ def _ready(
         "2026-01-01T00:00:00Z",
     )
     store.submit_implementation(
-        attempt.attempt_id, record, run_plan=run_plan(store, attempt, record, scenarios=scenarios)
+        attempt.attempt_id,
+        record,
+        run_plan=run_plan(store, attempt, record, scenarios=scenarios),
+        containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
     )
     verified_review(store, review(attempt.attempt_id, commit, hypothesis.spec_sha256))
     return store.get_attempt(attempt.attempt_id)
+
+
+def test_implementation_submit_validates_provenance_before_persisting(
+    campaign: tuple[ResearchStore, Path, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, source, hypothesis = campaign
+    store.freeze(hypothesis.hypothesis_id)
+    attempt = store.open_attempt(hypothesis.hypothesis_id, source)
+    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
+    record = ImplementationRecord(
+        attempt.attempt_id,
+        commit,
+        (sys.executable, "-m", "fixture_target"),
+        "/tmp/evidence.json",
+        "reported-coder",
+        "high",
+        "standard",
+        "2026-01-01T00:00:00Z",
+    )
+    implementation_path = tmp_path / "implementation.json"
+    run_plan_path = tmp_path / "run-plan.json"
+    implementation_path.write_text(record.to_json(), encoding="utf-8")
+    plan = run_plan(store, attempt, record)
+    run_plan_path.write_text(plan.to_json(), encoding="utf-8")
+
+    def reject_provenance(*_args: object) -> str:
+        raise ProvenanceError("invalid provenance")
+
+    monkeypatch.setattr(research_cli, "validate_provenance_evidence", reject_provenance)
+    result = runner.invoke(
+        app,
+        [
+            "research",
+            "implementation-submit",
+            attempt.attempt_id,
+            "--root",
+            str(store.root),
+            "--file",
+            str(implementation_path),
+            "--run-plan",
+            str(run_plan_path),
+            "--provenance-evidence",
+            str(tmp_path / "provenance.json"),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "invalid provenance" in result.output
+    assert store.get_attempt(attempt.attempt_id).state == AttemptState.OPENED
 
 
 def _queue(

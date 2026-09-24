@@ -168,7 +168,11 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
     if attempt.state in {AttemptState.RUN_QUEUED, AttemptState.RUNNING}:
         return None
     if attempt.state == AttemptState.OPENED:
-        action = f"dispatch coder; submit with `gateway-cli research implementation-submit {attempt.attempt_id} --root ROOT --file impl.json`"
+        action = (
+            f"dispatch coder; submit with `gateway-cli research implementation-submit "
+            f"{attempt.attempt_id} --root ROOT --file impl.json --run-plan run-plan.json "
+            "--provenance-evidence provenance.json`"
+        )
     elif attempt.state == AttemptState.IMPLEMENTED:
         action = (
             f"reserve a committed review bundle with `gateway-cli research review-reserve {attempt.attempt_id} --root ROOT --bundle-dir BUNDLE --owner-key OWNER`, "
