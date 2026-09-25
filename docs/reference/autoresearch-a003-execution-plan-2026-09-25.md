@@ -67,12 +67,12 @@ downloads, environment clones, MemPalace writes, or live trading.
 
 ## Current checkpoint
 
-Readiness confirmed the campaign remained paused at 14/14, with no A003 or
+Initial readiness confirmed the campaign remained paused at 14/14, with no A003 or
 new historical job. Gateway healthy; research owner stopped; ample temporary
 storage. The supported policy command has now recorded the user-authorized
 cap of 15, with no automatic further extension. The campaign remains paused
-while supported-launch contract checks finish; no A003 admission, restart,
-or research launch has occurred in this continuation yet.
+while supported-launch contract checks finished; at that checkpoint no A003
+admission, restart, or research launch had occurred.
 
 Annex A is implemented and independently reviewed READY by Sol. Root
 reproduced 72 focused tests and 596 research tests, all passing; Ruff check,
@@ -89,6 +89,23 @@ terminal reply `ACK_A003_READY`. Root independently verified the terminal RPC
 receipt and unchanged paused research state. The canonical campaign was then
 resumed once to sequence37 and `research-owner.service` started. Admission and
 all research actions belong to the canonical owner wake, not the preload.
+
+A003 was admitted at 19:43 UTC. Official native task
+`97587951-b532-49db-babe-e05cfa555a38` used `gpt-5.6-luna`/`xhigh`; its observed
+service tier was unspecified. It returned clean proof commit
+`3e0c6336c6f2ec5b98f11fb12b00616a21663d10` with an actual user-systemd-bus
+permission blocker, not contained PASS. Root independently reproduced25
+focused tests. The owner callback ended at20:08:10.706 UTC.
+
+Sol's pre-host review still found five defects: bypassed target
+validator/rewriter, ≥60 lot gate summed across cost lanes instead of baseline
+s000, missing SYNTHETIC_ONLY classification assertion, malformed execution
+commit/provenance-stage bindings, and unchanged oversized monolithic evidence
+output. No operator host run, implementation submission, or Opus review was
+performed. A bounded fresh-native correction on the same OPENED A003 was
+requested with `recovery-20260925-a003-prehost-fix-1` at20:16:50 UTC. Detailed
+private brief: `/home/dev/autoresearch-a003-20260925.FQ5OGj/A003-prehost-fix-1.md`.
+Cap remains15, with no additional admission authorized.
 
 ## Annex A: supported synthetic environment construction
 
