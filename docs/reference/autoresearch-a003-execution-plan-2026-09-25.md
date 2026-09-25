@@ -82,6 +82,14 @@ provider-usage response reports OpenAI available without a provider error,
 94% of the weekly allowance used (reset 2026-09-28 06:31:35 UTC). Continue with
 bounded delegation; do not silently substitute models if allowance runs out.
 
+Patch `21dd58d` is committed and pushed. The explicit ACK-only preload
+`recovery-20260925-a003-ack-preload` completed at 2026-09-25 19:39:08.762 UTC:
+actual/effective model `gpt-6-astra`, no rerouting, no successful tool calls,
+terminal reply `ACK_A003_READY`. Root independently verified the terminal RPC
+receipt and unchanged paused research state. The canonical campaign was then
+resumed once to sequence37 and `research-owner.service` started. Admission and
+all research actions belong to the canonical owner wake, not the preload.
+
 ## Annex A: supported synthetic environment construction
 
 Read-only Sol analysis established one shared prerequisite. The builder has no
