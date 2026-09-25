@@ -26,6 +26,7 @@ class ContainmentError(RuntimeError):
 _UNIT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 _DOTTED_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _SECRET_HINT = re.compile(r"(?i)(?:api[_-]?key|password|secret|token)")
+_SYNTHETIC_ENV_KEY = re.compile(r"^H[0-9]{4}_SYNTHETIC_MODE$")
 _STAGES: Final[frozenset[str]] = frozenset({"validate", "targets", "evaluate", "analysis"})
 _SCENARIO_STAGE = re.compile(r"^(?:validate-c\d{3}|targets-s\d{3}|evaluate-s\d{3})$")
 _MAX_TARGET_BYTES: Final[int] = 16 * 1024 * 1024
@@ -437,6 +438,24 @@ def _base_argv(pins: RuntimePins) -> list[str]:
     return argv
 
 
+def _synthetic_env_args(stage: str, synthetic_env: Mapping[str, str] | None) -> tuple[str, ...]:
+    if synthetic_env is None:
+        return ()
+    if stage != "analysis" and not stage.startswith("targets-") and stage != "targets":
+        raise ContainmentError(f"synthetic environment is not allowed for {stage}")
+    if not isinstance(synthetic_env, Mapping):
+        raise ContainmentError("synthetic environment must be a mapping")
+    entries = tuple(synthetic_env.items())
+    if len(entries) != 1:
+        raise ContainmentError("synthetic environment must contain exactly one entry")
+    key, value = entries[0]
+    if not isinstance(key, str) or _SYNTHETIC_ENV_KEY.fullmatch(key) is None:
+        raise ContainmentError("synthetic environment key is not allowed")
+    if not isinstance(value, str) or value != "1":
+        raise ContainmentError("synthetic environment value must be exactly '1'")
+    return ("--setenv", key, value)
+
+
 def bwrap_argv(
     pins: RuntimePins,
     stage: str,
@@ -456,6 +475,7 @@ def bwrap_argv(
     evaluation_specs: Mapping[str, Path] | None = None,
     analysis_inputs: Mapping[str, Path] | None = None,
     provenance_dir: Path | None = None,
+    synthetic_env: Mapping[str, str] | None = None,
 ) -> tuple[str, ...]:
     """Build the fixed bubblewrap command for one research stage."""
     _require_stage(stage)
@@ -559,6 +579,7 @@ def bwrap_argv(
                 stage,
             )
         )
+    argv.extend(_synthetic_env_args(stage, synthetic_env))
     argv.extend(command)
     return tuple(argv)
 
@@ -597,9 +618,16 @@ def stage_plan(
     stage: str,
     max_rss_mb: int,
     command: Sequence[str],
+    *,
+    synthetic_env: Mapping[str, str] | None = None,
     **mounts: Any,
 ) -> StagePlan:
-    return scope_argv(job_id, stage, max_rss_mb, bwrap_argv(pins, stage, command, **mounts))
+    return scope_argv(
+        job_id,
+        stage,
+        max_rss_mb,
+        bwrap_argv(pins, stage, command, synthetic_env=synthetic_env, **mounts),
+    )
 
 
 def host_bus_environment() -> dict[str, str]:

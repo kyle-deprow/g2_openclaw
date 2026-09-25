@@ -244,6 +244,7 @@ def test_worker_rewrites_target_output_for_generated_stage_bind(
     assert ("--bind", str(target_dir), "/stage") in triples
     assert "/stage/targets.json" in command
     assert "/stage/targets-stage/targets.json" not in command
+    assert "H0006_SYNTHETIC_MODE" not in command
 
 
 def test_real_target_fixture_executes_inside_containment_boundary(tmp_path: Path) -> None:

@@ -261,6 +261,206 @@ def test_bwrap_analysis_mount_is_scoped_to_declared_output_subdirectory(
     )
 
 
+def test_bwrap_synthetic_env_is_target_only_and_preserves_command_suffix(
+    tmp_path: Path,
+) -> None:
+    pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
+    worktree = tmp_path / "worktree"
+    targets_stage = tmp_path / "targets-stage"
+    provenance = targets_stage / "provenance"
+    worktree.mkdir()
+    targets_stage.mkdir()
+    provenance.mkdir()
+    panel = tmp_path / "panel"
+    receipt = tmp_path / "receipt"
+    panel.write_text("panel")
+    receipt.write_text("receipt")
+    command = (str(pins.shared_python), "-m", "strategy", "--out", "/stage/targets.json")
+    production = bwrap_argv(
+        pins,
+        "targets-s000",
+        command,
+        panel=panel,
+        receipt=receipt,
+        worktree=worktree,
+        targets_stage=targets_stage,
+        provenance_dir=provenance,
+    )
+    synthetic = {"H0006_SYNTHETIC_MODE": "1"}
+    candidate = bwrap_argv(
+        pins,
+        "targets-s000",
+        command,
+        synthetic_env=synthetic,
+        panel=panel,
+        receipt=receipt,
+        worktree=worktree,
+        targets_stage=targets_stage,
+        provenance_dir=provenance,
+    )
+
+    assert "H0006_SYNTHETIC_MODE" not in production
+    assert production[-len(command) :] == command
+    assert candidate[-len(command) :] == command
+    assert candidate[-len(command) - 3 : -len(command)] == (
+        "--setenv",
+        "H0006_SYNTHETIC_MODE",
+        "1",
+    )
+    scoped = stage_plan(
+        pins,
+        "job-test",
+        "targets-s000",
+        256,
+        command,
+        synthetic_env=synthetic,
+        panel=panel,
+        receipt=receipt,
+        worktree=worktree,
+        targets_stage=targets_stage,
+        provenance_dir=provenance,
+    )
+    assert scoped.argv[-len(command) :] == command
+    assert scoped.argv[-len(command) - 3 : -len(command)] == (
+        "--setenv",
+        "H0006_SYNTHETIC_MODE",
+        "1",
+    )
+    assert synthetic == {"H0006_SYNTHETIC_MODE": "1"}
+
+
+def test_bwrap_synthetic_env_is_supported_for_analysis(tmp_path: Path) -> None:
+    pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
+    worktree = tmp_path / "worktree"
+    scenarios = tmp_path / "scenarios"
+    analysis_stage = tmp_path / "analysis-stage"
+    provenance = analysis_stage / "provenance"
+    worktree.mkdir()
+    scenarios.mkdir()
+    analysis_stage.mkdir()
+    provenance.mkdir()
+    panel = tmp_path / "panel"
+    panel.write_text("panel")
+    command = (str(pins.shared_python), "-m", "analysis.module", "--flag")
+    production = bwrap_argv(
+        pins,
+        "analysis",
+        command,
+        worktree=worktree,
+        scenarios_dir=scenarios,
+        analysis_stage=analysis_stage,
+        analysis_inputs={"panel.parquet": panel},
+        provenance_dir=provenance,
+    )
+    candidate = bwrap_argv(
+        pins,
+        "analysis",
+        command,
+        synthetic_env={"H0006_SYNTHETIC_MODE": "1"},
+        worktree=worktree,
+        scenarios_dir=scenarios,
+        analysis_stage=analysis_stage,
+        analysis_inputs={"panel.parquet": panel},
+        provenance_dir=provenance,
+    )
+
+    assert "H0006_SYNTHETIC_MODE" not in production
+    assert production[-len(command) :] == command
+    assert candidate[-len(command) :] == command
+    assert candidate[-len(command) - 3 : -len(command)] == (
+        "--setenv",
+        "H0006_SYNTHETIC_MODE",
+        "1",
+    )
+
+
+@pytest.mark.parametrize(
+    "synthetic_env",
+    [
+        [],
+        {},
+        {"H0006_SYNTHETIC_MODE": "1", "H0007_SYNTHETIC_MODE": "1"},
+        {"bad": "1"},
+        {"PATH": "1"},
+        {"H0006_SYNTHETIC_MODE": "0"},
+        {"H0006_SYNTHETIC_MODE": 1},
+        {1: "1"},
+        object(),
+    ],
+)
+def test_bwrap_rejects_invalid_synthetic_env(tmp_path: Path, synthetic_env: object) -> None:
+    pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
+    worktree = tmp_path / "worktree"
+    targets_stage = tmp_path / "targets-stage"
+    provenance = targets_stage / "provenance"
+    worktree.mkdir()
+    targets_stage.mkdir()
+    provenance.mkdir()
+    panel = tmp_path / "panel"
+    receipt = tmp_path / "receipt"
+    panel.write_text("panel")
+    receipt.write_text("receipt")
+
+    with pytest.raises(ContainmentError):
+        bwrap_argv(
+            pins,
+            "targets-s000",
+            (str(pins.shared_python), "-m", "strategy"),
+            synthetic_env=synthetic_env,  # type: ignore[arg-type]
+            panel=panel,
+            receipt=receipt,
+            worktree=worktree,
+            targets_stage=targets_stage,
+            provenance_dir=provenance,
+        )
+
+
+@pytest.mark.parametrize("stage", ["validate", "validate-c000", "evaluate", "evaluate-s000"])
+def test_bwrap_rejects_synthetic_env_for_validation_and_evaluation(
+    tmp_path: Path, stage: str
+) -> None:
+    pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
+    panel = tmp_path / "panel"
+    receipt = tmp_path / "receipt"
+    spec = tmp_path / "spec"
+    dividends = tmp_path / "dividends"
+    evaluator_stage = tmp_path / "evaluator-stage"
+    provenance = tmp_path / "provenance"
+    targets_file = tmp_path / "targets.json"
+    for path in (panel, receipt, spec, dividends, targets_file):
+        path.write_text("{}")
+    evaluator_stage.mkdir()
+    provenance.mkdir()
+
+    if stage.startswith("evaluate"):
+        with pytest.raises(ContainmentError):
+            bwrap_argv(
+                pins,
+                stage,
+                (str(pins.shared_python),),
+                synthetic_env={"H0006_SYNTHETIC_MODE": "1"},
+                panel=panel,
+                receipt=receipt,
+                spec=spec,
+                dividends=dividends,
+                evaluator_stage=evaluator_stage,
+                targets_file=targets_file,
+                provenance_dir=provenance,
+            )
+    else:
+        with pytest.raises(ContainmentError):
+            bwrap_argv(
+                pins,
+                stage,
+                (str(pins.shared_python),),
+                synthetic_env={"H0006_SYNTHETIC_MODE": "1"},
+                panel=panel,
+                receipt=receipt,
+                spec=spec,
+                dividends=dividends,
+            )
+
+
 def test_provenance_directory_is_required_and_scoped_to_stage(tmp_path: Path) -> None:
     pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
     panel = tmp_path / "panel"
