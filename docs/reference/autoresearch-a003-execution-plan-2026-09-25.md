@@ -1,5 +1,11 @@
 # H0006-A003 execution plan
 
+October 2 update: the user replaced the active Opus reviewer with OpenAI Sol.
+The superseding implementation plan is
+`autoresearch-openai-review-plan-2026-10-02.md`. References to the earlier
+Opus route below describe the September plan and checkpoint, not authority
+to launch Anthropic now. Frozen science and historical evidence are unchanged.
+
 ## Authority and boundaries
 
 The user replied `continue` on 2026-09-25 to the explicit request to raise the
