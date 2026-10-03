@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 from gateway.cli import app
 from gateway.research import cli as research_cli
-from gateway.research import review_evidence
+from gateway.research import host_records, review_evidence
 from gateway.research.host_records import (
     HostRecordError,
     HostRecordPending,
@@ -159,6 +159,20 @@ def test_native_child_has_no_openclaw_session_or_event_rows(tmp_path: Path) -> N
             (f'%{stores.child_thread_id}"%',),
         ).fetchone() == (0,)
     assert _read(stores).child_thread_id == stores.child_thread_id
+
+
+def test_child_rollout_limit_is_raised_and_still_rejects_over_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert host_records.MAX_CHILD_ROLLOUT_BYTES == 256 * 1024 * 1024
+    assert host_records.MAX_PARENT_ROLLOUT_BYTES == 512 * 1024 * 1024
+    stores = _stores(tmp_path)
+    size = stores.child_rollout.stat().st_size
+    monkeypatch.setattr(host_records, "MAX_CHILD_ROLLOUT_BYTES", size)
+    assert _read(stores).child_thread_id == stores.child_thread_id
+    monkeypatch.setattr(host_records, "MAX_CHILD_ROLLOUT_BYTES", size - 1)
+    with pytest.raises(HostRecordError, match="exceeds the bounded size limit"):
+        _read(stores)
 
 
 def test_implementer_and_later_unrelated_spawns_do_not_block_correlation(

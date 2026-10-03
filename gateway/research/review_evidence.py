@@ -50,7 +50,7 @@ from .host_records import (
 from .store import ResearchStore, StoreConflict, canonical_wake_key, now_utc
 
 MAX_BUNDLE_FILE_BYTES = 8 * 1024 * 1024
-MAX_BUNDLE_BYTES = 128 * 1024 * 1024
+MAX_BUNDLE_BYTES = 256 * 1024 * 1024
 MAX_TEST_EVIDENCE_BYTES = 8 * 1024 * 1024
 REVIEW_MODEL = "gpt-5.6-sol"
 REVIEW_EFFORT = "xhigh"

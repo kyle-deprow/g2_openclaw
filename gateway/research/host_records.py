@@ -37,9 +37,10 @@ from urllib.parse import quote
 MAX_METADATA_BYTES = 8 * 1024 * 1024
 MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 # The owner rollout grows by 0.9-3 MB per turn and 16 rollouts on the installed
-# host already exceed 8 MiB; a native implementer child was 3.3 MB.
+# host already exceed 8 MiB; native child rollouts reach 24 MB and a reviewer
+# of a large bundle may be larger.
 MAX_PARENT_ROLLOUT_BYTES = 512 * 1024 * 1024
-MAX_CHILD_ROLLOUT_BYTES = 64 * 1024 * 1024
+MAX_CHILD_ROLLOUT_BYTES = 256 * 1024 * 1024
 _ROLLOUT_CHUNK_BYTES = 1024 * 1024
 _NATIVE_TASK_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _TERMINAL_MARKERS = frozenset({"task_complete", "task_failed", "turn_aborted"})

@@ -83,7 +83,7 @@ def _reserve_native(
 
 
 def test_bundle_limits_are_unchanged() -> None:
-    assert review_evidence.MAX_BUNDLE_BYTES == 128 * 1024 * 1024
+    assert review_evidence.MAX_BUNDLE_BYTES == 256 * 1024 * 1024
     assert review_evidence.MAX_BUNDLE_FILE_BYTES == 8 * 1024 * 1024
     assert review_evidence.MAX_TEST_EVIDENCE_BYTES == 8 * 1024 * 1024
 
