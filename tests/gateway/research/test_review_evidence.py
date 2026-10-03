@@ -131,8 +131,8 @@ def _reserve_native(
     return reservation
 
 
-def test_bundle_limits_are_unchanged() -> None:
-    assert review_evidence.MAX_BUNDLE_BYTES == 256 * 1024 * 1024
+def test_bundle_limits() -> None:
+    assert review_evidence.MAX_BUNDLE_BYTES == 512 * 1024 * 1024
     assert review_evidence.MAX_BUNDLE_FILE_BYTES == 8 * 1024 * 1024
     assert review_evidence.MAX_TEST_EVIDENCE_BYTES == 8 * 1024 * 1024
 
@@ -148,6 +148,73 @@ def test_bundle_digest_rejects_aggregate_overflow(
     (bundle / "instructions.md").write_bytes(b"iii")
     with pytest.raises(BundleError, match="review bundle exceeds its size limit"):
         review_evidence._bundle_digest(bundle)
+
+
+def test_bundle_aggregate_limit_accepts_the_boundary_and_rejects_one_more_byte(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 4)
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", 16)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    # diff.patch alone exceeds the per-file limit; only the aggregate bounds it.
+    (bundle / "diff.patch").write_bytes(b"d" * 9)
+    (bundle / "instructions.md").write_bytes(b"i" * 4)
+    (bundle / "source").mkdir()
+    (bundle / "source" / "COMMIT").write_bytes(b"c" * 3)
+    assert len(review_evidence._bundle_digest(bundle)) == 64
+    (bundle / "spec.json").write_bytes(b"s")
+    with pytest.raises(BundleError, match="review bundle exceeds its size limit"):
+        review_evidence._bundle_digest(bundle)
+
+
+def test_build_refuses_an_over_aggregate_bundle_without_creating_the_target(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _source, _hypothesis, attempt_id, _bundle = _setup(campaign, tmp_path)
+    measured = tmp_path / "bundle-a"
+    review_evidence.build_review_bundle(store, attempt_id, measured)
+    total = sum(path.stat().st_size for path in measured.rglob("*") if path.is_file())
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", total - 1)
+    refused = tmp_path / "bundle-b"
+    with pytest.raises(BundleError, match="review bundle exceeds its size limit"):
+        review_evidence.build_review_bundle(store, attempt_id, refused)
+    assert not refused.exists()
+    assert sorted(path.name for path in tmp_path.glob(".bundle-b.*")) == []
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", total)
+    accepted = tmp_path / "bundle-c"
+    review_evidence.build_review_bundle(store, attempt_id, accepted)
+    assert accepted.is_dir()
+    assert sorted(path.name for path in tmp_path.glob(".bundle-c.*")) == []
+
+
+def test_build_refuses_an_oversized_evaluation_spec_without_creating_the_target(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _source, hypothesis, attempt_id, _bundle = _setup(campaign, tmp_path)
+    measured = tmp_path / "bundle-a"
+    review_evidence.build_review_bundle(store, attempt_id, measured)
+    others = max(
+        path.stat().st_size
+        for path in measured.rglob("*")
+        if path.is_file()
+        and path.name != "diff.patch"
+        and "evaluation-specs" not in path.relative_to(measured).parts
+    )
+    entry = store.evaluation_spec_set(hypothesis.hypothesis_id).specs[0]
+    spec_path = Path(entry.path)
+    spec_path.chmod(0o644)
+    spec_path.write_bytes(b"x" * (others + 1))
+    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", others)
+    refused = tmp_path / "bundle-b"
+    with pytest.raises(BundleError, match="bounded regular file"):
+        review_evidence.build_review_bundle(store, attempt_id, refused)
+    assert not refused.exists()
+    assert sorted(path.name for path in tmp_path.glob(".bundle-b.*")) == []
 
 
 def test_bundle_digest_enforces_per_file_limit_and_rejects_symlinks(

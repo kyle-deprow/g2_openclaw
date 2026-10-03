@@ -53,7 +53,7 @@ from .host_records import (
 from .store import ResearchStore, StoreConflict, canonical_wake_key, now_utc
 
 MAX_BUNDLE_FILE_BYTES = 8 * 1024 * 1024
-MAX_BUNDLE_BYTES = 256 * 1024 * 1024
+MAX_BUNDLE_BYTES = 512 * 1024 * 1024
 MAX_TEST_EVIDENCE_BYTES = 8 * 1024 * 1024
 REVIEW_MODEL = "gpt-5.6-sol"
 REVIEW_EFFORT = "xhigh"
@@ -560,6 +560,7 @@ def build_review_bundle(
             destination = temporary / "source" / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes(content)
+        _bundle_digest(temporary)
         _readonly_tree(temporary)
         os.replace(temporary, bundle_dir)
         temporary = Path()
