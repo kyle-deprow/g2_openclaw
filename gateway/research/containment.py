@@ -298,13 +298,14 @@ def rewrite_targets_argv(
         if not path.is_absolute():
             rewritten.append(token)
             continue
-        relative = _inside(path, worktree)
-        if relative is not None:
-            rewritten.append(str(Path("/work") / relative))
-            continue
+        # run_dir may be nested inside worktree; its writable /stage mapping must win.
         relative = _inside(path, run_dir)
         if relative is not None:
             rewritten.append(str(Path("/stage") / relative))
+            continue
+        relative = _inside(path, worktree)
+        if relative is not None:
+            rewritten.append(str(Path("/work") / relative))
             continue
         if panel is not None and path.absolute() == panel.absolute():
             rewritten.append("/inputs/panel.parquet")

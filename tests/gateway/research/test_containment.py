@@ -525,6 +525,75 @@ def test_target_rewrite_maps_only_known_roots_and_rejects_escape(tmp_path: Path)
         )
 
 
+def test_target_rewrite_maps_nested_run_dir_to_stage_and_keeps_worktree_paths(
+    tmp_path: Path,
+) -> None:
+    pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
+    worktree = tmp_path / "worktree"
+    run_dir = worktree / "data" / "evidence" / "targets-stage"
+    run_dir.mkdir(parents=True)
+    target = worktree / "target.py"
+    target.write_text("pass\n")
+    sibling = worktree / "data" / "evidence" / "other.json"
+    argv = rewrite_targets_argv(
+        (
+            str(pins.shared_python),
+            str(target),
+            "--out",
+            str(run_dir / "targets.json"),
+            str(run_dir),
+            str(sibling),
+        ),
+        shared_python=pins.shared_python,
+        worktree=worktree,
+        run_dir=run_dir,
+    )
+    assert argv == (
+        str(pins.shared_python),
+        "/work/target.py",
+        "--out",
+        "/stage/targets.json",
+        "/stage",
+        "/work/data/evidence/other.json",
+    )
+
+
+def test_target_rewrite_non_nested_layout_is_unchanged(tmp_path: Path) -> None:
+    pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
+    worktree = tmp_path / "worktree"
+    run_dir = tmp_path / "run"
+    worktree.mkdir()
+    (run_dir / "sub").mkdir(parents=True)
+    target = worktree / "pkg" / "target.py"
+    panel = tmp_path / "panel"
+    receipt = worktree / "receipt.json"
+    argv = rewrite_targets_argv(
+        (
+            str(pins.shared_python),
+            str(target),
+            "relative.json",
+            "--out",
+            str(run_dir / "sub" / "targets.json"),
+            str(panel),
+            str(receipt),
+        ),
+        shared_python=pins.shared_python,
+        worktree=worktree,
+        run_dir=run_dir,
+        panel=panel,
+        receipt=receipt,
+    )
+    assert argv == (
+        str(pins.shared_python),
+        "/work/pkg/target.py",
+        "relative.json",
+        "--out",
+        "/stage/sub/targets.json",
+        "/inputs/panel.parquet",
+        "/work/receipt.json",
+    )
+
+
 def test_target_inputs_are_rewritten_to_readonly_input_mounts(tmp_path: Path) -> None:
     pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
     worktree = tmp_path / "worktree"
