@@ -6,27 +6,32 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from click.testing import Result
 from gateway.cli import app
 from gateway.openclaw_client import OpenClawTransportError
 from gateway.research import cli as research_cli
 from gateway.research.contracts import (
+    AnalysisPlan,
     Attempt,
     AttemptState,
+    EvaluationSpecEntry,
+    EvaluationSpecSet,
+    HypothesisDecision,
     ImplementationRecord,
     JobState,
     RunPlan,
     RunScenario,
 )
-from gateway.research.jobs import JobRecord, _starttime
+from gateway.research.jobs import JobError, JobRecord, _starttime
 from gateway.research.provenance import ProvenanceError
 from gateway.research.store import ResearchStore
 from gateway.research.wake import compose_wake
-from typer.testing import CliRunner
+from typer.testing import CliRunner, Result
 
 from tests.gateway.research.conftest import provenance_evidence, review, run_plan, verified_review
 from tests.gateway.research.test_admission import _admit, _document, _payload
@@ -381,6 +386,205 @@ def test_cli_run_bounded_wait_is_queue_observation(
     result = _call(store.root, "run", attempt.attempt_id, "--wait-seconds", "0")
     assert "accepted" in result.output and "queued" in result.output
     assert store.get_attempt(attempt.attempt_id).state == AttemptState.RUN_QUEUED
+
+
+def _record_queue(monkeypatch: pytest.MonkeyPatch) -> list[tuple[float, int]]:
+    """Capture the limits `research run` queues, without starting anything."""
+    queued: list[tuple[float, int]] = []
+    real = ResearchStore.queue_run_request
+
+    def spy(
+        self: ResearchStore,
+        attempt_id: str,
+        job_id: str,
+        run_dir: Path,
+        timeout_seconds: int | float,
+        max_rss_mb: int,
+        run_plan: RunPlan | None = None,
+    ) -> Attempt:
+        queued.append((float(timeout_seconds), max_rss_mb))
+        return real(self, attempt_id, job_id, run_dir, timeout_seconds, max_rss_mb, run_plan)
+
+    monkeypatch.setattr(ResearchStore, "queue_run_request", spy)
+    return queued
+
+
+def test_cli_run_derives_timeout_from_run_plan_and_hypothesis_compute(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    first = RunScenario(
+        "s000",
+        (sys.executable, "-m", "fixture_target"),
+        "c000",
+        hashlib.sha256(b"eval").hexdigest(),
+    )
+    second = replace(first, scenario_id="s001")
+    attempt = _ready(store, source, hypothesis, scenarios=(first, second))
+    plan = RunPlan.from_json(store.evidence(attempt.attempt_id, "run_plan"))
+    queued = _record_queue(monkeypatch)
+    _call(store.root, "run", attempt.attempt_id, "--wait-seconds", "0")
+    # 1 s * (2 targets + 2 evaluate + 1 validate stage) + 1 s analysis + 300 s overhead.
+    assert plan.scenario_timeout_seconds * 5 + plan.analysis_timeout_seconds + 300 == 306
+    # The fixture hypothesis document freezes compute.max_rss_mb = 1024.
+    assert queued == [(306.0, 1024)]
+
+
+def test_cli_run_derived_timeout_ignores_unreferenced_specs_in_the_spec_set(
+    campaign: tuple[ResearchStore, Path, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store, source, hypothesis = campaign
+    store.freeze(hypothesis.hypothesis_id)
+    store.decide_hypothesis(hypothesis.hypothesis_id, HypothesisDecision.ABANDONED, "superseded")
+    # Create a hypothesis whose spec set holds an extra spec that no scenario references.
+    extra = tmp_path / "eval-spec-unreferenced.json"
+    extra.write_text("unreferenced", encoding="utf-8")
+    extra.chmod(0o444)
+    eval_spec = Path(hypothesis.evaluation_spec_path)
+    spec_set_path = tmp_path / "two-spec-set.json"
+    spec_set_path.write_text(
+        EvaluationSpecSet(
+            "research-evaluation-spec-set-v1",
+            "H0002",
+            "c000",
+            (
+                EvaluationSpecEntry(
+                    "c000", str(eval_spec), hashlib.sha256(eval_spec.read_bytes()).hexdigest()
+                ),
+                EvaluationSpecEntry(
+                    "c001", str(extra), hashlib.sha256(extra.read_bytes()).hexdigest()
+                ),
+            ),
+            "2026-01-01T00:00:00Z",
+        ).to_json(),
+        encoding="utf-8",
+    )
+    spec_file = tmp_path / "second-spec.json"
+    spec_file.write_text(json.dumps(_payload()), encoding="utf-8")
+    hypothesis = store.create_hypothesis(
+        "two specs",
+        spec_file,
+        Path(hypothesis.panel_path),
+        Path(hypothesis.receipt_path),
+        eval_spec,
+        hypothesis.base_commit,
+        dividends=Path(hypothesis.dividends_path),
+        evaluation_spec_set=spec_set_path,
+    )
+    attempt = _ready(store, source, hypothesis)
+    plan = RunPlan.from_json(store.evidence(attempt.attempt_id, "run_plan"))
+    assert plan.spec_ids == ("c000",)
+    assert len(store.evaluation_spec_set(hypothesis.hypothesis_id).specs) == 2
+    # Three stages for the one scenario plus analysis; the unreferenced spec adds nothing.
+    assert plan.stage_budget_seconds == 4
+    assert research_cli._resolve_run_timeout(plan, None) == 304
+    queued = _record_queue(monkeypatch)
+    # The store check counts only referenced specs: the exact budget is accepted, with the
+    # default memory taken from the frozen hypothesis compute.
+    _call(
+        store.root,
+        "run",
+        attempt.attempt_id,
+        "--timeout-seconds",
+        str(plan.stage_budget_seconds),
+        "--wait-seconds",
+        "0",
+    )
+    assert queued == [(4.0, 1024)]
+    assert store.get_attempt(attempt.attempt_id).state == AttemptState.RUN_QUEUED
+
+
+def test_cli_run_explicit_flags_override_derived_limits(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt = _ready(store, source, hypothesis)
+    queued = _record_queue(monkeypatch)
+    _call(
+        store.root,
+        "run",
+        attempt.attempt_id,
+        "--timeout-seconds",
+        "1234",
+        "--max-rss-mb",
+        "777",
+        "--wait-seconds",
+        "0",
+    )
+    assert queued == [(1234.0, 777)]
+
+
+def test_cli_run_refuses_when_derived_timeout_exceeds_the_limit(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt = _ready(store, source, hypothesis)
+    real_from_json = RunPlan.from_json
+    monkeypatch.setattr(
+        RunPlan,
+        "from_json",
+        classmethod(
+            lambda cls, value: replace(
+                real_from_json(value), scenario_timeout_seconds=9000, analysis_timeout_seconds=1700
+            )
+        ),
+    )
+    queued = _record_queue(monkeypatch)
+    result = runner.invoke(
+        app,
+        ["research", "run", attempt.attempt_id, "--root", str(store.root), "--wait-seconds", "0"],
+    )
+    assert result.exit_code == 1
+    assert "derived run timeout 29000s" in result.output
+    assert "exceeds the 28800s limit" in result.output
+    assert queued == []
+    assert store.get_attempt(attempt.attempt_id).state == AttemptState.REVIEW_PASSED
+
+
+def test_run_timeout_derivation_is_exact_and_boundary_checked(tmp_path: Path) -> None:
+    digest = hashlib.sha256(b"eval").hexdigest()
+    base = RunPlan(
+        "research-run-plan-v1",
+        "H0001-A001",
+        "a" * 40,
+        "b" * 64,
+        "c" * 64,
+        "s000",
+        (RunScenario("s000", ("/usr/bin/python3", "-m", "targets"), "c000", digest),),
+        AnalysisPlan("analysis.module", (), ("analysis/result.json",), 1024),
+        10,
+        10,
+    )
+    at_limit = replace(base, scenario_timeout_seconds=9000, analysis_timeout_seconds=1500)
+    # 9000 * (targets + evaluate + validate) + 1500 + 300 overhead is exactly 28800 s.
+    assert research_cli._resolve_run_timeout(at_limit, None) == 28800
+    over = replace(at_limit, analysis_timeout_seconds=1500.5)
+    with pytest.raises(JobError, match="exceeds the 28800s limit"):
+        research_cli._resolve_run_timeout(over, None)
+    assert research_cli._resolve_run_timeout(over, 99.0) == 99.0
+
+
+class _FakeHypothesisStore:
+    def __init__(self, spec_json: str) -> None:
+        self._spec_json = spec_json
+
+    def get_hypothesis(self, _hypothesis_id: str) -> Any:
+        return SimpleNamespace(spec_json=self._spec_json)
+
+
+def test_run_max_rss_uses_frozen_hypothesis_compute(tmp_path: Path) -> None:
+    payload = _payload()
+    payload["compute"] = {"max_wall_seconds": 120.0, "max_rss_mb": 4096}
+    store = _FakeHypothesisStore(json.dumps(payload))
+    assert research_cli._resolve_run_max_rss(store, "H0001", None) == 4096  # type: ignore[arg-type]
+    assert research_cli._resolve_run_max_rss(store, "H0001", 2048) == 2048  # type: ignore[arg-type]
+    unusable = _FakeHypothesisStore('{"title":"fixture"}')
+    with pytest.raises(JobError, match="pass --max-rss-mb explicitly"):
+        research_cli._resolve_run_max_rss(unusable, "H0001", None)  # type: ignore[arg-type]
+    # An explicit flag does not need a readable hypothesis document.
+    assert research_cli._resolve_run_max_rss(unusable, "H0001", 512) == 512  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("value", ["nan", "inf", "-1"])

@@ -30,7 +30,7 @@ from gateway.research.contracts import (
     RunScenario,
 )
 from gateway.research.jobs import JobError, JobRecord, TargetValidationError
-from gateway.research.store import ResearchStore, StoreConflict
+from gateway.research.store import ResearchStore, StoreConflict, validate_queue_limits
 from typer.testing import CliRunner
 
 from tests.gateway.research.conftest import provenance_evidence, review, verified_review
@@ -146,7 +146,17 @@ def test_queue_limits_reject_nonfinite_negative_and_ceiling(
                 attempt.attempt_id, f"job-invalid-{index}", run_dir, timeout, 256
             )
     with pytest.raises(ValueError):
-        store.queue_run_request(attempt.attempt_id, "job-invalid-rss", run_dir, 30, 8193)
+        store.queue_run_request(attempt.attempt_id, "job-invalid-rss", run_dir, 30, 16385)
+    with pytest.raises(ValueError):
+        store.queue_run_request(attempt.attempt_id, "job-invalid-wall", run_dir, 28800.5, 256)
+
+
+def test_queue_limits_accept_the_maximum_and_reject_just_above() -> None:
+    validate_queue_limits(28800, 16384)
+    validate_queue_limits(28800.0, 1)
+    for timeout, rss in ((28800.5, 256), (28801, 256), (30, 16385), (0, 256), (30, 0)):
+        with pytest.raises(ValueError):
+            validate_queue_limits(timeout, rss)
 
 
 def test_queue_rejects_run_plan_stage_timeout_above_job_timeout(
@@ -635,8 +645,8 @@ def test_three_attempt_retry_and_second_hypothesis_queue_lifecycle(
                 ),
             ),
             AnalysisPlan("fixture.analysis", (), ("analysis/result.json",), 1024),
-            10,
-            10,
+            1,
+            1,
         )
 
     attempt = _ready(store, source, second, run_plan_factory=second_run_plan)

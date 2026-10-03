@@ -30,7 +30,7 @@ from .containment import (
     validate_targets_argv,
     verify_runtime_pins,
 )
-from .contracts import RunPlan
+from .contracts import MAX_RUN_TIMEOUT_SECONDS, MAX_STAGE_RSS_MB, RunPlan
 from .jobs import lifecycle_lock
 from .provenance import ProvenanceError, verify_stage_provenance
 
@@ -420,10 +420,10 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             isinstance(timeout_value, bool)
             or not isinstance(timeout_value, (int, float))
             or not math.isfinite(float(timeout_value))
-            or not 0 < float(timeout_value) <= 7200
+            or not 0 < float(timeout_value) <= MAX_RUN_TIMEOUT_SECONDS
             or isinstance(max_rss_value, bool)
             or not isinstance(max_rss_value, int)
-            or not 0 < max_rss_value <= 8192
+            or not 0 < max_rss_value <= MAX_STAGE_RSS_MB
         ):
             raise ContainmentError("invalid resource limits")
         deadline = time.monotonic() + float(timeout_value)
@@ -439,7 +439,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             if key.startswith("evaluation:")
         }
         referenced_specs = {scenario.spec_id for scenario in plan.scenarios}
-        if set(spec_paths) != set(spec_digests) or not referenced_specs.issubset(spec_paths):
+        if set(spec_paths) != set(spec_digests) or referenced_specs != set(spec_paths):
             status = "run_plan_mismatch"
             raise ContainmentError("run plan scenario spec bindings are incomplete")
         if any(
@@ -448,9 +448,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
         ):
             status = "run_plan_mismatch"
             raise ContainmentError("run plan scenario spec digest mismatch")
-        if plan.scenario_timeout_seconds * (
-            len(plan.scenarios) + len(spec_paths)
-        ) + plan.analysis_timeout_seconds > float(timeout_value):
+        if plan.stage_budget_seconds > float(timeout_value):
             status = "run_plan_mismatch"
             raise ContainmentError("run plan stage timeouts exceed the job timeout")
         semantic_by_spec: dict[str, str] = {}

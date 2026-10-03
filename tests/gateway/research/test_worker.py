@@ -120,7 +120,7 @@ def _job(tmp_path: Path, *, sleep: float = 0.0) -> tuple[dict[str, object], Path
         "universe_sha256": pins.universe_sha256,
         "artifact_paths": {key: str(path) for key, path in paths.items()},
         "artifact_digests": digests,
-        "timeout_seconds": 0.2 if sleep else 5,
+        "timeout_seconds": 0.2 if sleep else 20,
         "max_rss_mb": 256,
         "targets_argv": list(targets_argv),
         "run_plan": json.loads(plan.to_json()),
@@ -417,9 +417,11 @@ def test_worker_executes_two_distinct_cost_scenarios_and_records_each(
     job["evaluation_spec_paths"] = {"c000": str(eval_spec), "c001": str(second_spec)}
     job["evaluation_spec_digests"] = {"c000": first_digest, "c001": second_digest}
     deadlines: list[float] = []
+    stages: list[str] = []
 
     def fake_stage(plan: StagePlan, _cwd: Path, out: Path, deadline: float) -> tuple[int, bool]:
         deadlines.append(deadline)
+        stages.append(plan.stage)
         assert deadline <= time.monotonic() + 1.1
         if plan.stage.startswith("validate"):
             spec_id = "c001" if plan.stage.endswith("c001") else "c000"
@@ -473,6 +475,21 @@ def test_worker_executes_two_distinct_cost_scenarios_and_records_each(
     assert isinstance(scenarios, dict)
     assert set(scenarios) == {"s000", "s001"}
     assert len(deadlines) == 7
+    assert stages == [
+        "validate-c000",
+        "validate-c001",
+        "targets-s000",
+        "evaluate-s000",
+        "targets-s001",
+        "evaluate-s001",
+        "analysis",
+    ]
+    # Every stage but analysis is capped at the scenario timeout, so the shared budget must
+    # equal the caps of exactly the stages the worker ran.
+    scenario_stages = [name for name in stages if name != "analysis"]
+    assert plan.stage_budget_seconds == (
+        len(scenario_stages) * plan.scenario_timeout_seconds + plan.analysis_timeout_seconds
+    )
 
 
 def test_worker_analysis_mount_uses_primary_scenario_spec_when_not_first(
@@ -909,6 +926,40 @@ def test_worker_rejects_stage_timeout_aggregate_above_job_timeout(
     assert json.loads((Path(str(job["run_dir"])) / "terminal.json").read_text())["status"] == (
         "run_plan_mismatch"
     )
+
+
+@pytest.mark.parametrize(
+    ("timeout", "max_rss_mb"), [(28801, 256), (5, 16385), (0, 256), (5, 0), (5, True)]
+)
+def test_worker_rejects_resource_limits_outside_the_shared_bounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, timeout: float, max_rss_mb: int
+) -> None:
+    job, _evaluator, _eval_spec, _digest = _job(tmp_path)
+    job["timeout_seconds"] = timeout
+    job["max_rss_mb"] = max_rss_mb
+    monkeypatch.setattr(worker, "_stage", lambda *_args: pytest.fail("limits must refuse"))
+
+    outcome = run(job)
+
+    assert outcome["status"] != "succeeded"
+    evidence = json.loads((Path(str(job["run_dir"])) / "run-evidence.json").read_text())
+    assert "invalid resource limits" in json.dumps(evidence)
+
+
+def test_run_limit_constants_agree_across_modules() -> None:
+    from gateway.research import contracts, hypothesis, jobs, store
+
+    assert contracts.MAX_RUN_TIMEOUT_SECONDS == 28800
+    assert contracts.MAX_STAGE_RSS_MB == 16384
+    assert contracts._MAX_RUN_SECONDS == 28800.0
+    assert jobs.MAX_JOB_TIMEOUT_SECONDS == contracts.MAX_RUN_TIMEOUT_SECONDS
+    assert jobs.MAX_JOB_RSS_MB == contracts.MAX_STAGE_RSS_MB
+    assert float(contracts.MAX_RUN_TIMEOUT_SECONDS) == store.MAX_QUEUE_TIMEOUT_SECONDS
+    assert store.MAX_QUEUE_RSS_MB == contracts.MAX_STAGE_RSS_MB
+    assert vars(hypothesis)["MAX_RUN_TIMEOUT_SECONDS"] == contracts.MAX_RUN_TIMEOUT_SECONDS
+    assert vars(hypothesis)["MAX_STAGE_RSS_MB"] == contracts.MAX_STAGE_RSS_MB
+    assert vars(worker)["MAX_RUN_TIMEOUT_SECONDS"] == contracts.MAX_RUN_TIMEOUT_SECONDS
+    assert vars(worker)["MAX_STAGE_RSS_MB"] == contracts.MAX_STAGE_RSS_MB
 
 
 def test_evaluator_output_is_absent_until_evaluator_launch(

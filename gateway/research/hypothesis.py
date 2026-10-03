@@ -21,6 +21,7 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Self, cast
 
 from .codec import require_keys_exact, require_str, to_json
+from .contracts import MAX_RUN_TIMEOUT_SECONDS, MAX_STAGE_RSS_MB
 
 _CONTRACT = "research-hypothesis-v1"
 _SOURCES = {"panel", "derived", "reddit"}
@@ -135,7 +136,7 @@ class ComputeLimits:
             "max_wall_seconds",
             _validate_wall_seconds(self.max_wall_seconds),
         )
-        _integer(self.max_rss_mb, "compute.max_rss_mb", minimum=1, maximum=8_192)
+        _integer(self.max_rss_mb, "compute.max_rss_mb", minimum=1, maximum=MAX_STAGE_RSS_MB)
 
     @classmethod
     def from_mapping(cls, value: object) -> Self:
@@ -255,7 +256,7 @@ def _validate_wall_seconds(value: object) -> float:
         result = float(value)
     except (OverflowError, ValueError) as exc:
         raise ValueError("compute.max_wall_seconds must be finite") from exc
-    if not math.isfinite(result) or result <= 0 or result > 7_200:
+    if not math.isfinite(result) or result <= 0 or result > MAX_RUN_TIMEOUT_SECONDS:
         raise ValueError("compute.max_wall_seconds is outside the supported bounds")
     return result
 

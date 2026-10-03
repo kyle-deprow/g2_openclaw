@@ -49,7 +49,9 @@ def campaign(
     dividends.write_text('{"contract":"trusted-dividends-v2"}', encoding="utf-8")
     universe = tmp_path / "universe.json"
     universe.write_text('{"contract":"trusted-universe-v2"}', encoding="utf-8")
-    spec.write_text(json.dumps({"title": "fixture"}), encoding="utf-8")
+    from tests.gateway.research.test_admission import _payload
+
+    spec.write_text(json.dumps(_payload()), encoding="utf-8")
     panel.write_text("panel", encoding="utf-8")
     receipt.write_text("receipt", encoding="utf-8")
     eval_spec.write_text("eval", encoding="utf-8")
@@ -179,8 +181,8 @@ def run_plan(
         scenarios[0].scenario_id,
         scenarios,
         AnalysisPlan("fixture.analysis", (), ("analysis/result.json",), 1024),
-        10,
-        10,
+        1,
+        1,
     )
 
 

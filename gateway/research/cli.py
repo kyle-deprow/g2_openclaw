@@ -41,6 +41,8 @@ from .admission import (
 )
 from .containment import RuntimePins, runtime_pins_from_record
 from .contracts import (
+    MAX_RUN_TIMEOUT_SECONDS,
+    MAX_STAGE_RSS_MB,
     Attempt,
     AttemptDecision,
     AttemptState,
@@ -1598,12 +1600,47 @@ def _reconcile_jobs(store: ResearchStore) -> None:
                 _mark_job_state(store, attempt.attempt_id, state)
 
 
+_RUN_OVERHEAD_SECONDS = 300.0
+
+
+def _resolve_run_timeout(plan: RunPlan, requested: float | None) -> float:
+    """Explicit flag wins; otherwise the plan stage budget plus fixed driver overhead."""
+    if requested is not None:
+        return requested
+    derived = plan.stage_budget_seconds + _RUN_OVERHEAD_SECONDS
+    if derived > MAX_RUN_TIMEOUT_SECONDS:
+        raise JobError(
+            f"derived run timeout {derived:g}s (stage budget {plan.stage_budget_seconds:g}s "
+            f"plus {_RUN_OVERHEAD_SECONDS:g}s overhead) exceeds the "
+            f"{MAX_RUN_TIMEOUT_SECONDS}s limit"
+        )
+    return derived
+
+
+def _resolve_run_max_rss(store: ResearchStore, hypothesis_id: str, requested: int | None) -> int:
+    """Explicit flag wins; otherwise the frozen hypothesis ``compute.max_rss_mb``.
+
+    The compute block is a required, validated field of every hypothesis document, so an
+    unreadable frozen spec is refused rather than silently given a default.
+    """
+    if requested is not None:
+        return requested
+    try:
+        document = HypothesisDocument.from_json(store.get_hypothesis(hypothesis_id).spec_json)
+    except ValueError as exc:
+        raise JobError(
+            f"frozen hypothesis {hypothesis_id} spec cannot supply compute.max_rss_mb "
+            f"({exc}); pass --max-rss-mb explicitly"
+        ) from exc
+    return min(document.compute.max_rss_mb, MAX_STAGE_RSS_MB)
+
+
 @app.command("run")
 def run_command(
     attempt_id: str,
     root: Path = typer.Option(..., "--root"),
-    timeout_seconds: float = typer.Option(7200, "--timeout-seconds"),
-    max_rss_mb: int = typer.Option(8192, "--max-rss-mb"),
+    timeout_seconds: float | None = typer.Option(None, "--timeout-seconds"),
+    max_rss_mb: int | None = typer.Option(None, "--max-rss-mb"),
     no_wait: bool = typer.Option(False, "--no-wait"),
     wait_seconds: float = typer.Option(5.0, "--wait-seconds"),
 ) -> None:
@@ -1620,6 +1657,8 @@ def run_command(
                 store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id / "run"
             )
             plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
+            timeout_seconds = _resolve_run_timeout(plan, timeout_seconds)
+            max_rss_mb = _resolve_run_max_rss(store, attempt.hypothesis_id, max_rss_mb)
             store.queue_run_request(
                 attempt_id, job_id, run_dir, timeout_seconds, max_rss_mb, run_plan=plan
             )

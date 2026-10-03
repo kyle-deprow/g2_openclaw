@@ -19,6 +19,8 @@ from gateway.research import worker
 from gateway.research.containment import runtime_pins
 from gateway.research.contracts import AnalysisPlan, ImplementationRecord, RunPlan, RunScenario
 from gateway.research.jobs import (
+    MAX_JOB_RSS_MB,
+    MAX_JOB_TIMEOUT_SECONDS,
     JobError,
     JobRecord,
     TargetValidationError,
@@ -80,6 +82,7 @@ def _launch(
     sleep: float = 0.0,
     mutate: bool = False,
     timeout: float = 5.0,
+    max_rss_mb: int = 512,
     target_out: Path | None = None,
     before_launch: Callable[[], None] | None = None,
     extra_target_args: Callable[[Path, Path], tuple[str, ...]] | None = None,
@@ -200,7 +203,7 @@ def _launch(
         worktree,
         targets_argv,
         timeout,
-        512,
+        max_rss_mb,
         shared_python=pins.shared_python,
         expected_commit=commit,
         artifact_paths=artifact_paths,
@@ -399,6 +402,35 @@ def test_validate_launch_accepts_pinned_inputs_without_mutating(tmp_path: Path) 
     # The fixture pre-creates only run/logs; validation must add nothing else.
     assert sorted(path.name for path in (attempt_dir / "run").iterdir()) == ["logs"]
     assert list((attempt_dir / "run" / "logs").iterdir()) == []
+
+
+def test_validate_launch_accepts_the_28800_second_and_16384_mb_bounds(tmp_path: Path) -> None:
+    assert MAX_JOB_TIMEOUT_SECONDS == 28800
+    assert MAX_JOB_RSS_MB == 16384
+    _launch(
+        tmp_path / "at-bounds",
+        extra_target_args=_pinned_inputs,
+        entrypoint=validate_launch,
+        timeout=28800,
+        max_rss_mb=16384,
+    )
+
+
+@pytest.mark.parametrize(
+    ("timeout", "max_rss_mb"),
+    [(28800.5, 512), (28801, 512), (0, 512), (5.0, 16385), (5.0, 0), (5.0, True)],
+)
+def test_validate_launch_rejects_limits_just_above_or_below_bounds(
+    tmp_path: Path, timeout: float, max_rss_mb: int
+) -> None:
+    with pytest.raises(JobError, match="timeout must be in"):
+        _launch(
+            tmp_path / "beyond-bounds",
+            extra_target_args=_pinned_inputs,
+            entrypoint=validate_launch,
+            timeout=timeout,
+            max_rss_mb=max_rss_mb,
+        )
 
 
 def test_validate_launch_rejects_other_outside_paths(tmp_path: Path) -> None:

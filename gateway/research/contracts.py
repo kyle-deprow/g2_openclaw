@@ -76,7 +76,10 @@ _SCENARIO_ID = re.compile(r"^s\d{3}$")
 _DOTTED_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _SECRET_HINT = re.compile(r"(?i)(?:api[_-]?key|password|secret|token)")
 _MAX_SCENARIOS = 16
-_MAX_RUN_SECONDS = 7200.0
+# Single source of truth for run limits; store, worker, jobs, cli and hypothesis import these.
+MAX_RUN_TIMEOUT_SECONDS = 28800
+MAX_STAGE_RSS_MB = 16384
+_MAX_RUN_SECONDS = float(MAX_RUN_TIMEOUT_SECONDS)
 _MAX_ANALYSIS_ARGS = 32
 _MAX_ANALYSIS_ARTIFACTS = 16
 _MAX_ANALYSIS_BYTES = 16 * 1024 * 1024
@@ -362,12 +365,27 @@ class RunPlan:
             ):
                 raise ValueError(f"{name} must be a positive finite number")
             if value > _MAX_RUN_SECONDS:
-                raise ValueError(f"{name} exceeds the 7200 second limit")
-        if (
-            self.scenario_timeout_seconds * len(self.scenarios) + self.analysis_timeout_seconds
-            > _MAX_RUN_SECONDS
-        ):
-            raise ValueError("run plan stage timeouts exceed the 7200 second aggregate limit")
+                raise ValueError(f"{name} exceeds the 28800 second limit")
+        if self.stage_budget_seconds > _MAX_RUN_SECONDS:
+            raise ValueError("run plan stage timeouts exceed the 28800 second aggregate limit")
+
+    @property
+    def spec_ids(self) -> tuple[str, ...]:
+        """Distinct evaluation spec ids in first-use order; one validation stage each."""
+        return tuple(dict.fromkeys(item.spec_id for item in self.scenarios))
+
+    @property
+    def stage_budget_seconds(self) -> float:
+        """Sum of every stage cap the worker can spend.
+
+        One ``validate-<spec>`` stage per distinct spec, a ``targets-<scenario>`` and an
+        ``evaluate-<scenario>`` stage per scenario (each capped at the scenario timeout), plus
+        the analysis stage.
+        """
+        return (
+            self.scenario_timeout_seconds * (2 * len(self.scenarios) + len(self.spec_ids))
+            + self.analysis_timeout_seconds
+        )
 
     def to_json(self) -> str:
         return to_json(

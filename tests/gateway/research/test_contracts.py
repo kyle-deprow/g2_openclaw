@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -172,8 +173,8 @@ def test_reviewed_run_plan_binds_distinct_specs_and_analysis(tmp_path: Path) -> 
             plan.primary_scenario_id,
             plan.scenarios,
             plan.analysis,
-            3600,
-            3600,
+            7200,
+            7200,
         )
 
 
@@ -336,8 +337,89 @@ def test_run_plan_rejects_missing_unknown_and_timeout_contract_fields(tmp_path: 
     unknown["unreviewed"] = True
     with pytest.raises(ValueError, match="keys must be exactly"):
         RunPlan.from_json(json.dumps(unknown))
-    for field, value in (("scenario_timeout_seconds", 0), ("analysis_timeout_seconds", 7201)):
+    for field, value in (("scenario_timeout_seconds", 0), ("analysis_timeout_seconds", 28801)):
         invalid = dict(raw)
         invalid[field] = value
-        with pytest.raises(ValueError, match=r"positive|7200"):
+        with pytest.raises(ValueError, match=r"positive|28800"):
             RunPlan.from_json(json.dumps(invalid))
+
+
+def _multi_spec_plan(
+    tmp_path: Path,
+    spec_ids: tuple[str, ...],
+    *,
+    scenario_timeout: float,
+    analysis_timeout: float,
+) -> RunPlan:
+    base = _contract_run_plan(tmp_path)
+    scenarios = tuple(
+        replace(base.scenarios[0], scenario_id=f"s{index:03d}", spec_id=spec_id)
+        for index, spec_id in enumerate(spec_ids)
+    )
+    return replace(
+        base,
+        scenarios=scenarios,
+        scenario_timeout_seconds=scenario_timeout,
+        analysis_timeout_seconds=analysis_timeout,
+    )
+
+
+def test_run_plan_accepts_the_28800_second_aggregate_and_rejects_just_above(
+    tmp_path: Path,
+) -> None:
+    # One scenario: validate + targets + evaluate at 9000 s each, plus 1800 s of analysis.
+    at_limit = _multi_spec_plan(tmp_path, ("c000",), scenario_timeout=9000, analysis_timeout=1800)
+    assert at_limit.stage_budget_seconds == 28800
+    assert RunPlan.from_json(at_limit.to_json()) == at_limit
+    with pytest.raises(ValueError, match="28800 second aggregate"):
+        _multi_spec_plan(tmp_path, ("c000",), scenario_timeout=9000, analysis_timeout=1800.5)
+
+
+def test_run_plan_per_field_limit_is_28800(tmp_path: Path) -> None:
+    raw = json.loads(_contract_run_plan(tmp_path).to_json())
+    raw["scenario_timeout_seconds"] = 28800
+    raw["analysis_timeout_seconds"] = 28800
+    # The aggregate (not the per-field) limit rejects the pair, but 28800 alone is a legal field.
+    with pytest.raises(ValueError, match="aggregate"):
+        RunPlan.from_json(json.dumps(raw))
+    raw["scenario_timeout_seconds"] = 10
+    raw["analysis_timeout_seconds"] = 28800 - 30
+    assert RunPlan.from_json(json.dumps(raw)).stage_budget_seconds == 28800
+    raw["scenario_timeout_seconds"] = 28801
+    with pytest.raises(ValueError, match="28800 second limit"):
+        RunPlan.from_json(json.dumps(raw))
+
+
+def test_run_plan_budget_counts_two_stages_per_scenario_and_one_per_distinct_spec(
+    tmp_path: Path,
+) -> None:
+    # Counting only scenarios (or scenarios + specs) would let this plan through.
+    with pytest.raises(ValueError, match="aggregate"):
+        _multi_spec_plan(tmp_path, ("c000",), scenario_timeout=9600, analysis_timeout=100)
+    same_spec = _multi_spec_plan(
+        tmp_path, ("c000", "c000"), scenario_timeout=5000, analysis_timeout=1000
+    )
+    assert same_spec.spec_ids == ("c000",)
+    # validate-c000, targets-s000/s001, evaluate-s000/s001.
+    assert same_spec.stage_budget_seconds == 5000 * 5 + 1000
+    # Two specs add a validation stage: (4 + 2) * 4000 + 4800 is exactly the limit.
+    two_specs = _multi_spec_plan(
+        tmp_path, ("c000", "c001"), scenario_timeout=4000, analysis_timeout=4800
+    )
+    assert two_specs.spec_ids == ("c000", "c001")
+    assert two_specs.stage_budget_seconds == 28800
+    with pytest.raises(ValueError, match="aggregate"):
+        _multi_spec_plan(tmp_path, ("c000", "c001"), scenario_timeout=4000, analysis_timeout=4801)
+
+
+def test_historical_run_plan_shapes_still_parse(tmp_path: Path) -> None:
+    # Persisted H0002..H0007 plans: 6 (or 16) scenarios over 3 specs, 300/1800 or 150/1800 s,
+    # some with integer timeouts.  The stricter aggregate must not reject any of them.
+    for scenarios, timeout, analysis in ((6, 300.0, 1800.0), (6, 300, 1800), (16, 150.0, 1800.0)):
+        spec_ids = tuple(("c000", "c001", "c002")[index % 3] for index in range(scenarios))
+        plan = _multi_spec_plan(
+            tmp_path, spec_ids, scenario_timeout=timeout, analysis_timeout=analysis
+        )
+        reloaded = RunPlan.from_json(plan.to_json())
+        assert reloaded == plan
+        assert reloaded.stage_budget_seconds <= 28800

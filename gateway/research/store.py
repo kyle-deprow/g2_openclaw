@@ -23,6 +23,8 @@ from .admission import AdmissionDecision, CampaignPolicy
 from .codec import to_json
 from .containment import ContainmentError, runtime_pins
 from .contracts import (
+    MAX_RUN_TIMEOUT_SECONDS,
+    MAX_STAGE_RSS_MB,
     Attempt,
     AttemptDecision,
     AttemptState,
@@ -62,8 +64,8 @@ class StoreConflict(RuntimeError):
     """A repeat operation supplied a different immutable payload."""
 
 
-MAX_QUEUE_TIMEOUT_SECONDS = 7200.0
-MAX_QUEUE_RSS_MB = 8192
+MAX_QUEUE_TIMEOUT_SECONDS = float(MAX_RUN_TIMEOUT_SECONDS)
+MAX_QUEUE_RSS_MB = MAX_STAGE_RSS_MB
 MAX_EXPOSURE_LEDGER_BYTES = 8 * 1024 * 1024
 
 
@@ -75,13 +77,15 @@ def validate_queue_limits(timeout_seconds: int | float, max_rss_mb: int) -> None
         or timeout_seconds <= 0
         or timeout_seconds > MAX_QUEUE_TIMEOUT_SECONDS
     ):
-        raise ValueError("timeout-seconds must be finite, positive, and at most 7200")
+        raise ValueError(
+            f"timeout-seconds must be finite, positive, and at most {MAX_RUN_TIMEOUT_SECONDS}"
+        )
     if (
         isinstance(max_rss_mb, bool)
         or not isinstance(max_rss_mb, int)
         or not 0 < max_rss_mb <= MAX_QUEUE_RSS_MB
     ):
-        raise ValueError("max-rss-mb must be positive and at most 8192")
+        raise ValueError(f"max-rss-mb must be positive and at most {MAX_STAGE_RSS_MB}")
 
 
 def now_utc() -> str:
@@ -2060,12 +2064,7 @@ class ResearchStore:
             evaluation_spec_digests[scenario.spec_id] = entry.sha256
         if stored_plan.primary_scenario_id not in {s.scenario_id for s in stored_plan.scenarios}:
             raise StoreConflict("run plan primary scenario is missing")
-        if (
-            stored_plan.scenario_timeout_seconds
-            * (len(stored_plan.scenarios) + len(spec_set.specs))
-            + stored_plan.analysis_timeout_seconds
-            > timeout_seconds
-        ):
+        if stored_plan.stage_budget_seconds > timeout_seconds:
             raise StoreConflict("run plan stage timeouts exceed the queued job timeout")
         payload: dict[str, object] = {
             "job_id": job_id,

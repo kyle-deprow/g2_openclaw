@@ -26,7 +26,7 @@ from .containment import (
     validate_targets_argv,
     verify_configured_runtime_pins,
 )
-from .contracts import RunPlan
+from .contracts import MAX_RUN_TIMEOUT_SECONDS, MAX_STAGE_RSS_MB, RunPlan
 
 
 class JobError(RuntimeError):
@@ -37,6 +37,8 @@ class TargetValidationError(JobError):
     """A scenario targets argv failed shape or containment validation before launch."""
 
 
+MAX_JOB_TIMEOUT_SECONDS = MAX_RUN_TIMEOUT_SECONDS
+MAX_JOB_RSS_MB = MAX_STAGE_RSS_MB
 _DOTTED_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _SECRET_HINT = re.compile(r"(?i)(?:api[_-]?key|password|secret|token)")
 
@@ -335,12 +337,15 @@ def validate_launch(
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
         or not math.isfinite(float(timeout_seconds))
-        or not 0 < timeout_seconds <= 7200
+        or not 0 < timeout_seconds <= MAX_JOB_TIMEOUT_SECONDS
         or isinstance(max_rss_mb, bool)
         or not isinstance(max_rss_mb, int)
-        or not 0 < max_rss_mb <= 8192
+        or not 0 < max_rss_mb <= MAX_JOB_RSS_MB
     ):
-        raise JobError("timeout and max RSS must be positive")
+        raise JobError(
+            f"timeout must be in (0, {MAX_JOB_TIMEOUT_SECONDS}] seconds "
+            f"and max RSS in (0, {MAX_JOB_RSS_MB}] MB"
+        )
     shared_python = shared_python.absolute()
     if (
         not shared_python.is_absolute()
@@ -383,11 +388,7 @@ def validate_launch(
         or set(evaluation_spec_digests) != expected_spec_ids
     ):
         raise JobError("run plan evaluation spec bindings contain unexpected entries")
-    if (
-        run_plan.scenario_timeout_seconds * (len(run_plan.scenarios) + len(evaluation_spec_paths))
-        + run_plan.analysis_timeout_seconds
-        > timeout_seconds
-    ):
+    if run_plan.stage_budget_seconds > timeout_seconds:
         raise JobError("run plan stage timeouts exceed the job timeout")
     primary = next(
         scenario

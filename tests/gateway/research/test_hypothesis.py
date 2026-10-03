@@ -203,7 +203,8 @@ def test_document_keys_are_closed(document_payload: dict[str, object], mutation:
         (("minimum_evidence", "trades"), -1),
         (("null_tests",), []),
         (("compute", "max_wall_seconds"), 0),
-        (("compute", "max_rss_mb"), 8193),
+        (("compute", "max_wall_seconds"), 28_801),
+        (("compute", "max_rss_mb"), 16_385),
     ],
 )
 def test_types_and_bounds_are_rejected(
@@ -259,7 +260,7 @@ def test_overflow_to_infinity_is_rejected(
     ("value", "reason"),
     [
         (True, "compute.max_wall_seconds must be a number"),
-        (7_201, "compute.max_wall_seconds is outside the supported bounds"),
+        (28_801, "compute.max_wall_seconds is outside the supported bounds"),
     ],
 )
 def test_wall_seconds_reject_bool_and_upper_bound(
@@ -277,11 +278,22 @@ def test_wall_seconds_accepts_inclusive_upper_bound(
     document_payload: dict[str, object],
 ) -> None:
     changed = copy.deepcopy(document_payload)
-    changed["compute"]["max_wall_seconds"] = 7_200  # type: ignore[index]
+    changed["compute"]["max_wall_seconds"] = 28_800  # type: ignore[index]
+    changed["compute"]["max_rss_mb"] = 16_384  # type: ignore[index]
 
     document = HypothesisDocument.from_json(_json(changed))
 
-    assert document.compute.max_wall_seconds == 7_200.0
+    assert document.compute.max_wall_seconds == 28_800.0
+    assert document.compute.max_rss_mb == 16_384
+
+
+def test_historical_compute_limits_still_parse(document_payload: dict[str, object]) -> None:
+    changed = copy.deepcopy(document_payload)
+    changed["compute"] = {"max_wall_seconds": 7_200.0, "max_rss_mb": 8_192}
+
+    document = HypothesisDocument.from_json(_json(changed))
+
+    assert (document.compute.max_wall_seconds, document.compute.max_rss_mb) == (7_200.0, 8_192)
 
 
 def test_noncanonical_date_is_rejected(document_payload: dict[str, object]) -> None:
