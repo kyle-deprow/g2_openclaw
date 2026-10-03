@@ -90,9 +90,7 @@ top-level `model`, `effort`, and `prompt_sha256` are authoritative. Its
 `spawn_arguments` contains only `task_name`, `message`, `agent_type`, and
 `fork_turns` (which is `none`); it has no `cwd` argument, and the generated
 `message` carries the immutable absolute bundle path. Invoke exactly the
-returned native `collaboration.spawn_agent` arguments. The command derives
-the owner run/thread only from the completed IMPLEMENTED wake and official
-event. Reserve and spawn exactly once in this owner turn. After the normal
+returned native `collaboration.spawn_agent` arguments. The command binds the owner run from the completed IMPLEMENTED wake and official event, requiring it to be the active running owner writer, and defers the owner thread: reconcile binds it from the official event once flushed. Reserve and spawn exactly once in this owner turn. After the normal
 native spawn ACK, STOP and call `sessions_yield` for the owned completion. Do
 not reconcile or collect in this owner turn: exact owner run/thread correlation
 requires the original owner turn to end. The completion callback after that
@@ -108,9 +106,7 @@ review-collect, and review-cancel. The CLI derives these paths from the managed 
 or caller-invented paths. The spawn message is encrypted on the host, so
 `prompt_sha256` is reservation-side evidence only and is never host-verified;
 binding rests on the exact task name plus host role, model, effort, and the
-strict verdict binding. Collect needs the child's `announce:codex-native`
-completion callback in the owner store; without it the review stays pending,
-never FAIL. A failed, errored, or aborted reviewer child makes the attempt a terminal REVIEW_FAILED with the host reason as the sole finding, with no supersession or re-review; it is distinct from a reviewer FAIL verdict but final for the attempt. Limitation: an operator cannot stop a running native reviewer
+strict verdict binding. Collect trusts the child's official terminal rollout; an `announce:codex-native` callback is optional corroboration that must agree if present. An unfinished child stays pending, never FAIL. A failed, errored, or aborted reviewer child makes the attempt a terminal REVIEW_FAILED with the host reason as the sole finding, with no supersession or re-review; it is distinct from a reviewer FAIL verdict but final for the attempt. Limitation: an operator cannot stop a running native reviewer
 through `chat.abort` after the owner yields (the reply reports
 `owner_run_inactive_no_supported_child_cancel`); it ends on its own terminal
 evidence. Do not use the retired `--core-database`, ACPX, or Claude-project

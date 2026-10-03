@@ -57,6 +57,18 @@ class HostRecordPending(HostRecordError):
     """The exact host record exists but has not reached its official end."""
 
 
+class HostRecordNotRecorded(HostRecordPending):
+    """The host has not (yet) recorded any boundary event for the exact run.
+
+    OpenClaw buffers a run's runtime events in memory and appends them to
+    SQLite only when its recorder flushes, so a run cannot see its own
+    ``session.started`` while it is still in progress.  This is distinct from a
+    malformed record: it is raised only when the bound run has no boundary
+    event at all, in any session.  A run with a ``session.ended`` but no
+    ``session.started`` is malformed and never raises this.
+    """
+
+
 @dataclass(frozen=True, slots=True)
 class NativeSpawnCall:
     """The one native ``collaboration.spawn_agent`` call that spawned a reservation.
@@ -94,6 +106,21 @@ class NativeOwnerHostRecord:
     provider: str
     started_at_ms: int
     ended_at_ms: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class NativeOwnerWriter:
+    """The owner session node's persisted active-writer claim.
+
+    OpenClaw persists ``activeWriterRunId`` and ``status`` on the session node
+    when a run is admitted (not when its events are flushed), so a run can
+    prove from inside itself that it is the session's active writer.
+    """
+
+    owner_session_key: str
+    session_id: str
+    status: str
+    active_writer_run_id: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -337,6 +364,48 @@ def _boundary_event(
     return created_at, event_session_id, event_run_id, event, event_type
 
 
+def read_native_owner_writer(
+    database_path: Path | str, owner_session_key: str
+) -> NativeOwnerWriter:
+    """Read the exact owner session node's ``status`` and ``activeWriterRunId``.
+
+    Read-only and schema-validated like the other readers.  A missing,
+    ambiguous or invalid node, or an ``entry_json`` that is not an object with a
+    string ``status`` and a string-or-null ``activeWriterRunId`` (and, when
+    present, the node's own ``sessionId``), is a ``HostRecordError``.
+    """
+
+    owner_session_key = _validate_lookup_text(owner_session_key, "owner_session_key")
+    with _readonly_database(database_path) as connection:
+        if "session_nodes" not in _sqlite_tables(connection):
+            raise HostRecordError("native OpenClaw database has no session node schema")
+        try:
+            rows = connection.execute(
+                "SELECT session_key, current_session_id, entry_valid, entry_json "
+                "FROM session_nodes WHERE session_key = ?",
+                (owner_session_key,),
+            ).fetchall()
+        except sqlite3.Error as exc:
+            raise HostRecordError("native owner session node could not be read") from exc
+    if len(rows) != 1:
+        raise HostRecordError("native owner session identity is missing or ambiguous")
+    row = rows[0]
+    if row[0] != owner_session_key or row[2] != 1:
+        raise HostRecordError("native owner session node is not valid")
+    session_id = _required_text(row[1], "native owner session id")
+    entry = _native_event(row[3], "native owner session entry")
+    status = entry.get("status")
+    writer = entry.get("activeWriterRunId")
+    if not isinstance(status, str) or not status:
+        raise HostRecordError("native owner session entry status is malformed")
+    if writer is not None and (not isinstance(writer, str) or not writer):
+        raise HostRecordError("native owner session entry active writer is malformed")
+    entry_session = entry.get("sessionId")
+    if entry_session is not None and entry_session != session_id:
+        raise HostRecordError("native owner session entry does not match its node")
+    return NativeOwnerWriter(owner_session_key, session_id, status, writer)
+
+
 def read_exact_native_owner(
     database_path: Path | str,
     owner_session_key: str,
@@ -352,7 +421,10 @@ def read_exact_native_owner(
     that run's own ``session.started`` and ``session.ended`` events.  Owner
     threads rotate between runs on the installed host, so the thread is bound
     only through those two events and later runs are never consulted.  A run
-    without a ``session.ended`` event has an open interval.
+    without a ``session.ended`` event has an open interval.  With
+    ``expected_run_id``, a run with no event at all in the store raises
+    ``HostRecordNotRecorded``: the host flushes a run's events only after the
+    run, so a run never sees its own start.
     """
 
     owner_session_key = _validate_lookup_text(owner_session_key, "owner_session_key")
@@ -391,12 +463,22 @@ def read_exact_native_owner(
                 "ORDER BY created_at, seq",
                 parameters,
             ).fetchall()
+            run_recorded_anywhere = bool(rows) or (
+                expected_run_id is not None
+                and connection.execute(
+                    "SELECT 1 FROM trajectory_runtime_events WHERE run_id = ? LIMIT 1",
+                    (expected_run_id,),
+                ).fetchone()
+                is not None
+            )
         except sqlite3.Error as exc:
             raise HostRecordError("native OpenClaw runtime events could not be read") from exc
     if len(node_rows) != 1:
         raise HostRecordError("native owner session identity is missing or ambiguous")
     if node_rows[0][0] != owner_session_key or node_rows[0][2] != 1:
         raise HostRecordError("native owner session node is not valid")
+    if expected_run_id is not None and not run_recorded_anywhere:
+        raise HostRecordNotRecorded("native owner run has no recorded runtime events yet")
 
     starts: dict[str, list[tuple[int, str, dict[str, object]]]] = {}
     ends: dict[str, list[tuple[int, dict[str, object]]]] = {}
@@ -985,11 +1067,15 @@ def _read_native_announce(
     The host records a native completion callback only as an owner-session
     run named ``announce:codex-native:<spawning-thread>:<child>:<status>``.
     The callback runs on whatever owner thread is current, so only its run id
-    and session key are bound.  Zero callbacks is ``None`` (still pending);
-    more than one is ambiguous.
+    and session key are bound.  Its own events are flushed only after it ends,
+    so a callback read from inside that run is absent: zero callbacks is
+    ``None``, which callers treat as no corroboration.  Every callback for
+    this child must name the bound spawning thread; more than one callback,
+    a callback for another parent thread, or an unknown status is rejected.
     """
 
-    prefix = f"{_ANNOUNCE_PREFIX}{owner_thread_id}:{child_thread_id}:"
+    prefix = _ANNOUNCE_PREFIX
+    needle = f":{child_thread_id}:"
     with _readonly_database(openclaw_database) as connection:
         if "trajectory_runtime_events" not in _sqlite_tables(connection):
             raise HostRecordError("native OpenClaw database has no runtime event schema")
@@ -997,10 +1083,10 @@ def _read_native_announce(
             rows = connection.execute(
                 "SELECT session_id, run_id, event_json, created_at "
                 "FROM trajectory_runtime_events "
-                "WHERE substr(run_id, 1, ?) = ? "
+                "WHERE substr(run_id, 1, ?) = ? AND instr(run_id, ?) > 0 "
                 "AND json_extract(event_json, '$.type') = 'session.started' "
                 "ORDER BY created_at, seq",
-                (len(prefix), prefix),
+                (len(prefix), prefix, needle),
             ).fetchall()
         except sqlite3.Error as exc:
             raise HostRecordError("native completion callback could not be read") from exc
@@ -1010,12 +1096,19 @@ def _read_native_announce(
         if event.get("sessionKey") != owner_session_key:
             continue
         run_id = _required_text(row[1], "native completion callback run_id")
+        parts = run_id[len(prefix) :].split(":")
+        if len(parts) < 2 or parts[1] != child_thread_id:
+            # The child id appears elsewhere in an unrelated run name.
+            continue
         if event.get("runId") != run_id or event.get("sessionId") != str(row[0]):
             raise HostRecordError("native completion callback identity does not match its row")
-        status = run_id[len(prefix) :]
-        if status == "succeeded":
+        if len(parts) != 3:
+            raise HostRecordError("native completion callback run name is malformed")
+        if parts[0] != owner_thread_id:
+            raise HostRecordError("native completion callback parent thread does not match owner")
+        if parts[2] == "succeeded":
             found.append((run_id, "succeeded"))
-        elif status == "failed":
+        elif parts[2] == "failed":
             found.append((run_id, "failed"))
         else:
             raise HostRecordError("native completion callback status is not recognized")
@@ -1036,7 +1129,7 @@ def read_exact_native_child(
     expected_agent_role: str = "reviewer",
     expected_model: str = "gpt-5.6-sol",
     expected_effort: str = "xhigh",
-    require_completion_callback: bool = False,
+    corroborate_completion_callback: bool = False,
 ) -> NativeChildHostRecord:
     """Correlate one native child across OpenClaw and Codex official stores.
 
@@ -1049,10 +1142,18 @@ def read_exact_native_child(
     rests on the 96-bit-nonce task name plus host role/model/effort and the
     caller's strict verdict binding.
 
-    With ``require_completion_callback`` the owner store must also hold the
-    child's ``announce:codex-native`` callback run: a missing callback keeps
-    the child ``pending``, ``failed`` maps to ``failed``/``cancelled``, and
-    ``succeeded`` is honoured only with a successful terminal rollout.
+    The child's official terminal rollout marker is authoritative.  With
+    ``corroborate_completion_callback`` the owner store's
+    ``announce:codex-native`` callback run is checked as optional
+    corroboration: no callback is acceptable (a callback turn cannot see its
+    own run, and the callback may simply not have run yet); exactly one must
+    name the bound owner thread and this child and agree with the terminal
+    rollout (``succeeded`` with succeeded, ``failed`` with failed or
+    cancelled), otherwise the read is rejected.  A callback can never override
+    a terminal rollout.  A ``failed`` callback is itself terminal evidence only
+    for a rollout with complete lines and no terminal marker; with an
+    unterminated final line, or with a ``succeeded`` callback, a rollout
+    without a terminal marker stays pending.
     """
 
     owner_session_key = _validate_lookup_text(owner_session_key, "owner_session_key")
@@ -1183,16 +1284,28 @@ def read_exact_native_child(
 
     terminal_state: TerminalState = rollout.terminal_state
     announce: tuple[str, Literal["succeeded", "failed"]] | None = None
-    if require_completion_callback:
+    if corroborate_completion_callback:
         announce = _read_native_announce(
             openclaw_database, owner_session_key, owner_thread_id, child_thread_id
         )
-        if announce is None:
-            terminal_state = "pending"
-        elif announce[1] == "failed":
-            terminal_state = "cancelled" if rollout.terminal_state == "cancelled" else "failed"
-        elif rollout.terminal_state == "pending":
-            terminal_state = "pending"
+        if (
+            announce is not None
+            and announce[1] == "failed"
+            and rollout.terminal_state == "pending"
+            and not rollout.unterminated_tail
+        ):
+            # Complete lines and no terminal marker: the child died without
+            # writing one.  The single consistent failure callback is the
+            # terminal evidence; a mid-append tail stays pending instead.
+            terminal_state = "failed"
+        if announce is not None and rollout.terminal_state != "pending":
+            agrees = (announce[1] == "succeeded" and rollout.terminal_state == "succeeded") or (
+                announce[1] == "failed" and rollout.terminal_state in {"failed", "cancelled"}
+            )
+            if not agrees:
+                raise HostRecordError(
+                    "native completion callback status contradicts the child rollout"
+                )
     return NativeChildHostRecord(
         owner_session_key=owner_session_key,
         owner_run_id=owner_run_id,

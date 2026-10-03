@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from gateway.research.host_records import (
     HostRecordError,
+    HostRecordNotRecorded,
+    HostRecordPending,
     read_exact_rollout,
     read_native_parent_rollout,
 )
@@ -372,3 +374,9 @@ def test_rollout_token_count_without_info_keeps_the_last_snapshot(tmp_path: Path
         stream.write("\n")
     usage = read_exact_rollout(path).latest_usage
     assert usage is not None and usage.total_tokens == 12
+
+
+def test_not_recorded_is_a_distinct_pending_host_error() -> None:
+    assert issubclass(HostRecordNotRecorded, HostRecordPending)
+    assert issubclass(HostRecordPending, HostRecordError)
+    assert HostRecordNotRecorded is not HostRecordPending

@@ -20,6 +20,7 @@ from gateway.research import cli as research_cli
 from gateway.research import host_records, review_evidence
 from gateway.research.host_records import (
     HostRecordError,
+    HostRecordNotRecorded,
     HostRecordPending,
     NativeChildHostRecord,
     read_exact_native_child,
@@ -41,6 +42,7 @@ from tests.gateway.research.native_review_fixtures import (
     build_native_host,
     create_owner_database,
     insert_owner_event,
+    set_owner_node,
     write_child_rollout,
     write_owner_rollout,
 )
@@ -62,12 +64,14 @@ def _stores(
     child_name: str | None = None,
     owner_ended_event: bool = True,
     owner_ended_at_ms: int | None = None,
+    owner_flushed: bool = True,
 ) -> NativeReviewStores:
     openclaw = create_owner_database(
         tmp_path / "owner.sqlite",
         started_at_ms=OWNER_STARTED_AT,
         ended_at_ms=owner_ended_at_ms,
         owner_ended_event=owner_ended_event,
+        owner_flushed=owner_flushed,
     )
     return build_native_host(
         tmp_path,
@@ -97,7 +101,7 @@ def _read(
         OWNER_THREAD_ID,
         TASK_NAME,
         reserved_at,
-        require_completion_callback=callback,
+        corroborate_completion_callback=callback,
     )
 
 
@@ -377,6 +381,61 @@ def test_open_owner_interval_does_not_fall_back_to_next_run_start(tmp_path: Path
     assert owner.ended_at_ms is None
 
 
+def test_unflushed_owner_run_is_typed_not_recorded_and_pending(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, owner_flushed=False)
+    with pytest.raises(HostRecordNotRecorded) as excinfo:
+        read_exact_native_owner(
+            stores.openclaw_database, OWNER_SESSION, RESERVED_AT, expected_run_id=OWNER_RUN_ID
+        )
+    assert isinstance(excinfo.value, HostRecordPending)
+    with pytest.raises(HostRecordNotRecorded):
+        _read(stores)
+    # An unrelated run id is also simply not recorded.
+    with pytest.raises(HostRecordNotRecorded):
+        read_exact_native_owner(
+            stores.openclaw_database, OWNER_SESSION, RESERVED_AT, expected_run_id="never-ran"
+        )
+
+
+def test_owner_run_with_an_end_but_no_start_is_malformed_not_unrecorded(tmp_path: Path) -> None:
+    stores = _stores(tmp_path)
+    with sqlite3.connect(stores.openclaw_database) as connection:
+        connection.execute(
+            "DELETE FROM trajectory_runtime_events WHERE run_id=? "
+            "AND json_extract(event_json,'$.type')='session.started'",
+            (OWNER_RUN_ID,),
+        )
+    with pytest.raises(HostRecordError, match="correlation is unresolved") as excinfo:
+        read_exact_native_owner(
+            stores.openclaw_database, OWNER_SESSION, RESERVED_AT, expected_run_id=OWNER_RUN_ID
+        )
+    assert not isinstance(excinfo.value, HostRecordPending)
+
+
+def test_owner_run_recorded_only_under_another_session_is_not_unrecorded(
+    tmp_path: Path,
+) -> None:
+    stores = _stores(tmp_path, owner_flushed=False)
+    insert_owner_event(
+        stores.openclaw_database,
+        run_id=OWNER_RUN_ID,
+        event={
+            "type": "session.started",
+            "provider": "openai",
+            "modelId": "gpt-6-astra",
+            "data": {"threadId": OWNER_THREAD_ID},
+        },
+        created_at_ms=OWNER_STARTED_AT,
+        session_id="foreign-session",
+        session_key="agent:foreign:session",
+    )
+    with pytest.raises(HostRecordError, match="correlation is unresolved") as excinfo:
+        read_exact_native_owner(
+            stores.openclaw_database, OWNER_SESSION, RESERVED_AT, expected_run_id=OWNER_RUN_ID
+        )
+    assert not isinstance(excinfo.value, HostRecordPending)
+
+
 def test_spawn_at_or_after_owner_end_is_rejected(tmp_path: Path) -> None:
     # The owner ended at RESERVED_AT, before the spawn call at RESERVED_AT + 1:
     # a call recorded after the bound run ended belongs to a later turn.
@@ -410,14 +469,29 @@ def test_callback_on_rotated_owner_thread_correlates(tmp_path: Path) -> None:
     assert _read(stores).announce_status == "succeeded"
 
 
-def test_missing_callback_is_pending_not_failed(tmp_path: Path) -> None:
+def test_missing_callback_is_acceptable_and_the_rollout_is_authoritative(
+    tmp_path: Path,
+) -> None:
+    # In-turn collection: the callback run cannot see its own events yet.
     stores = _stores(tmp_path, announce=None)
     child = _read(stores)
-    assert child.terminal_state == "pending"
+    assert child.terminal_state == "succeeded"
     assert child.announce_run_id is None
-    assert child.last_agent_message is None
-    # Reconciliation (the ACK) does not need the callback.
+    assert child.announce_status is None
+    assert child.last_agent_message == VERDICT
     assert _read(stores, callback=False).terminal_state == "succeeded"
+
+
+def test_missing_callback_with_a_running_child_is_pending(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, status="running", announce=None)
+    assert _read(stores).terminal_state == "pending"
+
+
+def test_missing_callback_with_a_failed_rollout_is_failed(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, status="failed", announce=None)
+    child = _read(stores)
+    assert child.terminal_state == "failed"
+    assert child.last_agent_message is None
 
 
 def test_failed_callback_maps_to_failed_child_without_verdict(tmp_path: Path) -> None:
@@ -433,11 +507,189 @@ def test_succeeded_callback_with_pending_rollout_stays_pending(tmp_path: Path) -
     assert _read(stores).terminal_state == "pending"
 
 
-def test_succeeded_callback_cannot_override_an_errored_rollout(tmp_path: Path) -> None:
-    stores = _stores(tmp_path, status="failed", announce="succeeded")
+@pytest.mark.parametrize(
+    "status,announce",
+    [
+        ("failed", "succeeded"),  # a success callback never overrides an errored rollout
+        ("succeeded", "failed"),  # a failure callback never contradicts a success
+    ],
+)
+def test_inconsistent_callback_status_rejects(tmp_path: Path, status: str, announce: str) -> None:
+    stores = _stores(tmp_path, status=status, announce=announce)
+    with pytest.raises(HostRecordError, match="contradicts the child rollout"):
+        _read(stores)
+    # Without corroboration the rollout alone decides.
+    assert _read(stores, callback=False).terminal_state == status
+
+
+def test_succeeded_callback_cannot_override_an_aborted_rollout(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, announce="succeeded")
+    write_child_rollout(
+        stores.child_rollout,
+        thread_id=stores.child_thread_id,
+        parent_thread_id=OWNER_THREAD_ID,
+        task_name=TASK_NAME,
+        terminal="turn_aborted",
+    )
+    with pytest.raises(HostRecordError, match="contradicts the child rollout"):
+        _read(stores)
+
+
+def test_failed_callback_without_a_terminal_marker_is_terminal_failure(tmp_path: Path) -> None:
+    # The child died without writing a marker; complete lines only.
+    stores = _stores(tmp_path, status="running", announce="failed")
     child = _read(stores)
     assert child.terminal_state == "failed"
+    assert child.announce_status == "failed"
     assert child.last_agent_message is None
+    # Without corroboration the rollout alone stays pending.
+    assert _read(stores, callback=False).terminal_state == "pending"
+
+
+def test_failed_callback_with_an_unterminated_final_line_stays_pending(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, status="running", announce="failed")
+    with stores.child_rollout.open("a") as stream:
+        stream.write('{"type":"event_msg","payload":{"type":"token_cou')
+    assert _read(stores).terminal_state == "pending"
+
+
+def test_failed_callback_without_a_marker_still_needs_exactly_one_callback(
+    tmp_path: Path,
+) -> None:
+    stores = _stores(tmp_path, status="running", announce="failed")
+    add_announce(
+        stores.openclaw_database,
+        owner_thread_id=OWNER_THREAD_ID,
+        child_thread_id=stores.child_thread_id,
+        status="succeeded",
+        at_ms=RESERVED_AT + 120_000,
+    )
+    with pytest.raises(HostRecordError, match="callback is ambiguous"):
+        _read(stores)
+
+
+def test_succeeded_callback_never_completes_a_rollout_without_a_marker(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, status="running", announce="succeeded")
+    child = _read(stores)
+    assert child.terminal_state == "pending"
+    assert child.last_agent_message is None
+
+
+def _writer(stores: NativeReviewStores) -> host_records.NativeOwnerWriter:
+    return host_records.read_native_owner_writer(stores.openclaw_database, OWNER_SESSION)
+
+
+def test_owner_writer_reads_running_status_and_active_writer(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, owner_flushed=False)
+    writer = _writer(stores)
+    assert writer.status == "running"
+    assert writer.active_writer_run_id == OWNER_RUN_ID
+    assert writer.session_id == OWNER_SESSION_ID
+    # After the run ends the host keeps the writer id and flips the status.
+    set_owner_node(stores.openclaw_database, status="done")
+    done = _writer(stores)
+    assert done.status == "done" and done.active_writer_run_id == OWNER_RUN_ID
+
+
+def test_owner_writer_allows_a_null_active_writer(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, owner_flushed=False)
+    set_owner_node(stores.openclaw_database, active_writer_run_id=None)
+    assert _writer(stores).active_writer_run_id is None
+
+
+@pytest.mark.parametrize(
+    "entry_json",
+    [
+        None,
+        "not json",
+        "[]",
+        '{"activeWriterRunId":"owner-run-1"}',
+        '{"status":"","activeWriterRunId":"owner-run-1"}',
+        '{"status":7,"activeWriterRunId":"owner-run-1"}',
+        '{"status":"running","activeWriterRunId":7}',
+        '{"status":"running","activeWriterRunId":""}',
+        '{"status":"running","status":"done"}',
+        '{"status":"running","sessionId":"another-session"}',
+    ],
+)
+def test_owner_writer_rejects_missing_or_malformed_entry(
+    tmp_path: Path, entry_json: str | None
+) -> None:
+    stores = _stores(tmp_path, owner_flushed=False)
+    with sqlite3.connect(stores.openclaw_database) as connection:
+        connection.execute("UPDATE session_nodes SET entry_json=?", (entry_json,))
+    with pytest.raises(HostRecordError):
+        _writer(stores)
+
+
+def test_owner_writer_rejects_missing_invalid_node_and_schema(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, owner_flushed=False)
+    with pytest.raises(HostRecordError, match="missing or ambiguous"):
+        host_records.read_native_owner_writer(stores.openclaw_database, "agent:other:session")
+    with sqlite3.connect(stores.openclaw_database) as connection:
+        connection.execute("UPDATE session_nodes SET entry_valid=0")
+    with pytest.raises(HostRecordError, match="not valid"):
+        _writer(stores)
+    bare = tmp_path / "bare.sqlite"
+    with sqlite3.connect(bare) as connection:
+        connection.execute("CREATE TABLE other (k TEXT)")
+    with pytest.raises(HostRecordError, match="no session node schema"):
+        host_records.read_native_owner_writer(bare, OWNER_SESSION)
+
+
+def test_callback_for_another_parent_thread_rejects(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, announce=None)
+    add_announce(
+        stores.openclaw_database,
+        owner_thread_id="some-other-owner-thread",
+        child_thread_id=stores.child_thread_id,
+        status="succeeded",
+        at_ms=RESERVED_AT + 120_000,
+    )
+    with pytest.raises(HostRecordError, match="parent thread does not match owner"):
+        _read(stores)
+
+
+def test_callback_for_another_child_is_ignored(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, announce=None)
+    add_announce(
+        stores.openclaw_database,
+        owner_thread_id=OWNER_THREAD_ID,
+        child_thread_id="some-other-child",
+        status="failed",
+        at_ms=RESERVED_AT + 120_000,
+    )
+    child = _read(stores)
+    assert child.terminal_state == "succeeded"
+    assert child.announce_run_id is None
+
+
+def test_callback_under_another_parent_rejects_even_beside_a_good_callback(
+    tmp_path: Path,
+) -> None:
+    stores = _stores(tmp_path)
+    add_announce(
+        stores.openclaw_database,
+        owner_thread_id="some-other-owner-thread",
+        child_thread_id=stores.child_thread_id,
+        status="succeeded",
+        at_ms=RESERVED_AT + 120_000,
+    )
+    with pytest.raises(HostRecordError, match="parent thread does not match owner"):
+        _read(stores)
+
+
+def test_callback_in_another_session_is_ignored(tmp_path: Path) -> None:
+    stores = _stores(tmp_path, announce=None)
+    add_announce(
+        stores.openclaw_database,
+        owner_thread_id=OWNER_THREAD_ID,
+        child_thread_id=stores.child_thread_id,
+        status="failed",
+        at_ms=RESERVED_AT + 120_000,
+        owner_session_key="agent:other:session",
+    )
+    assert _read(stores).terminal_state == "succeeded"
 
 
 def test_duplicate_callbacks_for_one_child_reject(tmp_path: Path) -> None:

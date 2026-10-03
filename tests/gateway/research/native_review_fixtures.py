@@ -10,7 +10,15 @@ Codex 0.153.4 host really writes (confirmed read-only against the live stores):
 * the owner thread rotates: the completion callback is an owner-session run
   ``announce:codex-native:<spawning thread>:<child>:<status>`` that runs on a
   different thread, and the owner run itself ends with ``yieldDetected``;
-* an earlier owner run on another model exists in the same session.
+* an earlier owner run on another model exists in the same session;
+* the owner session node persists ``entry_json`` ``status`` and
+  ``activeWriterRunId`` when a run is admitted (``running``) and ``done`` when it
+  ends, independent of event flushing;
+* OpenClaw buffers a run's runtime events in memory and appends them to SQLite
+  only when the recorder flushes, so ``review-reserve`` (which runs inside the
+  owner run) cannot see that run's own ``session.started``.  The default
+  ``prepare_review`` therefore reserves with the owner run unflushed and flushes
+  it afterwards; ``owner_flushed_at_reserve=True`` models the flushed variant.
 """
 
 from __future__ import annotations
@@ -20,6 +28,7 @@ import hashlib
 import json
 import sqlite3
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -124,6 +133,82 @@ def owner_ended(thread_id: str) -> dict[str, object]:
     }
 
 
+def flush_owner_run(
+    path: Path,
+    *,
+    owner_session_key: str = OWNER_SESSION,
+    owner_run_id: str = OWNER_RUN_ID,
+    owner_thread_id: str = OWNER_THREAD_ID,
+    started_at_ms: int,
+    ended_at_ms: int | None = None,
+    owner_ended_event: bool = True,
+) -> None:
+    """Append the owner run's boundary events, as the host does after the run."""
+
+    insert_owner_event(
+        path,
+        run_id=owner_run_id,
+        event=owner_started(owner_thread_id),
+        created_at_ms=started_at_ms,
+        session_key=owner_session_key,
+    )
+    if owner_ended_event:
+        end_owner_run(
+            path,
+            owner_session_key=owner_session_key,
+            owner_run_id=owner_run_id,
+            owner_thread_id=owner_thread_id,
+            ended_at_ms=ended_at_ms if ended_at_ms is not None else started_at_ms + 100_000,
+        )
+
+
+def set_owner_node(
+    path: Path,
+    *,
+    owner_session_key: str = OWNER_SESSION,
+    status: str | None = "running",
+    active_writer_run_id: str | None = OWNER_RUN_ID,
+    entry_json: str | None = None,
+) -> None:
+    """Persist the owner session node's run-admission state (``entry_json``)."""
+
+    entry: dict[str, object] = {"sessionId": OWNER_SESSION_ID}
+    if status is not None:
+        entry["status"] = status
+    if active_writer_run_id is not None:
+        entry["activeWriterRunId"] = active_writer_run_id
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE session_nodes SET entry_json=? WHERE session_key=?",
+            (entry_json if entry_json is not None else _line(entry), owner_session_key),
+        )
+
+
+def end_owner_run(
+    path: Path,
+    *,
+    owner_session_key: str = OWNER_SESSION,
+    owner_run_id: str = OWNER_RUN_ID,
+    owner_thread_id: str = OWNER_THREAD_ID,
+    ended_at_ms: int,
+) -> None:
+    """Append the owner run's ``session.ended`` and mark the node ``done``."""
+
+    insert_owner_event(
+        path,
+        run_id=owner_run_id,
+        event=owner_ended(owner_thread_id),
+        created_at_ms=ended_at_ms,
+        session_key=owner_session_key,
+    )
+    set_owner_node(
+        path,
+        owner_session_key=owner_session_key,
+        status="done",
+        active_writer_run_id=owner_run_id,
+    )
+
+
 def create_owner_database(
     path: Path,
     *,
@@ -133,11 +218,14 @@ def create_owner_database(
     started_at_ms: int = 1_700_000_000_000,
     ended_at_ms: int | None = None,
     owner_ended_event: bool = True,
+    owner_flushed: bool = True,
 ) -> Path:
     """Create only the official owner session/runtime-event schema.
 
     The session also holds an older owner run on another model and thread, as
-    the installed owner session does.
+    the installed owner session does.  With ``owner_flushed=False`` the bound
+    owner run has no runtime events yet (the host flushes them after the run);
+    ``flush_owner_run`` appends them later.
     """
 
     if path.exists():
@@ -148,7 +236,7 @@ def create_owner_database(
             CREATE TABLE session_nodes (
               session_key TEXT PRIMARY KEY, current_session_id TEXT NOT NULL,
               parent_session_key TEXT, spawned_by TEXT, label TEXT, created_at INTEGER,
-              entry_valid INTEGER NOT NULL
+              entry_valid INTEGER NOT NULL, entry_json TEXT
             );
             CREATE TABLE trajectory_runtime_events (
               session_id TEXT NOT NULL, seq INTEGER NOT NULL, run_id TEXT,
@@ -158,9 +246,15 @@ def create_owner_database(
             """
         )
         connection.execute(
-            "INSERT INTO session_nodes VALUES(?,?,?,?,?,?,?)",
-            (owner_session_key, OWNER_SESSION_ID, None, None, None, started_at_ms, 1),
+            "INSERT INTO session_nodes VALUES(?,?,?,?,?,?,?,?)",
+            (owner_session_key, OWNER_SESSION_ID, None, None, None, started_at_ms, 1, None),
         )
+    set_owner_node(
+        path,
+        owner_session_key=owner_session_key,
+        status="done" if owner_flushed and owner_ended_event else "running",
+        active_writer_run_id=owner_run_id,
+    )
     insert_owner_event(
         path,
         run_id=OLD_OWNER_RUN_ID,
@@ -175,20 +269,15 @@ def create_owner_database(
         created_at_ms=started_at_ms - 400_000,
         session_key=owner_session_key,
     )
-    insert_owner_event(
-        path,
-        run_id=owner_run_id,
-        event=owner_started(owner_thread_id),
-        created_at_ms=started_at_ms,
-        session_key=owner_session_key,
-    )
-    if owner_ended_event:
-        insert_owner_event(
+    if owner_flushed:
+        flush_owner_run(
             path,
-            run_id=owner_run_id,
-            event=owner_ended(owner_thread_id),
-            created_at_ms=ended_at_ms if ended_at_ms is not None else started_at_ms + 100_000,
-            session_key=owner_session_key,
+            owner_session_key=owner_session_key,
+            owner_run_id=owner_run_id,
+            owner_thread_id=owner_thread_id,
+            started_at_ms=started_at_ms,
+            ended_at_ms=ended_at_ms,
+            owner_ended_event=owner_ended_event,
         )
     return path
 
@@ -631,16 +720,37 @@ def prepare_review(
     status: str = "succeeded",
     verdict: str = "PASS",
     findings: tuple[str, ...] = (),
+    owner_flushed_at_reserve: bool = False,
+    announce: str | None = None,
 ) -> tuple[ResearchStore, str, Path, NativeReviewStores]:
+    """Reserve, reconcile and return one native review.
+
+    By default this models the live in-turn shape: the owner run is not yet
+    flushed when ``review-reserve`` runs (its session node is the running active
+    writer) and is flushed afterwards, and no completion-callback run exists
+    yet when collection runs (``announce=None``; pass ``"auto"``, ``"failed"``
+    ... to record one).  ``owner_flushed_at_reserve=True`` records the owner
+    run's start (still open) before reserve and its end afterwards.  The wake
+    row is sent before the owner run starts.
+    """
+
     store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
     owner_database = tmp_path / "owner.sqlite"
-    owner_started_at_ms = int(datetime.now(tz=UTC).timestamp() * 1000) - 1_000
-    create_owner_database(owner_database, started_at_ms=owner_started_at_ms)
     _status, resume_seq = store.campaign()
     wake_key = canonical_wake_key("H0001", attempt_id, "IMPLEMENTED", resume_seq)
     if not store.reserve_wake(wake_key, attempt_id, "IMPLEMENTED", resume_seq):
         raise AssertionError("native fixture wake reservation failed")
     store.complete_wake(wake_key, OWNER_RUN_ID)
+    wake = store.wake_row(wake_key)
+    assert wake is not None
+    owner_started_at_ms = _epoch_ms(str(wake["sent_at"])) + 1
+    time.sleep(0.01)  # the owner run starts after the wake and before reserve
+    create_owner_database(
+        owner_database,
+        started_at_ms=owner_started_at_ms,
+        owner_flushed=owner_flushed_at_reserve,
+        owner_ended_event=False,
+    )
     reserve_review(
         store,
         attempt_id,
@@ -649,6 +759,10 @@ def prepare_review(
         wake_pending_key=wake_key,
         openclaw_database=owner_database,
     )
+    if owner_flushed_at_reserve:
+        end_owner_run(owner_database, ended_at_ms=owner_started_at_ms + 100_000)
+    else:
+        flush_owner_run(owner_database, started_at_ms=owner_started_at_ms)
     native = create_native_stores(
         store,
         attempt_id,
@@ -657,6 +771,7 @@ def prepare_review(
         status=status,
         verdict=verdict,
         findings=findings,
+        announce=announce,
     )
     reconcile_review(store, attempt_id, native.openclaw_database, native.codex_state_database)
     # The fixture has completed the canonical reservation turn; advance the

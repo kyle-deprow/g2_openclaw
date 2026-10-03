@@ -42,10 +42,13 @@ from .contracts import (
 )
 from .host_records import (
     HostRecordError,
+    HostRecordNotRecorded,
     HostRecordPending,
     NativeChildHostRecord,
+    NativeOwnerHostRecord,
     read_exact_native_child,
     read_exact_native_owner,
+    read_native_owner_writer,
 )
 from .store import ResearchStore, StoreConflict, canonical_wake_key, now_utc
 
@@ -742,6 +745,13 @@ def reserve_review(
         raise ReviewUnresolved("native review wake reservation is stale")
     if attempt.state is not AttemptState.IMPLEMENTED:
         raise ReviewUnresolved("native review attempt is no longer IMPLEMENTED")
+    # The reserve command runs inside the owner run it binds, and OpenClaw
+    # flushes a run's runtime events to SQLite only after that run.  The wake
+    # row's run id is therefore the canonical owner run; its thread is bound
+    # now only if the run's boundary events happen to be flushed already, and
+    # is otherwise deferred to reconcile/verify/cancel.
+    owner_run_id = wake_run_id
+    owner: NativeOwnerHostRecord | None
     try:
         owner = read_exact_native_owner(
             openclaw_database,
@@ -749,13 +759,31 @@ def reserve_review(
             _epoch_ms(str(wake["sent_at"])),
             expected_run_id=wake_run_id,
         )
+    except HostRecordNotRecorded:
+        owner = None
     except (HostRecordError, ReviewEvidenceError) as exc:
         raise ReviewUnresolved("native review owner run/thread is unresolved") from exc
-    owner_run_id = owner.run_id
-    owner_thread_id = owner.thread_id
+    owner_thread_id = owner.thread_id if owner is not None else None
     if not bundle_dir.is_absolute():
         raise BundleError("bundle directory must be absolute")
+    reserved = now_utc()
+    if owner is not None and owner.started_at_ms > _epoch_ms(reserved):
+        raise ReviewUnresolved("native review owner run starts after the reservation")
     existing = _stored_json(store, attempt_id, "review_reservation")
+    if existing is None:
+        # A new reservation must be made from inside the wake run itself.  A
+        # recorded run must still be open.  An unrecorded run must be the
+        # session's persisted active writer (written at admission, not flush).
+        if owner is not None:
+            if owner.ended_at_ms is not None:
+                raise ReviewUnresolved("native review owner run has already ended")
+        else:
+            try:
+                writer = read_native_owner_writer(openclaw_database, owner_session_key)
+            except HostRecordError as exc:
+                raise ReviewUnresolved("native review owner writer is unresolved") from exc
+            if writer.status != "running" or writer.active_writer_run_id != wake_run_id:
+                raise ReviewUnresolved("native review owner run is not the active running writer")
     if existing is not None:
         reservation = _reservation_from_payload(existing)
         if (
@@ -763,10 +791,21 @@ def reserve_review(
             or Path(reservation.bundle_dir) != bundle_dir.resolve()
         ):
             raise StoreConflict("review reservation differs from the stored reservation")
+        if (
+            owner is not None
+            and reservation.spawn_arguments_json is not None
+            and owner.started_at_ms > _epoch_ms(reservation.reserved_at)
+        ):
+            raise ReviewUnresolved("native review owner run starts after the reservation")
         if reservation.spawn_arguments_json is not None and (
             reservation.owner_run_id != owner_run_id
-            or reservation.owner_thread_id != owner_thread_id
+            or (
+                reservation.owner_thread_id is not None
+                and reservation.owner_thread_id != owner_thread_id
+            )
         ):
+            # A stored resolved thread must still resolve to itself; a stored
+            # deferred thread may now be resolvable without conflict.
             raise StoreConflict(
                 "review reservation owner run/thread differs from stored reservation"
             )
@@ -779,7 +818,6 @@ def reserve_review(
         return reservation
     digest = build_review_bundle(store, attempt_id, bundle_dir, instructions=instructions)
     hypothesis = store.get_hypothesis(attempt.hypothesis_id)
-    reserved = now_utc()
     nonce = secrets.token_hex(12)
     task_name = f"review_{attempt_id.lower().replace('-', '_')}_{nonce}"
     if _NATIVE_TASK_NAME.fullmatch(task_name) is None:
@@ -874,6 +912,34 @@ def acknowledge_review(
     return ack
 
 
+def _bound_owner_thread_id(reservation: ReviewReservation, openclaw_database: Path) -> str:
+    """Return the reservation's owner thread, resolving a deferred one.
+
+    A reservation made inside the owner run cannot bind that run's thread
+    because the host flushes the run's events only afterwards.  Such a
+    reservation stores ``owner_thread_id = None``; here the thread comes from
+    the bound owner run's own ``session.started`` event (never written back to
+    the immutable reservation).  A run that is still unflushed raises
+    ``HostRecordNotRecorded`` (pending); the open-interval and spawn-time
+    rules are enforced by ``read_exact_native_child`` with the resolved thread.
+    """
+
+    if reservation.owner_thread_id is not None:
+        return reservation.owner_thread_id
+    if reservation.owner_run_id is None:
+        raise HostRecordError("native review reservation has no owner run")
+    reserved_at_ms = _epoch_ms(reservation.reserved_at)
+    owner = read_exact_native_owner(
+        openclaw_database,
+        reservation.owner_session_key,
+        reserved_at_ms,
+        expected_run_id=reservation.owner_run_id,
+    )
+    if owner.started_at_ms > reserved_at_ms:
+        raise HostRecordError("native owner run starts after the reservation")
+    return owner.thread_id
+
+
 def reconcile_review(
     store: ResearchStore,
     attempt_id: str,
@@ -887,24 +953,28 @@ def reconcile_review(
     if existing is not None:
         return _ack_from_payload(existing)
     if reservation.spawn_arguments_json is not None:
-        if (
-            reservation.owner_run_id is None
-            or reservation.owner_thread_id is None
-            or codex_state_database is None
-        ):
+        if reservation.owner_run_id is None or codex_state_database is None:
             store.pause(f"review_unresolved:{attempt_id}")
             store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_identity"})
             raise ReviewUnresolved("native owner run/thread identity is unresolved")
         try:
+            owner_thread_id = _bound_owner_thread_id(reservation, openclaw_database)
             child = read_exact_native_child(
                 openclaw_database,
                 codex_state_database,
                 reservation.owner_session_key,
                 reservation.owner_run_id,
-                reservation.owner_thread_id,
+                owner_thread_id,
                 reservation.task_name or "",
                 _epoch_ms(reservation.reserved_at),
             )
+        except HostRecordNotRecorded as exc:
+            if reservation.owner_thread_id is None:
+                # Deferred reservation, no ACK yet: the owner run is not flushed.
+                raise ReviewPending("native owner run is not yet recorded") from exc
+            store.pause(f"review_unresolved:{attempt_id}")
+            store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_missing"})
+            raise ReviewUnresolved("native owner run vanished after reservation") from exc
         except HostRecordPending as exc:
             raise ReviewPending("native owner turn has not reached its official end") from exc
         except HostRecordError as exc:
@@ -1148,20 +1218,29 @@ def verify_native_review(
     reservation = _reservation(store, attempt_id)
     if reservation.spawn_arguments_json is None:
         raise ReviewEvidenceError("native review reservation is missing spawn arguments")
-    if (
-        reservation.owner_run_id is None
-        or reservation.owner_thread_id is None
-        or reservation.task_name is None
-    ):
+    if reservation.owner_run_id is None or reservation.task_name is None:
         raise ReviewUnresolved("native review reservation is missing owner identity")
     ack_payload = _stored_json(store, attempt_id, "review_ack")
     if ack_payload is None:
         raise ReviewPending("review ACK is pending")
     ack = _ack_from_payload(ack_payload)
+    try:
+        owner_thread_id = _bound_owner_thread_id(reservation, openclaw_database)
+    except HostRecordNotRecorded as exc:
+        # An ACK exists, so the owner run was recorded once: it cannot vanish.
+        store.pause(f"review_unresolved:{attempt_id}")
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_missing"})
+        raise ReviewUnresolved("native owner run vanished after the review ACK") from exc
+    except HostRecordPending as exc:
+        raise ReviewPending("native owner turn has not reached its official end") from exc
+    except HostRecordError as exc:
+        store.pause(f"review_unresolved:{attempt_id}")
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "correlation"})
+        raise ReviewUnresolved("native review correlation is unresolved") from exc
     if (
         ack.owner_session_key != reservation.owner_session_key
         or ack.owner_run_id != reservation.owner_run_id
-        or ack.owner_thread_id != reservation.owner_thread_id
+        or ack.owner_thread_id != owner_thread_id
         or not ack.child_thread_id
     ):
         store.pause(f"review_unresolved:{attempt_id}")
@@ -1172,11 +1251,15 @@ def verify_native_review(
             codex_state_database,
             reservation.owner_session_key,
             reservation.owner_run_id,
-            reservation.owner_thread_id,
+            owner_thread_id,
             reservation.task_name,
             _epoch_ms(reservation.reserved_at),
-            require_completion_callback=True,
+            corroborate_completion_callback=True,
         )
+    except HostRecordNotRecorded as exc:
+        store.pause(f"review_unresolved:{attempt_id}")
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_missing"})
+        raise ReviewUnresolved("native owner run vanished after the review ACK") from exc
     except HostRecordPending as exc:
         raise ReviewPending("native owner turn has not reached its official end") from exc
     except HostRecordError as exc:
@@ -1187,8 +1270,8 @@ def verify_native_review(
         store.pause(f"review_unresolved:{attempt_id}")
         raise ReviewUnresolved("native review child differs from ACK")
     if child.terminal_state == "pending":
-        # No completion callback, an unfinished child, or a mid-append rollout
-        # tail: never a FAIL, never a verdict.
+        # An unfinished child or a mid-append rollout tail: never a FAIL,
+        # never a verdict.
         raise ReviewPending("native review completion is pending")
     if child.terminal_state != "succeeded":
         # failed/cancelled child: the host-failure path below records a FAIL
@@ -1234,7 +1317,7 @@ def verify_native_review(
     host = {
         "owner_session_key": reservation.owner_session_key,
         "owner_run_id": reservation.owner_run_id,
-        "owner_thread_id": reservation.owner_thread_id,
+        "owner_thread_id": child.parent_thread_id,
         "child_thread_id": child.child_thread_id,
         "spawn_call_id": child.spawn_call_id,
         "announce_run_id": child.announce_run_id,
@@ -1382,7 +1465,6 @@ def cancel_review(
     if (
         codex_state_database is None
         or reservation.owner_run_id is None
-        or reservation.owner_thread_id is None
         or reservation.task_name is None
     ):
         store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_identity"})
@@ -1441,11 +1523,14 @@ def cancel_review(
             codex_state_database,
             reservation.owner_session_key,
             reservation.owner_run_id,
-            reservation.owner_thread_id,
+            _bound_owner_thread_id(reservation, openclaw_database),
             reservation.task_name,
             _epoch_ms(reservation.reserved_at),
-            require_completion_callback=True,
+            corroborate_completion_callback=True,
         )
+    except HostRecordNotRecorded:
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_missing"})
+        return CancelOutcome(attempt_id, None, "unresolved", True, "not_requested")
     except HostRecordPending:
         return CancelOutcome(attempt_id, None, "pending", True, "not_requested")
     except HostRecordError:
@@ -1515,11 +1600,14 @@ def _cancel_native_after_reread(
             codex_state_database,
             reservation.owner_session_key,
             reservation.owner_run_id or "",
-            reservation.owner_thread_id or "",
+            _bound_owner_thread_id(reservation, openclaw_database),
             reservation.task_name or "",
             _epoch_ms(reservation.reserved_at),
-            require_completion_callback=True,
+            corroborate_completion_callback=True,
         )
+    except HostRecordNotRecorded:
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_missing"})
+        return CancelOutcome(attempt_id, task_id, "unresolved", True, result)
     except HostRecordError:
         return CancelOutcome(attempt_id, task_id, "pending", True, result)
     if after.child_thread_id != task_id:
