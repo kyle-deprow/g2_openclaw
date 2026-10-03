@@ -192,6 +192,65 @@ gpt-5.6-sol/xhigh/read-only with `max_depth=0`. A direct Sol probe answered.
   - `_git` buffers its whole output before checking the bound;
   - there is no accept-side boundary test.
 
+- First live native review attempt (resume 38): `review-reserve` refused
+  "owner run/thread is unresolved". Cause: OpenClaw buffers trajectory runtime
+  events until the turn flushes, so a run cannot see its own `session.started`.
+  A live in-turn probe confirmed it: 0 own rows, while the session node showed
+  `status=running` with `activeWriterRunId` set to the run. Nothing was reserved
+  or dispatched. The campaign was paused and fix `0e92c0a` landed (Sonnet,
+  then two Opus rounds READY, 1053 passed, 1 skipped):
+  - reserve binds the canonical wake run plus the active owner writer, and binds
+    the thread after the flush;
+  - the completion callback is optional corroboration;
+  - a vanished owner run after the ACK pauses the campaign.
+  Redeployed, then resumed at 39.
+- **Native Sol review, end to end** (2026-10-03 02:44–02:57Z):
+  - reservation with the nonce task `review_h0006_a003_d573714dcb316974e966a5a2`;
+  - Sol child `01a0ffa8-c21c-79f3-b491-82095c40b84e` (gpt-5.6-sol, xhigh), spawned and yielded;
+  - reconcile and collect inside the callback turn.
+- **Verdict FAIL**, two findings:
+  1. High: lot PnL/NAV reconstruction uses exported notionals not bound to
+     shares × price (`h0006/analysis.py:895`).
+  2. Medium: `intended_entry_notional` and `scaling_factor` are always
+     unavailable, although they are computable and required (`:887`).
+- **Sandbox audit.** The reviewer child inherited the owner's writable sandbox:
+  Codex does not apply the role's `sandbox_mode=read-only` to spawned children.
+  Its 28 tool calls were all reads, and the worktree, PASS evidence and bundle
+  were byte-identical afterwards.
+- **Astra's decisions:**
+  - A003 `CLOSED`, decision FINISH;
+  - H0006 `ABANDONED` (3/3 attempts, no eligible historical result);
+  - H0007 drafted and frozen: the H0006 economics plus primitive shares × price
+    accounting and computed entry sizing. No attempt admitted.
+- **Operator:** campaign paused (cap 15/15 exhausted), owner service stopped,
+  gateway healthy.
+
+## Outcome and what remains
+
+The loop infrastructure is proven end to end on the live host: admission,
+native implementation, a contained host run, submission, reserve, native Sol
+spawn, reconcile, collect, and the owner's decision. **No historical run
+happened**: the only eligible attempt received a substantive review FAIL. There
+is no economic result and no alpha claim.
+
+Continuing requires a **user decision**. Admitting H0007-A001 needs a cap increase
+(15→16) through `campaign-policy-set`, since no automatic extension is
+authorized. Then:
+1. resume;
+2. the owner admits and dispatches the native implementer;
+3. operator contained host run → package/submit → native Sol review → on PASS
+   the historical run → Astra's decision.
+
+Open follow-ups, none blocking:
+- OS-level read-only enforcement for the native reviewer child.
+- The bundle aggregate check runs only after the bundle dir is frozen.
+- `_git` buffers whole outputs before bounding them.
+- Doc nits from the last review.
+- The `test_push_script_uses_recorded_owner_workspace_for_native_layers` test
+  rewrites the repo `openclaw.json` in place, so pytest must run serially.
+- The pnpm `openclaw` wrapper is still 2026.7.1-2, so deploys need
+  `OPENCLAW_BIN=/home/dev/.local/bin/openclaw` and the venv on PATH.
+
 ## Guardrails (unchanged, plus the 10-02 directive)
 
 OpenAI models only for the research loop. Use no Anthropic, Claude, ACP, or Opus
