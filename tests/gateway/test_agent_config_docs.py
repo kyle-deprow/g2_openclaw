@@ -20,6 +20,7 @@ IMPROVEMENT_MIRROR = REPO_ROOT / ".claude" / "skills" / "openclaw-improvement" /
 MEMORY_CANONICAL = REPO_ROOT / ".agents" / "skills" / "openclaw-memory" / "SKILL.md"
 MEMORY_MIRROR = REPO_ROOT / ".claude" / "skills" / "openclaw-memory" / "SKILL.md"
 CONFIG_README = REPO_ROOT / "gateway" / "openclaw_config" / "README.md"
+CONFIG_ENV_EXAMPLE = REPO_ROOT / "gateway" / "openclaw_config" / ".env.example"
 RESEARCH_PERSONA = AGENT_CONFIG / "research-orchestrator"
 OPENCLAW_CONFIG = REPO_ROOT / "gateway" / "openclaw_config" / "openclaw.json"
 PUSH_SCRIPT = REPO_ROOT / "scripts" / "push-openclaw-config.sh"
@@ -89,10 +90,81 @@ def test_runtime_docs_describe_current_native_owner_delegation() -> None:
     assert "OpenClaw session spawning is not" in docs
     assert "Astra is the research owner" in docs
     assert "Native Luna" in docs
-    assert "Claude Code Opus via ACP" in docs
+    assert "native OpenAI/Codex Sol" in docs
     assert "OpenAI/Codex remains the provider" in docs
     assert "hypothesis equals iteration" in docs
     assert "code → review → run" in docs
+
+
+def test_native_review_contract_uses_official_wake_and_spawn_shape() -> None:
+    review_docs = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            AUTORESEARCH,
+            RESEARCH_LOOP,
+            RESEARCH_PERSONA / "AGENTS.md",
+            RESEARCH_PERSONA / "TOOLS.md",
+            REPO_ROOT / ".claude" / "skills" / "research-loop" / "SKILL.md",
+        )
+    )
+    normalized = " ".join(review_docs.split())
+    normalized_lower = normalized.casefold()
+
+    assert "top-level `model`, `effort`, and `prompt_sha256`" in normalized
+    assert (
+        "`spawn_arguments` contains only `task_name`, `message`, `agent_type`, and `fork_turns`"
+        in normalized
+    )
+    assert "no `cwd` argument" in normalized
+    assert "immutable absolute bundle path" in normalized
+    assert "completed IMPLEMENTED wake and official event" in normalized
+    assert "reserve and spawn exactly once" in normalized_lower
+    assert "after the normal native spawn ack, stop and call" in normalized_lower
+    assert "`sessions_yield` for the owned completion" in normalized_lower
+    assert "do not reconcile or collect in this owner turn" in normalized_lower
+    assert "original owner turn to end" in normalized_lower
+    assert (
+        "completion callback after that turn ends may reconcile and collect exactly once"
+        in normalized_lower
+    )
+    assert (
+        "implementation callback is separate from the later review completion callback"
+        in normalized_lower
+    )
+    assert "never dispatches again" in normalized_lower
+    assert "official child-thread ack" in normalized_lower
+    assert "unknown native spawn acknowledgement or outcome remains pending" in normalized_lower
+    assert "never authorizes repeat dispatch" in normalized_lower
+    assert "--codex-state-database" in normalized_lower
+    assert (
+        "/home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite"
+        in review_docs
+    )
+    assert (
+        "/home/dev/.openclaw/agents/research-orchestrator/agent/codex-home/state_5.sqlite"
+        in review_docs
+    )
+    assert "--openclaw-database DB" not in review_docs
+    assert "CODEX_DB" not in review_docs
+    assert "spawn_arguments.model" not in review_docs
+    assert "spawn_arguments.effort" not in review_docs
+    assert "spawn_arguments.prompt_sha256" not in review_docs
+    assert "review ACK" not in review_docs
+    assert "review-ack" not in review_docs
+
+
+def test_active_source_contract_has_no_anthropic_reviewer_or_default() -> None:
+    runtime_docs = "\n".join(
+        (AGENT_CONFIG / name).read_text(encoding="utf-8") for name in ("README.md", "BOOTSTRAP.md")
+    ).casefold()
+    env_example = " ".join(CONFIG_ENV_EXAMPLE.read_text(encoding="utf-8").casefold().split())
+
+    assert "native openai/codex sol" in runtime_docs
+    assert "gpt-5.6-sol" in runtime_docs
+    assert "claude code opus via acp" not in runtime_docs
+    assert "anthropic/claude" not in env_example
+    assert "there is no provider" in env_example
+    assert "fallback" in env_example
 
 
 def test_current_runtime_skill_paths_are_explicit_and_retired_path_is_absent() -> None:
@@ -185,7 +257,7 @@ def test_current_owner_contract_preserves_typed_admission_and_terminal_safety() 
         "evaluator bounds",
         "unknown history blocks final_holdout",
         "never retype a verdict",
-        "respawn after unknown acknowledgement",
+        "respawn after an unknown result",
         "no-repair/no-retry",
     ):
         assert phrase in text
@@ -324,16 +396,12 @@ def test_repo_config_keeps_current_route_and_memory_guards() -> None:
     config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
     agents = config["agents"]["entries"]
     assert config["agents"]["ownership"] == "explicit"
-    assert list(agents) == ["main", "research-orchestrator", "claude"]
+    assert list(agents) == ["main", "research-orchestrator"]
     assert all("id" not in agent for agent in agents.values())
     owner = agents["research-orchestrator"]
     assert owner["model"]["primary"] == "openai/gpt-6-astra"
-    assert agents["claude"] == {
-        "runtime": {
-            "type": "acp",
-            "acp": {"agent": "claude", "backend": "acpx", "mode": "oneshot"},
-        }
-    }
+    assert "acp" not in config
+    assert "acpx" not in config["plugins"]["entries"]
     defaults = config["agents"]["defaults"]
     assert config["memory"]["search"]["enabled"] is False
     assert defaults["compaction"]["memoryFlush"]["enabled"] is False

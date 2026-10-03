@@ -48,6 +48,7 @@ from .contracts import (
     RunOutcome,
     RunPlan,
 )
+from .host_records import HostRecordError, managed_native_databases
 from .hypothesis import HypothesisDocument
 from .jobs import (
     JobError,
@@ -69,7 +70,6 @@ from .readiness import (
 )
 from .review_evidence import (
     REVIEW_EFFORT,
-    acknowledge_review,
     build_review_bundle,
     cancel_review,
     collect_review,
@@ -100,6 +100,42 @@ def _root(value: Path) -> Path:
 def _fail(exc: Exception) -> None:
     typer.echo(str(exc), err=True)
     raise typer.Exit(code=1)
+
+
+def _require_managed_native_paths(
+    root: Path, openclaw_database: Path, codex_state_database: Path | None = None
+) -> None:
+    """Require supplied native store paths to equal the managed derived paths.
+
+    The research root lives inside the managed OpenClaw root, so the single
+    derivation is ``managed_native_databases(<root>.parent/state/openclaw.sqlite)``
+    (the helper ``wake.py`` and ``control.py`` use).  ``RESEARCH_CORE_DATABASE``
+    is never a source here: if the process happens to set it, it must resolve to
+    that same core database.  Anything else, including a symlinked or unresolved
+    alias, fails closed.
+    """
+
+    core = _root(root).resolve().parent / "state" / "openclaw.sqlite"
+    try:
+        managed = managed_native_databases(core)
+    except HostRecordError as exc:
+        raise ValueError(f"managed native databases are unavailable: {exc}") from exc
+    configured = os.environ.get("RESEARCH_CORE_DATABASE")
+    if configured and Path(configured).resolve() != core.resolve():
+        raise ValueError(
+            "RESEARCH_CORE_DATABASE does not match the managed core database "
+            f"{core} that contains --root"
+        )
+    supplied = {"--openclaw-database": (openclaw_database, managed.openclaw_database)}
+    if codex_state_database is not None:
+        supplied["--codex-state-database"] = (codex_state_database, managed.codex_state_database)
+    for flag, (given, expected) in supplied.items():
+        try:
+            resolved = given.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f"{flag} does not resolve to an existing path") from exc
+        if given != expected or resolved != expected:
+            raise ValueError(f"{flag} must equal the managed native database {expected}")
 
 
 def _fatal_serve_failure(store: ResearchStore | None, exc: Exception) -> None:
@@ -294,20 +330,28 @@ def review_reserve(
     root: Path = typer.Option(..., "--root"),
     bundle_dir: Path = typer.Option(..., "--bundle-dir"),
     owner_key: str = typer.Option(..., "--owner-key"),
+    wake_key: str = typer.Option(..., "--wake-key"),
+    openclaw_database: Path = typer.Option(..., "--openclaw-database"),
 ) -> None:
     try:
-        reservation = reserve_review(ResearchStore(_root(root)), attempt_id, bundle_dir, owner_key)
+        _require_managed_native_paths(root, openclaw_database)
+        reservation = reserve_review(
+            ResearchStore(_root(root)),
+            attempt_id,
+            bundle_dir,
+            owner_key,
+            wake_pending_key=wake_key,
+            openclaw_database=openclaw_database,
+        )
         typer.echo(
             json.dumps(
                 {
-                    "runtime": "acp",
-                    "agentId": "claude",
-                    "mode": "run",
-                    "thread": False,
                     "cwd": reservation.bundle_dir,
-                    "model": "claude-opus-5",
+                    "model": "gpt-5.6-sol",
                     "effort": REVIEW_EFFORT,
                     "label": reservation.label,
+                    "prompt_sha256": reservation.prompt_sha256,
+                    "spawn_arguments": reservation.spawn_arguments,
                 },
                 sort_keys=True,
             )
@@ -316,37 +360,18 @@ def review_reserve(
         _fail(exc)
 
 
-@app.command("review-ack")
-def review_ack(
-    attempt_id: str,
-    child_session_key: str = typer.Option(..., "--child-session-key"),
-    run_id: str = typer.Option(..., "--run-id"),
-    mode: str = typer.Option(..., "--mode"),
-    run_timeout_seconds: int | None = typer.Option(None, "--run-timeout-seconds"),
-    root: Path = typer.Option(..., "--root"),
-) -> None:
-    try:
-        ack = acknowledge_review(
-            ResearchStore(_root(root)),
-            attempt_id,
-            child_session_key,
-            run_id,
-            mode,
-            run_timeout_seconds,
-        )
-        typer.echo(ack.to_json())
-    except Exception as exc:
-        _fail(exc)
-
-
 @app.command("review-reconcile")
 def review_reconcile(
     attempt_id: str,
     root: Path = typer.Option(..., "--root"),
-    core_database: Path = typer.Option(..., "--core-database"),
+    openclaw_database: Path = typer.Option(..., "--openclaw-database"),
+    codex_state_database: Path = typer.Option(..., "--codex-state-database"),
 ) -> None:
     try:
-        ack = reconcile_review(ResearchStore(_root(root)), attempt_id, core_database)
+        _require_managed_native_paths(root, openclaw_database, codex_state_database)
+        ack = reconcile_review(
+            ResearchStore(_root(root)), attempt_id, openclaw_database, codex_state_database
+        )
         typer.echo(ack.to_json() if ack is not None else "pending")
     except Exception as exc:
         _fail(exc)
@@ -356,18 +381,17 @@ def review_reconcile(
 def review_collect(
     attempt_id: str,
     root: Path = typer.Option(..., "--root"),
-    core_database: Path = typer.Option(..., "--core-database"),
-    acpx_sessions: Path = typer.Option(..., "--acpx-sessions"),
-    claude_projects: Path = typer.Option(..., "--claude-projects"),
+    openclaw_database: Path = typer.Option(..., "--openclaw-database"),
+    codex_state_database: Path = typer.Option(..., "--codex-state-database"),
 ) -> None:
     try:
+        _require_managed_native_paths(root, openclaw_database, codex_state_database)
         typer.echo(
             collect_review(
                 ResearchStore(_root(root)),
                 attempt_id,
-                core_database,
-                acpx_sessions,
-                claude_projects,
+                openclaw_database,
+                codex_state_database,
             ).state.value
         )
     except Exception as exc:
@@ -379,21 +403,36 @@ def review_cancel(
     attempt_id: str,
     reason: str = typer.Option(..., "--reason"),
     root: Path = typer.Option(..., "--root"),
-    core_database: Path = typer.Option(..., "--core-database"),
+    openclaw_database: Path = typer.Option(..., "--openclaw-database"),
+    codex_state_database: Path = typer.Option(..., "--codex-state-database"),
 ) -> None:
-    async def request(task_id: str, cancel_reason: str) -> Mapping[str, object]:
+    async def request(owner_session_key: str, agent_id: str, run_id: str) -> Mapping[str, object]:
         client = OpenClawClient(
             os.environ.get("OPENCLAW_HOST", "127.0.0.1"),
             int(os.environ.get("OPENCLAW_PORT", "18789")),
             os.environ.get("OPENCLAW_GATEWAY_TOKEN", ""),
         )
-        return await request_cancel(client.request_once, task_id, cancel_reason)
+        return await request_cancel(client.request_once, owner_session_key, agent_id, run_id)
 
     try:
+        _require_managed_native_paths(root, openclaw_database, codex_state_database)
         outcome = cancel_review(
-            ResearchStore(_root(root)), attempt_id, reason, core_database, request
+            ResearchStore(_root(root)),
+            attempt_id,
+            reason,
+            openclaw_database,
+            request,
+            codex_state_database,
         )
-        typer.echo(json.dumps({"status": outcome.status, "pending": outcome.pending}))
+        typer.echo(
+            json.dumps(
+                {
+                    "status": outcome.status,
+                    "pending": outcome.pending,
+                    "rpc_result": outcome.rpc_result,
+                }
+            )
+        )
     except Exception as exc:
         _fail(exc)
 

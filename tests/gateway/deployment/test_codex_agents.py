@@ -36,7 +36,7 @@ def test_managed_native_research_roster_is_exact_and_uses_fast_luna_layers(
     layer_dir = tmp_path / "workspace/.codex/agent-configs"
     layer_dir.mkdir(parents=True)
     agents_dir.mkdir()
-    for agent_id in ("implementer", "experiment_runner"):
+    for agent_id in codex_agents.NATIVE_RESEARCH_AGENT_IDS:
         (agents_dir / f"{agent_id}.toml").write_text(
             "\n".join(
                 [
@@ -55,8 +55,9 @@ def test_managed_native_research_roster_is_exact_and_uses_fast_luna_layers(
                     f'model = "{codex_agents.NATIVE_RESEARCH_AGENT_MODELS[agent_id]}"',
                     'model_reasoning_effort = "xhigh"',
                     'service_tier = "fast"',
+                    'sandbox_mode = "read-only"' if agent_id == "reviewer" else "",
                     "[agents]",
-                    "max_depth = 1",
+                    f"max_depth = {codex_agents.NATIVE_RESEARCH_AGENT_MAX_DEPTH[agent_id]}",
                     "max_threads = 1",
                     "",
                     "[sandbox_workspace_write]",
@@ -65,6 +66,8 @@ def test_managed_native_research_roster_is_exact_and_uses_fast_luna_layers(
                         'writable_roots = ["@RESEARCH_V2_ROOT@"]'
                         if agent_id == "experiment_runner"
                         else 'writable_roots = ["@HYPOTHESIS_WORKTREES_ROOT@"]'
+                        if agent_id == "implementer"
+                        else "writable_roots = []"
                     ),
                 ]
             ),
@@ -75,6 +78,13 @@ def test_managed_native_research_roster_is_exact_and_uses_fast_luna_layers(
     codex_agents.validate_stage_agents()
 
     assert tomllib.loads((layer_dir / "implementer.toml").read_text())["agents"]["max_depth"] == 1
+    reviewer_layer = tomllib.loads((layer_dir / "reviewer.toml").read_text())
+    assert reviewer_layer["sandbox_mode"] == "read-only"
+    reviewer_path = layer_dir / "reviewer.toml"
+    reviewer_text = reviewer_path.read_text(encoding="utf-8")
+    reviewer_path.write_text(reviewer_text.replace('sandbox_mode = "read-only"\n', ""))
+    with pytest.raises(SystemExit, match="sandbox_mode=read-only"):
+        codex_agents.validate_stage_agents()
 
 
 def test_managed_native_research_roster_rejects_extra_toml(
@@ -89,7 +99,7 @@ def test_managed_native_research_roster_rejects_extra_toml(
             "\n".join(
                 [
                     f'name = "{agent_id}"',
-                    'model = "gpt-5.6-luna"',
+                    f'model = "{codex_agents.NATIVE_RESEARCH_AGENT_MODELS[agent_id]}"',
                     'model_reasoning_effort = "xhigh"',
                     'service_tier = "fast"',
                     "",
@@ -100,11 +110,12 @@ def test_managed_native_research_roster_rejects_extra_toml(
         (layer_dir / f"{agent_id}.toml").write_text(
             "\n".join(
                 [
-                    'model = "gpt-5.6-luna"',
+                    f'model = "{codex_agents.NATIVE_RESEARCH_AGENT_MODELS[agent_id]}"',
                     'model_reasoning_effort = "xhigh"',
                     'service_tier = "fast"',
+                    'sandbox_mode = "read-only"' if agent_id == "reviewer" else "",
                     "[agents]",
-                    "max_depth = 1",
+                    f"max_depth = {codex_agents.NATIVE_RESEARCH_AGENT_MAX_DEPTH[agent_id]}",
                     "max_threads = 1",
                     "",
                     "[sandbox_workspace_write]",
@@ -113,6 +124,8 @@ def test_managed_native_research_roster_rejects_extra_toml(
                         'writable_roots = ["@RESEARCH_V2_ROOT@"]'
                         if agent_id == "experiment_runner"
                         else 'writable_roots = ["@HYPOTHESIS_WORKTREES_ROOT@"]'
+                        if agent_id == "implementer"
+                        else "writable_roots = []"
                     ),
                 ]
             ),
@@ -148,19 +161,22 @@ def test_native_research_role_config_renders_absolute_layer_paths(
         (layer_dir / f"{agent_id}.toml").write_text(
             "\n".join(
                 [
-                    'model = "gpt-5.6-luna"',
+                    f'model = "{codex_agents.NATIVE_RESEARCH_AGENT_MODELS[agent_id]}"',
                     'model_reasoning_effort = "xhigh"',
                     'service_tier = "fast"',
                     'developer_instructions = "bounded"',
+                    'sandbox_mode = "read-only"' if agent_id == "reviewer" else "",
                     "[agents]",
-                    "max_depth = 1",
+                    f"max_depth = {codex_agents.NATIVE_RESEARCH_AGENT_MAX_DEPTH[agent_id]}",
                     "max_threads = 1",
                     "",
                     "[sandbox_workspace_write]",
                     "network_access = true",
                     f'writable_roots = ["{hypothesis_root}"]'
                     if agent_id == "implementer"
-                    else f'writable_roots = ["{research_root}"]',
+                    else f'writable_roots = ["{research_root}"]'
+                    if agent_id == "experiment_runner"
+                    else "writable_roots = []",
                 ]
             ),
             encoding="utf-8",
@@ -256,15 +272,16 @@ def test_native_research_stage_rejects_unsupported_standalone_config_file(
             '"@HYPOTHESIS_WORKTREES_ROOT@"' if agent_id == "implementer" else '"@RESEARCH_V2_ROOT@"'
         )
         (layer_dir / f"{agent_id}.toml").write_text(
-            f"""model = "gpt-5.6-luna"
+            f"""model = "{codex_agents.NATIVE_RESEARCH_AGENT_MODELS[agent_id]}"
 model_reasoning_effort = "xhigh"
 service_tier = "fast"
+{('sandbox_mode = "read-only"' if agent_id == "reviewer" else "")}
 [agents]
-max_depth = 1
+max_depth = {codex_agents.NATIVE_RESEARCH_AGENT_MAX_DEPTH[agent_id]}
 max_threads = 1
 [sandbox_workspace_write]
 network_access = true
-writable_roots = [{layer_roots}]
+writable_roots = [{layer_roots if agent_id != "reviewer" else ""}]
 """,
             encoding="utf-8",
         )

@@ -1,0 +1,21 @@
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+service_tier = "fast"
+sandbox_mode = "read-only"
+developer_instructions = '''
+Review one committed research attempt read-only using only the exact bundle and evidence
+paths named in the spawn message. Never edit files, spawn children, invoke gateway controls,
+retry, repair, or change the owner ledger. Your terminal response must be exactly the bare JSON
+object specified in the bundle's instructions.md, with exactly the five keys verdict,
+attempt_id, commit, spec_sha256, and findings. Verdict is PASS or FAIL; use the exact
+attempt_id, commit, and spec_sha256 given there; findings is an array of nonempty strings.
+Include no markdown, envelope, or surrounding prose.
+'''
+
+[agents]
+max_depth = 0
+max_threads = 1
+
+[sandbox_workspace_write]
+network_access = true
+writable_roots = []

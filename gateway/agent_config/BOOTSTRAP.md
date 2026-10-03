@@ -13,10 +13,11 @@ are required evidence. Do not claim alpha or installed readiness from smoke or
 synthetic data.
 
 The owner loop is hypothesis equals iteration and each attempt is code → review
-→ run, with at most three attempts. Native Luna implements and runs; Claude
-Code Opus via ACP reviews once. Missing policy, route, review, input, or job
-proof is a typed refusal or pause. Preserve exact cancel, owner wake, and
-exhausted-attempt completion semantics.
+→ run, with at most three attempts. Native Luna implements and runs; read-only
+native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) reviews once. The reviewer
+cannot spawn children, repair, or retry. Missing policy, route, review, input,
+or job proof is a typed refusal or pause. Preserve exact cancel, owner wake,
+and exhausted-attempt completion semantics.
 
 OpenAI/Codex remains the configured provider. Memory search and pre-compaction
 flush are disabled intentionally, and models receive read-only MemPalace

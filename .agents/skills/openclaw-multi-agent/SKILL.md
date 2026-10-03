@@ -88,8 +88,8 @@ prompts or per-spawn overrides.
 > **Deployment policy (this repo):** `main` is pinned to
 > `openai/gpt-5.4`; `research-orchestrator` is pinned to
 > `openai/gpt-6-astra`; native Luna is a bounded OpenAI/Codex child route, not
-> an ad-hoc model override. Reviewer-only Opus is an explicit Claude Code ACP
-> exception, not an OpenAI OAuth route. Example models elsewhere in this file
+> an ad-hoc model override. Native Sol (`openai/gpt-5.6-sol`) is the bounded,
+> read-only reviewer at xhigh/fast. Example models elsewhere in this file
 > are illustrative only.
 
 ### `agent-per-agent-identity`
@@ -140,9 +140,9 @@ Configure shared defaults, then override per agent:
 ## 2. Session Tools — Inter-Agent Communication (CRITICAL)
 
 > **Deployment policy (this repo):** `main` denies `exec` and ALL `sessions_*`
-> tools. `research-orchestrator` has a bounded `sessions_spawn` exception for
-> managed research dispatch, including the explicit Claude Code ACP review;
-> its Luna children use native Codex `spawn_agent`. Generic OpenClaw session
+> tools. `research-orchestrator` delegates managed research children through
+> native Codex `spawn_agent`, including the read-only Sol reviewer; its Luna
+> children remain bounded native roles. Generic OpenClaw session
 > orchestration below does not apply to that owner.
 
 ### `st-four-tools`

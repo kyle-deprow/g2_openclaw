@@ -96,13 +96,11 @@ OPENCLAW_BIN_RESOLVED=""
 OPENCLAW_VERSION_RESOLVED=""
 CODEX_APP_SERVER_PACKAGE_ROOT=""
 CODEX_APP_SERVER_CLI_RESOLVED=""
-ACPX_ADAPTER_BIN=""
-RESEARCH_REVIEWER_LAUNCHER="${REPO_ROOT}/scripts/research-reviewer-cli.py"
 MEMPALACE_READONLY_WRAPPER_BASENAME="mempalace-readonly-server.py"
 # Do not add an explicit owner allow/deny list.  The native Codex harness
 # treats finite allowlists and unsafe denies as restricted; the owner stays on
 # profile=full while MCP server projections remain main-only.
-CODEX_NATIVE_STAGE_AGENT_IDS=("implementer" "experiment_runner")
+CODEX_NATIVE_STAGE_AGENT_IDS=("implementer" "experiment_runner" "reviewer")
 # These are the exact research-role files that earlier route deployments may
 # have installed in a scoped Codex runtime.  The owner config registers the
 # active child layers; remove only this known managed duplicate set from old
@@ -408,13 +406,6 @@ REPO_CONFIG_PREFLIGHT_DIR=""
 REPO_CONFIG_PREFLIGHT_HASH=""
 REPO_CONFIG_PREFLIGHT_BYTES=""
 REPO_CONFIG_PREFLIGHT_IDENTITY=""
-ACPX_CONFIG_PREFLIGHT_COPY=""
-ACPX_CONFIG_PREFLIGHT_IDENTITY=""
-ACPX_CONFIG_PREFLIGHT_HASH=""
-ACPX_CONFIG_PREFLIGHT_BYTES=""
-ACPX_CONFIG_SOURCE_IDENTITY=""
-ACPX_CONFIG_SOURCE_HASH=""
-ACPX_CONFIG_SOURCE_BYTES=""
 PUBLISHED_OPENCLAW_CONFIG_IDENTITY=""
 
 run_openclaw_cli() {
@@ -635,87 +626,12 @@ run_openclaw_cli_for_guarded_repo_config() {
   return "${status}"
 }
 
-prepare_acpx_config_preflight_copy() {
-  local load_paths_state local_identity local_hash local_bytes
-  if [[ -n "${ACPX_CONFIG_PREFLIGHT_COPY:-}" ]]; then
-    return 0
-  fi
-  ACPX_CONFIG_SOURCE_IDENTITY="$(guarded_regular_file_identity "${LOCAL_CONFIG}" "capturing local OpenClaw config identity before ACPX preflight")" || return 1
-  ACPX_CONFIG_SOURCE_HASH="$(file_sha256 "${LOCAL_CONFIG}")"
-  ACPX_CONFIG_SOURCE_BYTES="$(file_bytes "${LOCAL_CONFIG}")"
-  if ! load_paths_state="$(jq -e -r '
-    if .plugins?.load?.paths? == null then "absent" else "present" end
-  ' "${LOCAL_CONFIG}" 2>/dev/null)"; then
-    echo "ERROR: Local OpenClaw config cannot be parsed for ACPX preflight." >&2
-    return 1
-  fi
-  if [[ "${load_paths_state}" == "absent" ]]; then
-    ACPX_CONFIG_PREFLIGHT_COPY="${LOCAL_CONFIG}"
-    return 0
-  fi
-
-  prepare_repo_config_preflight_copy || return 1
-  ACPX_CONFIG_PREFLIGHT_COPY="$(mktemp "${REPO_CONFIG_PREFLIGHT_DIR}/openclaw.acpx-preflight.XXXXXX.json")"
-  guard_destination_path_chain "${ACPX_CONFIG_PREFLIGHT_COPY}" "writing ACPX preflight config without machine-local plugin load paths" || return 1
-  if ! jq '
-    del(.plugins.load.paths)
-    | if .plugins.load == {} then del(.plugins.load) else . end
-  ' "${LOCAL_CONFIG}" > "${ACPX_CONFIG_PREFLIGHT_COPY}"; then
-    echo "ERROR: Could not create the ACPX preflight config without local plugin load paths." >&2
-    return 1
-  fi
-  if ! verify_guarded_regular_file_identity_unchanged "${LOCAL_CONFIG}" "${ACPX_CONFIG_SOURCE_IDENTITY}" "creating ACPX preflight config"; then
-    return 1
-  fi
-  local_hash="$(file_sha256 "${LOCAL_CONFIG}")"
-  local_bytes="$(file_bytes "${LOCAL_CONFIG}")"
-  if [[ "${local_hash}" != "${ACPX_CONFIG_SOURCE_HASH}" || "${local_bytes}" != "${ACPX_CONFIG_SOURCE_BYTES}" ]]; then
-    echo "ERROR: Local OpenClaw config changed while creating ACPX preflight config." >&2
-    return 1
-  fi
-  guarded_chmod 0600 "${ACPX_CONFIG_PREFLIGHT_COPY}" "chmod ACPX preflight config ${ACPX_CONFIG_PREFLIGHT_COPY}" || return 1
-  ACPX_CONFIG_PREFLIGHT_IDENTITY="$(guarded_regular_file_identity "${ACPX_CONFIG_PREFLIGHT_COPY}" "capturing ACPX preflight config identity")" || return 1
-  ACPX_CONFIG_PREFLIGHT_HASH="$(file_sha256 "${ACPX_CONFIG_PREFLIGHT_COPY}")"
-  ACPX_CONFIG_PREFLIGHT_BYTES="$(file_bytes "${ACPX_CONFIG_PREFLIGHT_COPY}")"
-}
-
-verify_acpx_config_preflight_unchanged() {
-  local context="$1" current_hash current_bytes
-  if ! verify_guarded_regular_file_identity_unchanged "${LOCAL_CONFIG}" "${ACPX_CONFIG_SOURCE_IDENTITY}" "${context} local config"; then
-    return 1
-  fi
-  current_hash="$(file_sha256 "${LOCAL_CONFIG}")"
-  current_bytes="$(file_bytes "${LOCAL_CONFIG}")"
-  if [[ "${current_hash}" != "${ACPX_CONFIG_SOURCE_HASH}" || "${current_bytes}" != "${ACPX_CONFIG_SOURCE_BYTES}" ]]; then
-    echo "ERROR: External OpenClaw CLI changed local config during ${context}." >&2
-    return 1
-  fi
-  if [[ "${ACPX_CONFIG_PREFLIGHT_COPY}" != "${LOCAL_CONFIG}" ]]; then
-    if ! verify_guarded_regular_file_identity_unchanged "${ACPX_CONFIG_PREFLIGHT_COPY}" "${ACPX_CONFIG_PREFLIGHT_IDENTITY}" "${context} preflight config"; then
-      return 1
-    fi
-    current_hash="$(file_sha256 "${ACPX_CONFIG_PREFLIGHT_COPY}")"
-    current_bytes="$(file_bytes "${ACPX_CONFIG_PREFLIGHT_COPY}")"
-    if [[ "${current_hash}" != "${ACPX_CONFIG_PREFLIGHT_HASH}" || "${current_bytes}" != "${ACPX_CONFIG_PREFLIGHT_BYTES}" ]]; then
-      echo "ERROR: External OpenClaw CLI changed ACPX preflight config during ${context}." >&2
-      return 1
-    fi
-  fi
-}
-
 cleanup_repo_config_preflight_copy() {
   if [[ -n "${REPO_CONFIG_PREFLIGHT_DIR:-}" ]]; then
     guarded_rm_rf "${REPO_CONFIG_PREFLIGHT_DIR}" "cleaning guarded repo OpenClaw config preflight directory ${REPO_CONFIG_PREFLIGHT_DIR}" || return 1
   fi
   REPO_CONFIG_PREFLIGHT_COPY=""
   REPO_CONFIG_PREFLIGHT_DIR=""
-  ACPX_CONFIG_PREFLIGHT_COPY=""
-  ACPX_CONFIG_PREFLIGHT_IDENTITY=""
-  ACPX_CONFIG_PREFLIGHT_HASH=""
-  ACPX_CONFIG_PREFLIGHT_BYTES=""
-  ACPX_CONFIG_SOURCE_IDENTITY=""
-  ACPX_CONFIG_SOURCE_HASH=""
-  ACPX_CONFIG_SOURCE_BYTES=""
 }
 
 push_test_checkpoint() {
@@ -1161,175 +1077,6 @@ require_openclaw_supported() {
   OPENCLAW_VERSION_RESOLVED="${version_line}"
   export OPENCLAW_BIN="${OPENCLAW_BIN_RESOLVED}"
   return 0
-}
-
-require_acpx_plugin_exact() {
-  local inventory plugin_path resolved
-  if ! prepare_acpx_config_preflight_copy; then
-    return 1
-  fi
-  if ! inventory="$(run_openclaw_cli_for_config "${ACPX_CONFIG_PREFLIGHT_COPY}" plugins inspect acpx --runtime --json)"; then
-    echo "ERROR: Unable to inspect the installed ACPX plugin; refusing network or install fallback." >&2
-    printf '%s\n' "${inventory}" >&2
-    return 1
-  fi
-  if ! verify_acpx_config_preflight_unchanged "ACPX plugin inspection"; then
-    return 1
-  fi
-  if plugin_path="$(printf '%s\n' "${inventory}" | jq -se -r --arg version "2026.8.1" '
-    if length != 1 then
-      empty
-    else
-      [
-        .[0].plugin
-        | select(
-            .id == "acpx"
-            and .packageName == "@openclaw/acpx"
-            and .packageVersion == $version
-            and .version == $version
-            and .enabled == true
-            and .status == "loaded"
-            and (.rootDir | strings | startswith("/"))
-          )
-        | .rootDir
-      ]
-      | first // empty
-    end
-  ' 2>/dev/null)"; then
-    :
-  else
-    plugin_path=""
-  fi
-  if [[ -z "${plugin_path}" ]]; then
-    echo "ERROR: Installed @openclaw/acpx version 2026.8.1 was not found; refusing network or install fallback." >&2
-    return 1
-  fi
-  if ! resolved="$(env -u NODE_OPTIONS node --input-type=module - "${plugin_path}" <<'NODE'
-import fs from "node:fs";
-import path from "node:path";
-
-const reported = process.argv[2];
-if (!path.isAbsolute(reported)) throw new Error("reported ACPX rootDir must be absolute");
-const packageRoot = path.resolve(reported);
-const packageJsonPath = path.join(packageRoot, "package.json");
-const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
-if (packageJson.name !== "@openclaw/acpx" || packageJson.version !== "2026.8.1") {
-  throw new Error("reported ACPX path does not resolve to @openclaw/acpx 2026.8.1");
-}
-const adapterDependency = packageJson.dependencies?.["@agentclientprotocol/claude-agent-acp"];
-if (adapterDependency !== "0.70.0") {
-  throw new Error(`ACPX Claude adapter dependency must be 0.70.0, got ${adapterDependency || "<missing>"}`);
-}
-function stageRootFor(root) {
-  let nodeModulesRoot = root;
-  while (path.basename(nodeModulesRoot) !== "node_modules") {
-    const parent = path.dirname(nodeModulesRoot);
-    if (parent === nodeModulesRoot) throw new Error("reported ACPX rootDir is not inside node_modules");
-    nodeModulesRoot = parent;
-  }
-  return path.dirname(nodeModulesRoot);
-}
-const frozenRoot = stageRootFor(packageRoot);
-function isWithin(root, candidate) {
-  const relative = path.relative(root, candidate);
-  return !path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`);
-}
-function packageRootFor(packageName, ownerRoot) {
-  const segments = packageName.startsWith("@") ? packageName.split("/") : [packageName];
-  let searchRoot = path.resolve(ownerRoot);
-  if (!isWithin(frozenRoot, searchRoot)) {
-    throw new Error(`${packageName} owner is outside the frozen dependency tree`);
-  }
-  while (true) {
-    const candidate = path.join(searchRoot, "node_modules", ...segments);
-    if (fs.existsSync(path.join(candidate, "package.json"))) return candidate;
-    if (searchRoot === frozenRoot) break;
-    const parent = path.dirname(searchRoot);
-    if (!isWithin(frozenRoot, parent)) break;
-    searchRoot = parent;
-  }
-  throw new Error(`${packageName} is not installed in the declared dependency tree`);
-}
-function packageJsonAt(packageName, ownerRoot) {
-  const root = packageRootFor(packageName, ownerRoot);
-  return { root, path: path.join(root, "package.json") };
-}
-const adapter = packageJsonAt("@agentclientprotocol/claude-agent-acp", packageRoot);
-const adapterRoot = adapter.root;
-const adapterPackageJsonPath = adapter.path;
-const adapterPackageJson = JSON.parse(fs.readFileSync(adapterPackageJsonPath, "utf8"));
-if (adapterPackageJson.name !== "@agentclientprotocol/claude-agent-acp" || adapterPackageJson.version !== "0.70.0") {
-  throw new Error(`Claude ACP adapter must be @agentclientprotocol/claude-agent-acp 0.70.0, got ${adapterPackageJson.version || "<missing>"}`);
-}
-function resolveAdapterOwned(packageName) {
-  const declared = adapterPackageJson.dependencies?.[packageName];
-  if (typeof declared !== "string") {
-    throw new Error(`${packageName} must be declared by the Claude ACP adapter`);
-  }
-  const expectedVersions = {
-    "@agentclientprotocol/sdk": "1.3.0",
-    "@anthropic-ai/claude-agent-sdk": "0.3.232",
-  };
-  const expected = expectedVersions[packageName];
-  if (declared !== expected) {
-    const label = packageName === "@agentclientprotocol/sdk" ? "ACP SDK" : "Claude Agent SDK";
-    throw new Error(`Adapter ${label} dependency declaration does not match expected ${expected}, got ${declared}`);
-  }
-  return packageJsonAt(packageName, adapterRoot).path;
-}
-const pluginAcpxDeclarations = [
-  packageJson.dependencies?.acpx,
-  packageJson.optionalDependencies?.acpx,
-  packageJson.peerDependencies?.acpx,
-].filter((value) => typeof value === "string");
-for (const declared of pluginAcpxDeclarations) {
-  if (declared !== "0.13.1") {
-    throw new Error(`ACPX plugin dependency acpx must be 0.13.1, got ${declared || "<missing>"}`);
-  }
-}
-if (pluginAcpxDeclarations.length > 0) {
-  const pluginAcpxPackageJsonPath = packageJsonAt("acpx", packageRoot).path;
-  const pluginAcpxPackageJson = JSON.parse(fs.readFileSync(pluginAcpxPackageJsonPath, "utf8"));
-  if (pluginAcpxPackageJson.name !== "acpx" || pluginAcpxPackageJson.version !== "0.13.1") {
-    throw new Error(`ACPX plugin package must be acpx 0.13.1, got ${pluginAcpxPackageJson.version || "<missing>"}`);
-  }
-}
-const sdkPackageJsonPath = resolveAdapterOwned("@agentclientprotocol/sdk");
-const sdkPackageJson = JSON.parse(fs.readFileSync(sdkPackageJsonPath, "utf8"));
-if (sdkPackageJson.name !== "@agentclientprotocol/sdk" || sdkPackageJson.version !== "1.3.0") {
-  throw new Error(`Agent Client Protocol SDK must be 1.3.0, got ${sdkPackageJson.version || "<missing>"}`);
-}
-if (adapterPackageJson.dependencies?.["@agentclientprotocol/sdk"] !== sdkPackageJson.version) {
-  throw new Error("Adapter ACP SDK dependency declaration does not match the resolved package");
-}
-const claudeSdkPackageJsonPath = resolveAdapterOwned("@anthropic-ai/claude-agent-sdk");
-const claudeSdkPackageJson = JSON.parse(fs.readFileSync(claudeSdkPackageJsonPath, "utf8"));
-if (claudeSdkPackageJson.name !== "@anthropic-ai/claude-agent-sdk" || claudeSdkPackageJson.version !== "0.3.232") {
-  throw new Error(`Claude Agent SDK must be 0.3.232, got ${claudeSdkPackageJson.version || "<missing>"}`);
-}
-if (adapterPackageJson.dependencies?.["@anthropic-ai/claude-agent-sdk"] !== claudeSdkPackageJson.version) {
-  throw new Error("Adapter Claude Agent SDK dependency declaration does not match the resolved package");
-}
-const bin = typeof adapterPackageJson.bin === "string"
-  ? adapterPackageJson.bin
-  : adapterPackageJson.bin?.["claude-agent-acp"];
-if (typeof bin !== "string" || bin.length === 0) throw new Error("Claude ACP adapter has no claude-agent-acp bin entry");
-const adapterBin = path.resolve(adapterRoot, bin);
-if (!fs.existsSync(adapterBin) || !fs.statSync(adapterBin).isFile() || (fs.statSync(adapterBin).mode & 0o111) === 0) {
-  throw new Error(`Claude ACP adapter binary is missing or not executable: ${adapterBin}`);
-}
-process.stdout.write(`${adapterBin}\n`);
-NODE
-)"; then
-    echo "ERROR: Could not resolve the installed Claude ACP adapter from @openclaw/acpx; refusing network or install fallback." >&2
-    return 1
-  fi
-  ACPX_ADAPTER_BIN="${resolved}"
-  if [[ ! -x "${RESEARCH_REVIEWER_LAUNCHER}" ]]; then
-    echo "ERROR: Research reviewer launcher is missing or not executable: ${RESEARCH_REVIEWER_LAUNCHER}" >&2
-    return 1
-  fi
-  echo "ACPX plugin validated: @openclaw/acpx 2026.8.1; Claude adapter ${ACPX_ADAPTER_BIN}"
 }
 
 require_codex_runtime_exact() {
@@ -1857,9 +1604,11 @@ if [[ ! -f "${LOCAL_CONFIG}" ]]; then
   exit 1
 fi
 
-if ! require_acpx_plugin_exact; then
-  exit 1
-fi
+# Capture the live config identity before any CLI preflight or managed write.
+# This standalone guard replaces the retired ACPX preflight's safety check;
+# preserve the fail-closed boundary without retaining the old reviewer path.
+guarded_regular_file_identity "${LOCAL_CONFIG}" \
+  "capturing local OpenClaw config identity before preflight" >/dev/null || exit 1
 
 MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON="$(build_string_array_json "${MEMPALACE_READONLY_SERVER_AGENT_IDS[@]}")"
 G2_CONTROL_SERVER_AGENT_IDS_JSON="$(build_string_array_json "${G2_CONTROL_SERVER_AGENT_IDS[@]}")"
@@ -2131,7 +1880,11 @@ assemble_openclaw_config() {
       MODEL_PRIMARY="azure-oai-g2/gpt-5.4"
       ;;
     openrouter)
-      MODEL_PRIMARY="openrouter/${OPENROUTER_MODEL:-anthropic/claude-sonnet-4-20250514}"
+      if [[ -z "${OPENROUTER_MODEL:-}" ]]; then
+        echo "ERROR: OPENROUTER_MODEL is required when OPENCLAW_PROVIDER=openrouter; refusing an implicit model fallback." >&2
+        return 1
+      fi
+      MODEL_PRIMARY="openrouter/${OPENROUTER_MODEL}"
       ;;
     *)
       echo "ERROR: Unknown OPENCLAW_PROVIDER '${PROVIDER}'. Use 'codex', 'azure', or 'openrouter'." >&2
@@ -2161,8 +1914,7 @@ assemble_openclaw_config() {
     "${FASTEMBED_CACHE_PATH}" "${MEMPALACE_EMBEDDING_MODEL}" "${HF_HUB_OFFLINE}" \
     "${G2_CONTROL_MCP_MODULE}" "${RESEARCH_V2_ROOT}" \
     "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
-    "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" "${RESEARCH_REVIEWER_LAUNCHER}" \
-    "${ACPX_ADAPTER_BIN}")"; then
+    "${G2_CONTROL_SERVER_AGENT_IDS_JSON}")"; then
     return 1
   fi
   validate_migration_record "${MIGRATION_RECORD_DST}" || return 1
@@ -2249,19 +2001,18 @@ if ! echo "${MERGED}" | jq -e \
   --arg openclaw_port "${OPENCLAW_PORT}" \
   --argjson readonly_server_agents "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
   --argjson g2_server_agents "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" \
-  --arg launcher "${RESEARCH_REVIEWER_LAUNCHER}" \
-  --arg adapter "${ACPX_ADAPTER_BIN}" \
   --argjson main_openclaw_allow "${MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON}" '
   def denies: (.tools.deny // []);
   def main_allow: (.tools.allow // []);
   def expected_native_models: {"main": "openai/gpt-5.4", "research-orchestrator": $owner};
-  def expected_agent_ids: ((expected_native_models | keys) + ["claude"]);
+  def expected_agent_ids: (expected_native_models | keys);
   (.agents.defaults.thinkingDefault == "high")
   and (.agents.ownership == "explicit")
   and ((.agents | has("list")) | not)
   and ((.agents.entries | type) == "object")
   and all(.agents.entries | to_entries[]; (.value | type) == "object" and ((.value | has("id")) | not))
-  and ((.plugins.allow // []) | contains(["codex", "acpx"]))
+  and ((.plugins.allow // []) | contains(["codex", "openai"]))
+  and (((.plugins.allow // []) | index("acpx")) == null)
   and (.plugins.load.paths? == null)
   and (.plugins.entries.codex.enabled == true)
   and (.plugins.entries.codex.config.nativeToolSurfaceEnabled? == null)
@@ -2270,16 +2021,8 @@ if ! echo "${MERGED}" | jq -e \
   and (.plugins.entries.codex.config.appServer.sandbox != "danger-full-access")
   and (.plugins.entries.codex.config.appServer.defaultWorkspaceDir? != "/home/dev/.openclaw/autoresearch/model-workspaces")
   and (.plugins.entries.codex.config.appServer.networkProxy? == null)
-  and (.plugins.entries.acpx.enabled == true)
-  and .plugins.entries.acpx.config == {
-    "agents":{"claude":{"command":"/usr/bin/env","args":[("CLAUDE_CODE_EXECUTABLE=" + $launcher),$adapter]}},
-    "permissionMode":"approve-reads",
-    "nonInteractivePermissions":"fail",
-    "pluginToolsMcpBridge":false,
-    "openClawToolsMcpBridge":false,
-    "mcpServers":{}
-  }
-  and .acp == {"enabled":true,"dispatch":{"enabled":true},"backend":"acpx","allowedAgents":["claude"]}
+  and (.plugins.entries.acpx? == null)
+  and (.acp? == null)
   and (.agents.defaults.maxConcurrent == 2)
   and (.agents.defaults.subagents.maxConcurrent == 1)
   and (.agents.defaults.subagents.maxSpawnDepth == 1)
@@ -2311,24 +2054,17 @@ if ! echo "${MERGED}" | jq -e \
   })
   and (((.agents.entries // {}) | keys | sort) == (expected_agent_ids | sort))
   and all((.agents.entries // {}) | to_entries[];
-    (.key == "claude")
-    or (.value.model.primary == expected_native_models[.key]
+    (.value.model.primary == expected_native_models[.key]
+      and (.value.model.primary | startswith("openai/"))
       and .value.thinkingDefault == "high")
   )
-  and ([.agents.entries.claude | select(
-    .runtime == {"type":"acp","acp":{"agent":"claude","backend":"acpx","mode":"oneshot"}}
-    and (.model? == null)
-    and (.tools? == null)
-    and (.skills? == null)
-    and (.workspace? == null)
-  )] | length) == 1
   and ([.agents.entries.main | select(.tools.profile == "minimal" and main_allow == $main_openclaw_allow and (denies | contains(["exec", "sessions_spawn", "sessions_yield", "sessions_send", "sessions_list", "sessions_history", "agents_list"])))] | length) == 1
   and ([.agents.entries["research-orchestrator"] | select(
     .model.primary == $owner
     and .thinkingDefault == "high"
     and ((.skills // []) == ["research-loop"])
     and .tools == {"profile": "full"}
-    and ((.subagents.allowAgents? // []) == ["claude"])
+    and (((.subagents.allowAgents? // []) | length) == 0)
   )] | length) == 1
   and ([.agents.entries.main | select(
     .model.primary == "openai/gpt-5.4"
@@ -2340,10 +2076,10 @@ if ! echo "${MERGED}" | jq -e \
   )] | length) == 1
   ' >/dev/null; then
   echo "ERROR: Generated OpenClaw config violates the managed route invariants." >&2
-  echo "       Check ACPX wiring, research-orchestrator policy, main restrictions, model catalog, and bounded MCP projection." >&2
+  echo "       Check native OpenAI model policy, research-orchestrator policy, main restrictions, model catalog, and bounded MCP projection." >&2
   exit 1
 fi
-echo "Managed invariants validated: main interface, Astra research owner, ACPX Claude route, native Luna roster, strict concurrency caps, and bounded MCP projection."
+echo "Managed invariants validated: main interface, Astra research owner, native Luna/Sol roster, strict concurrency caps, and bounded MCP projection."
 
 validate_generated_openclaw_config() {
   local temp_config validate_json validate_status current_hash current_bytes
@@ -2598,8 +2334,8 @@ mapfile -t BOOTSTRAP_TARGETS < <(jq -r '
     else
       "workspace-\(.id)"
     end;
-  # ACP runtime-only roster entries are gateway dispatch registrations, not
-  # native workspaces. They must not receive bootstrap files or Codex layers.
+  # Runtime-only roster entries are gateway dispatch registrations, not native
+  # workspaces. They must not receive bootstrap files or Codex layers.
   [((.agents.entries // {}) | to_entries[] | select(.value.runtime? == null)
     | .value + {id: .key})
     | {agent: .id, workspace: workspace_target}]

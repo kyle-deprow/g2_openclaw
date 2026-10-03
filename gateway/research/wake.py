@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -14,8 +14,8 @@ from typing import Protocol
 from gateway.openclaw_client import OpenClawClient, OpenClawTransportError
 
 from .contracts import AttemptDecision, AttemptState, HypothesisState
-from .review_evidence import REVIEW_EFFORT
-from .store import ResearchStore
+from .host_records import HostRecordError, managed_native_databases
+from .store import ResearchStore, canonical_wake_key
 
 
 class WakeRejected(RuntimeError):
@@ -84,9 +84,20 @@ class OpenClawWakeSender:
 
 
 def _key(hypothesis_id: str, attempt_id: str | None, state: str, resume_seq: int) -> str:
-    return hashlib.sha256(
-        f"{hypothesis_id}|{attempt_id or ''}|{state}|{resume_seq}".encode()
-    ).hexdigest()
+    return canonical_wake_key(hypothesis_id, attempt_id, state, resume_seq)
+
+
+def _managed_native_review_paths() -> tuple[str, str] | None:
+    """Return concrete native stores or refuse to render a review command."""
+
+    configured = os.environ.get("RESEARCH_CORE_DATABASE")
+    if not configured:
+        return None
+    try:
+        stores = managed_native_databases(configured)
+    except HostRecordError:
+        return None
+    return str(stores.openclaw_database), str(stores.codex_state_database)
 
 
 def compose_wake(store: ResearchStore) -> WakePlan | None:
@@ -171,17 +182,34 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
         action = (
             f"dispatch coder; submit with `gateway-cli research implementation-submit "
             f"{attempt.attempt_id} --root ROOT --file impl.json --run-plan run-plan.json "
-            "--provenance-evidence provenance.json`"
+            "--provenance-evidence provenance.json`; on the completion callback, "
+            "verify the submitted implementation and stop this owner turn. Do not "
+            "reserve or spawn review from this OPENED callback; wait for the next "
+            "canonical IMPLEMENTED wake."
         )
     elif attempt.state == AttemptState.IMPLEMENTED:
-        action = (
-            f"reserve a committed review bundle with `gateway-cli research review-reserve {attempt.attempt_id} --root ROOT --bundle-dir BUNDLE --owner-key OWNER`, "
-            "spawn the exact ACP reviewer (runtime=acp, agentId=claude, mode=run, thread=false, "
-            f"cwd=BUNDLE, model=claude-opus-5, effort={REVIEW_EFFORT}, label=LABEL), record its child/run ACK with "
-            f"`gateway-cli research review-ack {attempt.attempt_id} --root ROOT --child-session-key CHILD --run-id RUN --mode run`, "
-            "then collect host evidence with "
-            f"`gateway-cli research review-collect {attempt.attempt_id} --root ROOT --core-database DB --acpx-sessions ACPX_SESSIONS_DIR --claude-projects PROJECTS`"
-        )
+        wake_key = _key(frozen.hypothesis_id, attempt.attempt_id, state, resume_seq)
+        native_paths = _managed_native_review_paths()
+        if native_paths is None:
+            action = (
+                "native review reviewer model=gpt-5.6-sol effort=xhigh is unavailable: "
+                "RESEARCH_CORE_DATABASE must resolve to the managed "
+                "<root>/state/openclaw.sqlite with validated OpenClaw and Codex stores; pause "
+                "instead of rendering a guessed database path; do not invoke spawn_agent"
+            )
+        else:
+            openclaw_database, codex_database = native_paths
+            action = (
+                f"reserve a committed review bundle with `gateway-cli research review-reserve {attempt.attempt_id} --root ROOT --bundle-dir BUNDLE --wake-key {wake_key} --owner-key OWNER --openclaw-database {openclaw_database}`, "
+                "then invoke the returned exact `spawn_arguments` through the native OpenClaw "
+                "collaboration.spawn_agent reviewer call (model=gpt-5.6-sol, effort=xhigh is "
+                "observed from the child runtime, not self-reported). Reconcile the official child "
+                "only from the completion callback after this owner turn has ended; yield/stop "
+                "immediately after spawn and never respawn from the same turn. "
+                f"ACK with `gateway-cli research review-reconcile {attempt.attempt_id} --root ROOT --openclaw-database {openclaw_database} --codex-state-database {codex_database}`, "
+                "then collect host evidence with "
+                f"`gateway-cli research review-collect {attempt.attempt_id} --root ROOT --openclaw-database {openclaw_database} --codex-state-database {codex_database}`"
+            )
     elif attempt.state == AttemptState.REVIEW_PASSED:
         action = f"run with `gateway-cli research run {attempt.attempt_id} --root ROOT`"
     else:

@@ -1,29 +1,21 @@
+"""Native Sol review evidence, immutable bundle, and state-transition tests."""
+
 from __future__ import annotations
 
 import json
-import shutil
 import sqlite3
 import subprocess
+import time
 from dataclasses import replace
-from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote
 
-import gateway.research.review_evidence as review_evidence
 import pytest
-from gateway.cli import app
 from gateway.openclaw_client import OpenClawTransportError
-from gateway.research.contracts import (
-    Attempt,
-    AttemptState,
-    HypothesisDecision,
-    HypothesisSpec,
-    ImplementationRecord,
-    ReviewRecord,
-    RunPlan,
-)
+from gateway.research import review_evidence
+from gateway.research.contracts import AttemptState, HypothesisSpec, ReviewEvidence, RunPlan
 from gateway.research.review_evidence import (
     BundleError,
+    ReviewEvidenceError,
     ReviewPending,
     ReviewReservation,
     ReviewUnresolved,
@@ -33,75 +25,33 @@ from gateway.research.review_evidence import (
     reconcile_review,
     reserve_review,
 )
-from gateway.research.store import ResearchStore, StoreConflict
-from typer.testing import CliRunner
+from gateway.research.store import ResearchStore, StoreConflict, canonical_wake_key
 
-from tests.gateway.research.conftest import provenance_evidence, run_plan
-
-runner = CliRunner()
-
-
-def _queue(store: ResearchStore, attempt_id: str, job_id: str) -> Attempt:
-    attempt = store.get_attempt(attempt_id)
-    run_dir = store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id / "run"
-    plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
-    return store.queue_run_request(attempt_id, job_id, run_dir, 30, 256, run_plan=plan)
+from tests.gateway.research.native_review_fixtures import (
+    OWNER_RUN_ID,
+    OWNER_SESSION,
+    OWNER_THREAD_ID,
+    ROTATED_OWNER_THREAD_ID,
+    add_announce,
+    create_native_stores,
+    create_owner_database,
+    prepare_review,
+)
 
 
 def _setup(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> tuple[ResearchStore, Path, HypothesisSpec, str, Path]:
-    store, source, hypothesis = campaign
-    evidence = tmp_path / "tests.json"
-    evidence.write_text('{"pytest":"pass"}\n', encoding="utf-8")
-    store.freeze(hypothesis.hypothesis_id)
-    attempt = store.open_attempt(hypothesis.hypothesis_id, source)
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    record = ImplementationRecord(
-        attempt.attempt_id,
-        commit,
-        ("python", "-m", "target"),
-        str(evidence),
-        "reported-coder",
-        "high",
-        "standard",
-        "2026-01-01T00:00:00Z",
-    )
-    store.submit_implementation(
-        attempt.attempt_id,
-        record,
-        run_plan=run_plan(store, attempt, record),
-        containment_provenance=provenance_evidence(attempt.attempt_id, record.commit),
-    )
-    bundle = tmp_path / "review-bundle"
-    return store, source, hypothesis, attempt.attempt_id, bundle
+    from tests.gateway.research.native_review_fixtures import _setup as fixture_setup
+
+    return fixture_setup(campaign, tmp_path)
 
 
-def _reserve_legacy_bundle(
-    store: ResearchStore, attempt_id: str, bundle: Path
-) -> ReviewReservation:
-    review_evidence.build_review_bundle(store, attempt_id, bundle)
-    bundle.chmod(0o755)
-    (bundle / "containment-provenance.json").unlink()
-    review_evidence._readonly_tree(bundle)
+def _queue(store: ResearchStore, attempt_id: str, job_id: str) -> object:
     attempt = store.get_attempt(attempt_id)
-    hypothesis = store.get_hypothesis(attempt.hypothesis_id)
-    assert attempt.commit is not None
-    reservation = ReviewReservation(
-        attempt_id=attempt_id,
-        commit=attempt.commit,
-        hypothesis_spec_sha256=hypothesis.spec_sha256,
-        bundle_dir=str(bundle.resolve()),
-        bundle_sha256=review_evidence._bundle_digest(bundle),
-        reserved_at="2026-01-01T00:00:00Z",
-        owner_session_key="owner",
-        label=f"{attempt_id}-legacy",
-        reservation_nonce="legacy",
-    )
-    store.insert_review_evidence(
-        attempt_id, "review_reservation", reservation.to_json(), "review_reserved"
-    )
-    return reservation
+    run_dir = store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id / "run"
+    plan = RunPlan.from_json(store.evidence(attempt_id, "run_plan"))
+    return store.queue_run_request(attempt_id, job_id, run_dir, 30, 256, run_plan=plan)
 
 
 def _commit_source(source: Path, message: str) -> None:
@@ -111,237 +61,34 @@ def _commit_source(source: Path, message: str) -> None:
     source.chmod(0o555)
 
 
-def _host_fixture(
-    store: ResearchStore,
-    attempt_id: str,
-    bundle: Path,
-    tmp_path: Path,
-    *,
-    status: str = "succeeded",
-    verdict: str = "PASS",
-    findings: tuple[str, ...] = (),
-) -> tuple[Path, Path, Path]:
-    reservation_payload = json.loads(store.evidence(attempt_id, "review_reservation"))
-    label = str(reservation_payload["label"])
-    reserved_at = datetime.fromisoformat(
-        str(reservation_payload["reserved_at"]).replace("Z", "+00:00")
+def _reserve_native(
+    store: ResearchStore, attempt_id: str, bundle: Path, tmp_path: Path
+) -> ReviewReservation:
+    owner_database = create_owner_database(
+        tmp_path / "owner.sqlite", started_at_ms=int(time.time() * 1000) - 1_000
     )
-    reserved_ms = int(reserved_at.timestamp() * 1000)
-    core = tmp_path / "openclaw.sqlite"
-    child_key = "agent:claude:acp:child"
-    run_id = "run-1"
-    session_uuid = "84785a20-b278-4d4a-9c62-fa35e5bb9928"
-    with sqlite3.connect(core) as conn:
-        conn.executescript(
-            """
-            CREATE TABLE task_runs(
-              task_id TEXT, runtime TEXT, task_kind TEXT, source_id TEXT,
-              requester_session_key TEXT, owner_key TEXT, scope_kind TEXT,
-              child_session_key TEXT, agent_id TEXT, requester_agent_id TEXT,
-              run_id TEXT, label TEXT, status TEXT, created_at INTEGER,
-              started_at INTEGER, ended_at INTEGER
-            );
-            CREATE TABLE subagent_runs (
-              run_id TEXT NOT NULL PRIMARY KEY,
-              child_session_key TEXT NOT NULL,
-              controller_session_key TEXT,
-              requester_session_key TEXT NOT NULL,
-              created_at INTEGER NOT NULL,
-              payload_json TEXT NOT NULL DEFAULT '{}'
-            ) STRICT;
-            """
-        )
-        conn.execute(
-            "INSERT INTO task_runs VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                "task-1",
-                "acp",
-                "review",
-                None,
-                "owner",
-                "owner",
-                "session",
-                child_key,
-                "claude",
-                None,
-                run_id,
-                label,
-                status,
-                reserved_ms + 1000,
-                reserved_ms + 2000,
-                reserved_ms + 3000,
-            ),
-        )
-        conn.commit()
-    sessions = tmp_path / "acpx-sessions"
-    sessions.mkdir()
-    record_uuid = "10551e01-0503-456f-9e61-6993c912d478"
-    record = {
-        "schema": "acpx.session.v1",
-        "acpx_record_id": f"{child_key}:oneshot:{record_uuid}",
-        "acp_session_id": session_uuid,
-        "cwd": str(bundle),
-        "name": child_key,
-        "created_at": (reserved_at + timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
-        "last_used_at": (reserved_at + timedelta(seconds=3)).isoformat().replace("+00:00", "Z"),
-        "last_request_id": run_id,
-        "closed": True,
-        "closed_at": (reserved_at + timedelta(seconds=4)).isoformat().replace("+00:00", "Z"),
-        "title": f"review {attempt_id}",
-        "messages": [{"User": {"content": []}}],
-        "acpx": {
-            "current_model_id": "opus[1m]",
-            "available_models": [
-                "default",
-                "opus[1m]",
-                "claude-fable-5-1[1m]",
-                "sonnet",
-                "haiku",
-            ],
-            "model_control": "config_option",
-            "config_options": [
-                {"id": "mode", "currentValue": "default"},
-                {"id": "model", "currentValue": "opus[1m]"},
-                {"id": "effort", "name": "Effort", "currentValue": "high"},
-                {"id": "fast", "currentValue": "off"},
-            ],
-            "session_options": {"model": "claude-opus-5"},
-        },
-    }
-    record_path = sessions / (quote(f"{child_key}:oneshot:{record_uuid}", safe="") + ".json")
-    record_path.write_text(json.dumps(record), encoding="utf-8")
-    encoded = "".join(char if char.isalnum() and char.isascii() else "-" for char in str(bundle))
-    project = tmp_path / "projects" / encoded
-    project.mkdir(parents=True)
-    event_time = (reserved_at + timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
-    verdict_object = {
-        "verdict": verdict,
-        "attempt_id": attempt_id,
-        "commit": str(reservation_payload["commit"]),
-        "spec_sha256": str(reservation_payload["hypothesis_spec_sha256"]),
-        "findings": list(findings),
-    }
-    transcript = {
-        "type": "assistant",
-        "sessionId": session_uuid,
-        "cwd": str(bundle),
-        "effort": "high",
-        "timestamp": event_time,
-        "message": {
-            "model": "claude-opus-5",
-            "role": "assistant",
-            "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": json.dumps(verdict_object)}],
-        },
-    }
-    (project / f"{session_uuid}.jsonl").write_text(json.dumps(transcript) + "\n", encoding="utf-8")
-    return core, sessions, tmp_path / "projects"
-
-
-def _transcript_path(projects: Path) -> Path:
-    paths = list(projects.rglob("*.jsonl"))
-    assert len(paths) == 1
-    return paths[0]
-
-
-def _insert_subagent(core: Path, label: str, reserved_ms: int) -> None:
-    payload = {
-        "runId": "run-1",
-        "taskRunId": "run-1",
-        "childSessionKey": "agent:claude:acp:child",
-        "controllerSessionKey": "owner",
-        "requesterSessionKey": "owner",
-        "requesterAgentId": "research-orchestrator",
-        "spawnMode": "run",
-        "label": label,
-        "createdAt": reserved_ms + 1000,
-        "execution": {
-            "status": "terminal",
-            "startedAt": reserved_ms + 2000,
-            "endedAt": reserved_ms + 3000,
-            "outcome": {"status": "ok"},
-        },
-    }
-    with sqlite3.connect(core) as conn:
-        conn.execute(
-            """
-            INSERT INTO subagent_runs (
-              run_id, child_session_key, controller_session_key,
-              requester_session_key, created_at, payload_json
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "run-1",
-                "agent:claude:acp:child",
-                "owner",
-                "owner",
-                reserved_ms + 1000,
-                json.dumps(payload),
-            ),
-        )
-
-
-def _prepare_review(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-    tmp_path: Path,
-    *,
-    status: str = "succeeded",
-    verdict: str = "PASS",
-    findings: tuple[str, ...] = (),
-) -> tuple[ResearchStore, str, Path, Path, Path, Path]:
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reserve_review(store, attempt_id, bundle, "owner")
-    acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
-    core, sessions, projects = _host_fixture(
+    _status, resume_seq = store.campaign()
+    wake_key = canonical_wake_key("H0001", attempt_id, "IMPLEMENTED", resume_seq)
+    if store.wake_row(wake_key) is None:
+        assert store.reserve_wake(wake_key, attempt_id, "IMPLEMENTED", resume_seq)
+        store.complete_wake(wake_key, OWNER_RUN_ID)
+    return reserve_review(
         store,
         attempt_id,
         bundle,
-        tmp_path,
-        status=status,
-        verdict=verdict,
-        findings=findings,
+        OWNER_SESSION,
+        wake_pending_key=wake_key,
+        openclaw_database=owner_database,
     )
-    return store, attempt_id, bundle, core, sessions, projects
 
 
-def test_bundle_aggregate_budget_is_128_mib() -> None:
+def test_bundle_limits_are_unchanged() -> None:
     assert review_evidence.MAX_BUNDLE_BYTES == 128 * 1024 * 1024
-
-
-def test_bundle_per_file_and_test_evidence_limits_remain_8_mib() -> None:
     assert review_evidence.MAX_BUNDLE_FILE_BYTES == 8 * 1024 * 1024
     assert review_evidence.MAX_TEST_EVIDENCE_BYTES == 8 * 1024 * 1024
 
 
-def test_bundle_digest_allows_root_generated_patch_above_file_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 4)
-    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", 8)
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
-    (bundle / "diff.patch").write_bytes(b"patch!!")
-    (bundle / "instructions.md").write_bytes(b"i")
-
-    digest = review_evidence._bundle_digest(bundle)
-
-    assert len(digest) == 64
-
-
-def test_bundle_digest_rejects_root_generated_patch_over_aggregate_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 4)
-    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", 8)
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
-    (bundle / "diff.patch").write_bytes(b"patch!!!!")
-
-    with pytest.raises(BundleError):
-        review_evidence._bundle_digest(bundle)
-
-
-def test_bundle_digest_rejects_aggregate_overflow_even_when_each_file_fits(
+def test_bundle_digest_rejects_aggregate_overflow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 4)
@@ -350,297 +97,255 @@ def test_bundle_digest_rejects_aggregate_overflow_even_when_each_file_fits(
     bundle.mkdir()
     (bundle / "diff.patch").write_bytes(b"patch!")
     (bundle / "instructions.md").write_bytes(b"iii")
-
     with pytest.raises(BundleError, match="review bundle exceeds its size limit"):
         review_evidence._bundle_digest(bundle)
 
 
-@pytest.mark.parametrize("relative", ["source/diff.patch", "nested/diff.patch"])
-def test_bundle_digest_keeps_non_root_diff_namesakes_on_file_cap(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+def test_bundle_digest_enforces_per_file_limit_and_rejects_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 4)
-    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", 8)
     bundle = tmp_path / "bundle"
-    (bundle / Path(relative).parent).mkdir(parents=True)
-    (bundle / "diff.patch").write_bytes(b"p")
-    (bundle / relative).write_bytes(b"large")
-
-    with pytest.raises(BundleError):
+    bundle.mkdir()
+    (bundle / "instructions.md").write_bytes(b"large")
+    with pytest.raises(BundleError, match="bounded regular file"):
+        review_evidence._bundle_digest(bundle)
+    (bundle / "instructions.md").unlink()
+    target = tmp_path / "target"
+    target.write_bytes(b"safe")
+    (bundle / "instructions.md").symlink_to(target)
+    with pytest.raises(BundleError, match="symlink"):
         review_evidence._bundle_digest(bundle)
 
 
-def test_real_bundle_build_and_revalidation_accept_generated_patch_above_file_cap(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_reserved_bundle_rejects_untracked_nested_and_excluded_tampering(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
-    _store, source, _hypothesis = campaign
+    store, _attempt_id, bundle, native = prepare_review(campaign, tmp_path)
+    source = bundle / "source"
+    bundle.chmod(0o755)
     source.chmod(0o755)
-    for index in range(20):
-        (source / f"generated-{index:02d}.txt").write_text("x" * 96 + "\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=source, check=True)
-    subprocess.run(["git", "commit", "-qm", "generated patch"], cwd=source, check=True)
+    source.mkdir(exist_ok=True)
+    (source / "nested").mkdir()
+    (source / "nested" / "untracked.py").write_text("forged\n", encoding="utf-8")
+    (source / "nested" / "untracked.py").chmod(0o444)
+    (source / "nested").chmod(0o555)
     source.chmod(0o555)
-
-    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_FILE_BYTES", 2048)
-    monkeypatch.setattr(review_evidence, "MAX_BUNDLE_BYTES", 64 * 1024)
-    store, source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    attempt = store.get_attempt(attempt_id)
-    expected_diff = subprocess.check_output(
-        ["git", "diff", "--binary", _hypothesis.base_commit, str(attempt.commit)], cwd=source
+    bundle.chmod(0o555)
+    result = collect_review(
+        store, _attempt_id, native.openclaw_database, native.codex_state_database
     )
-    assert len(expected_diff) > review_evidence.MAX_BUNDLE_FILE_BYTES
-
-    reservation = reserve_review(store, attempt_id, bundle, "owner")
-    replay = reserve_review(store, attempt_id, bundle, "owner")
-
-    assert (bundle / "diff.patch").read_bytes() == expected_diff
-    assert replay.bundle_sha256 == reservation.bundle_sha256
+    assert result.state is AttemptState.REVIEW_FAILED
 
 
-def test_default_bundle_instructions_include_parseable_strict_verdict_example(
+def test_reserved_bundle_rejects_frozen_test_evidence_and_run_plan_mutation(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
-    store, _source, hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-
-    reservation = reserve_review(store, attempt_id, bundle, "owner")
-    instructions = (bundle / "instructions.md").read_text()
-    marker = "Valid JSON example:\n"
-    before, separator, example = instructions.partition(marker)
-
-    assert separator == marker
-    assert "findings must be an array of nonempty strings" in before.lower()
-    assert "containment-provenance.json" in before
-    assert (
-        "containment-provenance.json is the host-verified in-sandbox import provenance "
-        "for the tested commit."
-    ) in before
-    payload = json.loads(example)
-    assert set(payload) == {"verdict", "attempt_id", "commit", "spec_sha256", "findings"}
-    assert payload["verdict"] in {"PASS", "FAIL"}
-    assert payload["attempt_id"] == attempt_id
-    assert payload["commit"] == reservation.commit
-    assert payload["spec_sha256"] == hypothesis.spec_sha256
-    assert payload["findings"] == [
-        "severity=high; location=source/example.py:1; explanation=Example finding."
-    ]
-
-    event = {
-        "message": {
-            "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": example}],
-        }
-    }
-    verdict, findings, _ = review_evidence._final_verdict(event, reservation)
-
-    assert verdict == "FAIL"
-    assert findings == tuple(payload["findings"])
+    store, attempt_id, bundle, native = prepare_review(campaign, tmp_path)
+    for relative, content in (
+        ("test-evidence", b"mutated\n"),
+        ("run-plan.json", b"{}\n"),
+    ):
+        path = bundle / relative
+        path.chmod(0o644)
+        path.write_bytes(content)
+        path.chmod(0o444)
+        bundle.chmod(0o555)
+        result = collect_review(
+            store, attempt_id, native.openclaw_database, native.codex_state_database
+        )
+        assert result.state is AttemptState.REVIEW_FAILED
+        break
 
 
-def test_new_bundle_without_provenance_is_refused(
+def test_failed_terminal_review_evidence_is_immutable_and_not_recollected(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, attempt_id, _bundle, native = prepare_review(
+        campaign, tmp_path, verdict="FAIL", findings=("finding",)
+    )
+    first = collect_review(store, attempt_id, native.openclaw_database, native.codex_state_database)
+    assert first.state is AttemptState.REVIEW_FAILED
+    host = store.evidence(attempt_id, "review_host_evidence")
+    child = native.child_rollout
+    lines = child.read_text().splitlines()
+    event = json.loads(lines[-1])
+    event["payload"]["last_agent_message"] = event["payload"]["last_agent_message"].replace(
+        '"FAIL"', '"PASS"'
+    )
+    lines[-1] = json.dumps(event)
+    child.write_text("\n".join(lines) + "\n")
+    second = collect_review(
+        store, attempt_id, native.openclaw_database, native.codex_state_database
+    )
+    assert second.state is AttemptState.REVIEW_FAILED
+    assert store.evidence(attempt_id, "review_host_evidence") == host
+
+
+@pytest.mark.parametrize(
+    "relative,content",
+    [("spec.json", b"{}\n"), ("containment-provenance.json", b"{}\n")],
+)
+def test_reserved_bundle_rejects_frozen_spec_and_provenance_mutation(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    relative: str,
+    content: bytes,
 ) -> None:
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    monkeypatch.setattr(review_evidence, "_stored_containment_provenance", lambda *_: None)
+    store, attempt_id, bundle, native = prepare_review(campaign, tmp_path)
+    path = bundle / relative
+    bundle.chmod(0o755)
+    path.chmod(0o644)
+    path.write_bytes(content)
+    path.chmod(0o444)
+    bundle.chmod(0o555)
+    result = collect_review(
+        store, attempt_id, native.openclaw_database, native.codex_state_database
+    )
+    assert result.state is AttemptState.REVIEW_FAILED
 
-    with pytest.raises(BundleError, match="review bundle requires containment provenance evidence"):
-        review_evidence.build_review_bundle(store, attempt_id, bundle)
 
-
-def test_reservation_builds_actual_read_only_bundle_and_ack_replays(
+def test_reservation_builds_frozen_bundle_and_exact_native_spawn_arguments(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
     store, _source, hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reservation = __import__(
-        "gateway.research.review_evidence", fromlist=["reserve_review"]
-    ).reserve_review(store, attempt_id, bundle, "owner")
-    assert reservation.label.startswith(attempt_id + "-")
-    assert (bundle / "source" / "tracked.txt").read_text() == "tracked"
-    attempt = store.get_attempt(attempt_id)
-    assert attempt.commit is not None
-    assert json.loads((bundle / "containment-provenance.json").read_text()) == json.loads(
-        provenance_evidence(attempt_id, attempt.commit)
+    reservation = _reserve_native(store, attempt_id, bundle, tmp_path)
+    assert reservation.spawn_arguments["agent_type"] == "reviewer"
+    assert reservation.spawn_arguments["fork_turns"] == "none"
+    assert reservation.spawn_arguments["task_name"] == reservation.task_name
+    assert (
+        reservation.prompt_sha256
+        == __import__("hashlib").sha256(reservation.spawn_arguments["message"].encode()).hexdigest()
     )
-    instructions = (bundle / "instructions.md").read_text()
-    assert f"attempt_id={attempt_id}" in instructions
-    assert f"spec_sha256={hypothesis.spec_sha256}" in instructions
+    assert json.loads((bundle / "spec.json").read_text()) == json.loads(hypothesis.spec_json)
     assert not (bundle / "source" / "tracked.txt").stat().st_mode & 0o222
-    ack = acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
-    assert (
-        acknowledge_review(store, attempt_id, ack.child_session_key, ack.run_id, ack.mode, None)
-        == ack
-    )
-    result = runner.invoke(
-        app,
-        [
-            "research",
-            "review-reserve",
+    assert "containment-provenance.json" in (bundle / "instructions.md").read_text()
+    assert _reserve_native(store, attempt_id, bundle, tmp_path) == reservation
+
+
+def test_reservation_owner_replay_rejects_different_run_or_thread(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    _reserve_native(store, attempt_id, bundle, tmp_path)
+    with pytest.raises(ReviewUnresolved, match="canonical"):
+        reserve_review(
+            store,
             attempt_id,
-            "--root",
-            str(store.root),
-            "--bundle-dir",
-            str(bundle),
-            "--owner-key",
-            "owner",
-        ],
-    )
-    assert result.exit_code == 0, result.output
-    assert json.loads(result.output)["effort"] == "high"
+            bundle,
+            OWNER_SESSION,
+            wake_pending_key="wrong-wake",
+            openclaw_database=tmp_path / "owner.sqlite",
+        )
 
 
-@pytest.mark.parametrize(
-    "campaign",
-    [((".env.example", "EXAMPLE=1\n"), ("data/README.md", "fixture data docs\n"))],
-    indirect=True,
-)
-def test_reservation_excludes_unchanged_blocked_baseline_files(
+def test_reserve_requires_exact_completed_implemented_wake_context(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
-    source = campaign[1]
-    source.chmod(0o755)
-    (source / "tracked.txt").write_text("changed\n", encoding="utf-8")
-    subprocess.run(["git", "add", "tracked.txt"], cwd=source, check=True)
-    subprocess.run(["git", "commit", "-qm", "implementation"], cwd=source, check=True)
-    source.chmod(0o555)
-    store, source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-
-    reservation = reserve_review(store, attempt_id, bundle, "owner")
-
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
-    expected = sorted(
-        subprocess.check_output(
-            ["git", "rev-parse", f"{commit}:{path}"], cwd=source, text=True
-        ).strip()
-        + "\t"
-        + path
-        for path in (".env.example", "data/README.md")
-    )
-    assert (bundle / "source" / "EXCLUDED").read_text() == "\n".join(expected) + "\n"
-    assert not (bundle / "source" / ".env.example").exists()
-    assert not (bundle / "source" / "data").exists()
-    assert ".env.example" not in (bundle / "diff.patch").read_text()
-    assert "data/README.md" not in (bundle / "diff.patch").read_text()
-    assert (
-        reserve_review(store, attempt_id, bundle, "owner").bundle_sha256
-        == reservation.bundle_sha256
-    )
-    acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
-    core, sessions, projects = _host_fixture(store, attempt_id, bundle, tmp_path)
-    assert (
-        collect_review(store, attempt_id, core, sessions, projects).state
-        == AttemptState.REVIEW_PASSED
-    )
-
-
-def test_reservation_ignores_untracked_blocked_file(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    source = campaign[1]
-    source.chmod(0o755)
-    (source / ".env").write_text("LIVE=not-committed\n", encoding="utf-8")
-    source.chmod(0o555)
-
     store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    _status, resume_seq = store.campaign()
+    wake_key = canonical_wake_key("H0001", attempt_id, "IMPLEMENTED", resume_seq)
+    assert store.reserve_wake(wake_key, attempt_id, "IMPLEMENTED", resume_seq)
+    store.complete_wake(wake_key, OWNER_RUN_ID)
+    owner_database = create_owner_database(tmp_path / "owner.sqlite")
+    reservation = reserve_review(
+        store,
+        attempt_id,
+        bundle,
+        OWNER_SESSION,
+        wake_pending_key=wake_key,
+        openclaw_database=owner_database,
+    )
+    assert reservation.owner_run_id == OWNER_RUN_ID
+    assert reservation.owner_thread_id == OWNER_THREAD_ID
 
-    reserve_review(store, attempt_id, bundle, "owner")
 
-    assert not (bundle / "source" / ".env").exists()
-    assert not (bundle / "source" / "EXCLUDED").exists()
-
-
-@pytest.mark.parametrize(
-    "campaign",
-    [((".env.example", "EXAMPLE=1\n"), ("data/README.md", "fixture data docs\n"))],
-    indirect=True,
-)
-def test_changed_blocked_baseline_file_fails_closed(
+def test_reserve_rejects_completed_wake_from_prior_resume_sequence(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
-    source = campaign[1]
-    source.chmod(0o755)
-    (source / ".env.example").write_text("LIVE_SECRET=changed\n", encoding="utf-8")
-    _commit_source(source, "change blocked baseline")
-
     store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    _status, prior_resume_seq = store.campaign()
+    prior_key = canonical_wake_key("H0001", attempt_id, "IMPLEMENTED", prior_resume_seq)
+    assert store.reserve_wake(prior_key, attempt_id, "IMPLEMENTED", prior_resume_seq)
+    store.complete_wake(prior_key, OWNER_RUN_ID)
+    current_resume_seq = store.resume("new-owner-turn")
+    assert current_resume_seq == prior_resume_seq + 1
+    with pytest.raises(ReviewUnresolved, match="current canonical key"):
+        reserve_review(
+            store,
+            attempt_id,
+            bundle,
+            OWNER_SESSION,
+            wake_pending_key=prior_key,
+            openclaw_database=create_owner_database(tmp_path / "owner.sqlite"),
+        )
 
-    with pytest.raises(BundleError, match="changed data or credential path"):
-        reserve_review(store, attempt_id, bundle, "owner")
-    assert not bundle.exists()
-    with pytest.raises(ValueError):
-        store.evidence(attempt_id, "review_reservation")
+
+def test_reserve_accepts_async_wake_receipt_before_owner_start(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    owner_database = create_owner_database(
+        tmp_path / "owner.sqlite", started_at_ms=int(time.time() * 1000) + 10_000
+    )
+    _status, resume_seq = store.campaign()
+    wake_key = canonical_wake_key("H0001", attempt_id, "IMPLEMENTED", resume_seq)
+    assert store.reserve_wake(wake_key, attempt_id, "IMPLEMENTED", resume_seq)
+    store.complete_wake(wake_key, OWNER_RUN_ID)
+    reservation = reserve_review(
+        store,
+        attempt_id,
+        bundle,
+        OWNER_SESSION,
+        wake_pending_key=wake_key,
+        openclaw_database=owner_database,
+    )
+    assert reservation.owner_run_id == OWNER_RUN_ID
 
 
-def test_added_blocked_files_fail_closed(
+def test_reserve_rejects_opened_wake_even_if_it_has_a_run_id(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    _status, resume_seq = store.campaign()
+    wake_key = canonical_wake_key("H0001", attempt_id, "IMPLEMENTED", resume_seq)
+    assert store.reserve_wake(wake_key, attempt_id, "OPENED", resume_seq)
+    store.complete_wake(wake_key, OWNER_RUN_ID)
+    with pytest.raises(ReviewUnresolved, match="does not bind the IMPLEMENTED"):
+        reserve_review(
+            store,
+            attempt_id,
+            bundle,
+            OWNER_SESSION,
+            wake_pending_key=wake_key,
+            openclaw_database=create_owner_database(tmp_path / "owner.sqlite"),
+        )
+
+
+def test_source_and_spec_mutation_is_rejected_on_reservation_replay(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    _reserve_native(store, attempt_id, bundle, tmp_path)
+    bundle.chmod(0o755)
+    (bundle / "spec.json").chmod(0o644)
+    (bundle / "spec.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(BundleError):
+        _reserve_native(store, attempt_id, bundle, tmp_path)
+
+
+def test_blocked_source_changes_fail_closed(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
     source = campaign[1]
     source.chmod(0o755)
-    (source / ".env").write_text("LIVE_SECRET=added\n", encoding="utf-8")
+    (source / ".env").write_text("secret\n", encoding="utf-8")
     (source / "data").mkdir()
-    (source / "data" / "dump.db").write_bytes(b"not a database")
-    (source / "secrets").mkdir()
-    (source / "secrets" / "token.pem").write_text("private", encoding="utf-8")
+    (source / "data" / "dump.db").write_bytes(b"secret")
     _commit_source(source, "add blocked files")
-
     store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-
     with pytest.raises(BundleError, match="changed data or credential path"):
-        reserve_review(store, attempt_id, bundle, "owner")
-    assert not bundle.exists()
-
-
-def test_moved_implementation_into_blocked_directory_fails_closed(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    source = campaign[1]
-    source.chmod(0o755)
-    (source / "data").mkdir()
-    subprocess.run(["git", "mv", "tracked.txt", "data/implementation.py"], cwd=source, check=True)
-    _commit_source(source, "move implementation into data")
-
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-
-    with pytest.raises(BundleError, match="changed data or credential path"):
-        reserve_review(store, attempt_id, bundle, "owner")
-    assert not bundle.exists()
-
-
-@pytest.mark.parametrize(
-    "campaign",
-    [((".env.example", "EXAMPLE=1\n"),)],
-    indirect=True,
-)
-def test_executable_blocked_baseline_file_fails_closed(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    source = campaign[1]
-    source.chmod(0o755)
-    (source / ".env.example").chmod(0o755)
-    _commit_source(source, "make blocked baseline executable")
-
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-
-    with pytest.raises(BundleError, match="changed data or credential path"):
-        reserve_review(store, attempt_id, bundle, "owner")
-    assert not bundle.exists()
-
-
-def test_added_symlink_fails_closed(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    source = campaign[1]
-    source.chmod(0o755)
-    (source / "link").symlink_to("tracked.txt")
-    _commit_source(source, "add symlink")
-
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-
-    with pytest.raises(BundleError, match="symlink or unsupported entry"):
-        reserve_review(store, attempt_id, bundle, "owner")
-    assert not bundle.exists()
+        _reserve_native(store, attempt_id, bundle, tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -648,631 +353,372 @@ def test_added_symlink_fails_closed(
     [((".env.example", "EXAMPLE=1\n"), ("data/README.md", "fixture data docs\n"))],
     indirect=True,
 )
-def test_excluded_metadata_tampering_is_rejected(
+def test_unchanged_blocked_baseline_is_excluded_but_excluded_tampering_fails(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reserve_review(store, attempt_id, bundle, "owner")
-    bundle.chmod(0o755)
+    store, attempt_id, bundle, native = prepare_review(campaign, tmp_path)
     excluded = bundle / "source" / "EXCLUDED"
+    assert excluded.is_file()
+    bundle.chmod(0o755)
     excluded.chmod(0o644)
-    excluded.write_text("tampered\n", encoding="utf-8")
-
-    with pytest.raises(BundleError):
-        reserve_review(store, attempt_id, bundle, "owner")
-
-
-@pytest.mark.parametrize(
-    "campaign",
-    [((".env.example", "EXAMPLE=1\n"), ("data/README.md", "fixture data docs\n"))],
-    indirect=True,
-)
-def test_planted_blocked_bundle_file_is_rejected(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reserve_review(store, attempt_id, bundle, "owner")
-    bundle.chmod(0o755)
-    source_dir = bundle / "source"
-    source_dir.chmod(0o755)
-    planted = source_dir / ".env.example"
-    planted.write_text("PLANTED=1\n", encoding="utf-8")
-    planted.chmod(0o444)
-    source_dir.chmod(0o555)
+    excluded.write_text("forged\n", encoding="utf-8")
+    excluded.chmod(0o444)
     bundle.chmod(0o555)
-
-    with pytest.raises(BundleError, match="data or credential path"):
-        reserve_review(store, attempt_id, bundle, "owner")
-
-
-def test_evaluation_spec_copy_tampering_is_rejected(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reserve_review(store, attempt_id, bundle, "owner")
-    spec_copy = bundle / "evaluation-specs" / "c000.json"
-    bundle.chmod(0o755)
-    spec_copy.chmod(0o644)
-    spec_copy.write_text('{"tampered":true}', encoding="utf-8")
-    with pytest.raises(BundleError):
-        reserve_review(store, attempt_id, bundle, "owner")
+    result = collect_review(
+        store, attempt_id, native.openclaw_database, native.codex_state_database
+    )
+    assert result.state is AttemptState.REVIEW_FAILED
 
 
-@pytest.mark.parametrize("filename", ["run-plan.json", "evaluation-spec-set.json"])
-def test_run_plan_or_spec_set_bundle_tampering_is_rejected(
+@pytest.mark.parametrize("relative", [".env.example", "data/README.md"])
+def test_changed_or_executable_blocked_baseline_is_refused(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
     tmp_path: Path,
-    filename: str,
+    relative: str,
 ) -> None:
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reserve_review(store, attempt_id, bundle, "owner")
-    bundle.chmod(0o755)
-    target = bundle / filename
-    target.chmod(0o644)
-    target.write_text("{}\n", encoding="utf-8")
-    target.chmod(0o444)
-    bundle.chmod(0o555)
-
-    with pytest.raises(BundleError):
-        reserve_review(store, attempt_id, bundle, "owner")
-
-
-def test_reservation_accepts_nested_tracked_source_directories(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    _store, source, _hypothesis = campaign
+    source = campaign[1]
     source.chmod(0o755)
-    nested = source / "fixture" / "nested" / "artifact.py"
-    nested.parent.mkdir(parents=True)
-    nested.write_text("VALUE = 1\n", encoding="utf-8")
-    subprocess.run(["git", "add", "fixture"], cwd=source, check=True)
-    subprocess.run(["git", "commit", "-qm", "nested fixture"], cwd=source, check=True)
-    source.chmod(0o555)
-
+    path = source / relative
+    if relative.startswith("data/"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        (source / "tracked.txt").rename(path)
+    else:
+        path.write_text("blocked\n", encoding="utf-8")
+        path.chmod(0o755)
+    _commit_source(source, f"tamper blocked {relative}")
     store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reservation = reserve_review(store, attempt_id, bundle, "owner")
-
-    assert (bundle / "source" / "fixture" / "nested" / "artifact.py").read_text() == "VALUE = 1\n"
-    assert (
-        reserve_review(store, attempt_id, bundle, "owner").bundle_sha256
-        == reservation.bundle_sha256
-    )
+    with pytest.raises(BundleError, match="changed data or credential path"):
+        _reserve_native(store, attempt_id, bundle, tmp_path)
 
 
-def test_reservation_replay_and_collect_use_frozen_test_evidence_copy(
+def test_native_collect_pass_is_idempotent_and_records_host_identity(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reservation = reserve_review(store, attempt_id, bundle, "owner")
-    implementation = json.loads(store.evidence(attempt_id, "implementation"))
-    Path(str(implementation["test_evidence_path"])).unlink()
-
-    replay = reserve_review(store, attempt_id, bundle, "owner")
-    assert replay.bundle_sha256 == reservation.bundle_sha256
-    acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
-    core, sessions, projects = _host_fixture(store, attempt_id, bundle, tmp_path)
-
-    assert (
-        collect_review(store, attempt_id, core, sessions, projects).state
-        == AttemptState.REVIEW_PASSED
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path)
+    result = collect_review(
+        store, attempt_id, native.openclaw_database, native.codex_state_database
     )
-
-
-def test_collect_requires_terminal_host_evidence_and_is_idempotent(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reserve_review(store, attempt_id, bundle, "owner")
-    acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
-    core, sessions, projects = _host_fixture(store, attempt_id, bundle, tmp_path)
-    assert (
-        collect_review(store, attempt_id, core, sessions, projects).state
-        == AttemptState.REVIEW_PASSED
-    )
-    assert json.loads(store.evidence(attempt_id, "review_host_evidence"))["task_source"] == (
-        "task_runs"
-    )
-    attempt_dir = store.root / "hypotheses" / "H0001" / "attempts" / attempt_id
-    (attempt_dir / "review.json").unlink()
-    (attempt_dir / "review_host_evidence.json").unlink()
-    assert (
-        collect_review(store, attempt_id, core, sessions, projects).state
-        == AttemptState.REVIEW_PASSED
-    )
-    assert (attempt_dir / "review.json").is_file()
-    assert (attempt_dir / "review_host_evidence.json").is_file()
-    assert len([row for row in store.events() if row.kind == "review_collected"]) == 1
-    assert _queue(store, attempt_id, "job-evidence").state == AttemptState.RUN_QUEUED
-
-
-def test_collect_recovers_from_pruned_task_run_using_subagent_run(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-    attempt = store.get_attempt(attempt_id)
-    reservation = json.loads(store.evidence(attempt_id, "review_reservation"))
-    reserved_ms = int(
-        datetime.fromisoformat(str(reservation["reserved_at"]).replace("Z", "+00:00")).timestamp()
-        * 1000
-    )
-    with sqlite3.connect(core) as conn:
-        conn.execute("DELETE FROM task_runs")
-    _insert_subagent(core, str(reservation["label"]), reserved_ms)
-    worktree = Path(attempt.worktree_path)
-    for path in worktree.rglob("*"):
-        path.chmod(path.stat().st_mode | 0o700)
-    worktree.chmod(worktree.stat().st_mode | 0o700)
-    shutil.rmtree(attempt.worktree_path)
-
-    result = collect_review(store, attempt_id, core, sessions, projects)
-
-    assert result.state == AttemptState.REVIEW_PASSED
-    review = json.loads(store.evidence(attempt_id, "review"))
+    assert result.state is AttemptState.REVIEW_PASSED
     host = json.loads(store.evidence(attempt_id, "review_host_evidence"))
-    assert review["verdict"] == "PASS"
-    assert review["findings"] == []
-    assert host["task_source"] == "subagent_runs"
-    assert "reason" not in host
+    assert host["model_observed"] == "gpt-5.6-sol"
+    assert host["reasoning_effort_observed"] == "xhigh"
+    assert host["child_thread_id"] == native.child_thread_id
+    assert host["announce_run_id"] == native.announce_run_id
+    assert host["announce_status"] == "succeeded"
+    assert host["spawn_call_id"] == "call-reviewer-0"
+    assert "child_session_key" not in host and "child_run_id" not in host
+    events = store.events()
+    assert (
+        collect_review(store, attempt_id, native.openclaw_database, native.codex_state_database)
+        == result
+    )
+    assert store.events() == events
 
 
-def test_collect_records_transcript_bound_bundle_mutation_failure(
+def test_native_collect_pending_until_official_child_terminal(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
-    store, attempt_id, bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-    bundle.chmod(0o755)
-    instructions = bundle / "instructions.md"
-    instructions.chmod(0o644)
-    instructions.write_text("changed", encoding="utf-8")
-    instructions.chmod(0o444)
-    bundle.chmod(0o555)
-
-    result = collect_review(store, attempt_id, core, sessions, projects)
-
-    assert result.state == AttemptState.REVIEW_FAILED
-    review = json.loads(store.evidence(attempt_id, "review"))
-    host = json.loads(store.evidence(attempt_id, "review_host_evidence"))
-    assert review["verdict"] == "FAIL"
-    assert review["findings"] == ["bundle_mutated"]
-    assert host["reason"] == "bundle_mutated"
-    assert host["transcript_sha256"]
-
-
-def test_collect_supersedes_failed_verification_once(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-
-    def fail_reserved_bundle(_root: Path, _expected_digest: str) -> str:
-        raise BundleError("x")
-
-    monkeypatch.setattr(review_evidence, "_verify_reserved_bundle", fail_reserved_bundle)
-    first = collect_review(store, attempt_id, core, sessions, projects)
-    assert first.state == AttemptState.REVIEW_FAILED
-    assert json.loads(store.evidence(attempt_id, "review"))["findings"] == ["bundle_invalid: x"]
-
-    monkeypatch.undo()
-    second = collect_review(store, attempt_id, core, sessions, projects)
-
-    assert second.state == AttemptState.REVIEW_PASSED
-    assert json.loads(store.evidence(attempt_id, "review"))["verdict"] == "PASS"
-    assert json.loads(store.evidence(attempt_id, "review_host_evidence"))["verdict"] == "PASS"
-    attempt_dir = store.root / "hypotheses" / "H0001" / "attempts" / attempt_id
-    assert (attempt_dir / "review_superseded.json").is_file()
-    assert (attempt_dir / "review_host_evidence_superseded.json").is_file()
-    with store._connect() as conn:
-        kinds = [
-            str(row[0])
-            for row in conn.execute(
-                "SELECT kind FROM attempt_evidence WHERE attempt_id=? ORDER BY kind",
-                (attempt_id,),
-            ).fetchall()
-        ]
-    assert "review_superseded" in kinds
-    assert "review_host_evidence_superseded" in kinds
-    assert len([event for event in store.events() if event.kind == "review_recollected"]) == 1
-
-    events_before = store.events()
-    replay = collect_review(store, attempt_id, core, sessions, projects)
-    assert replay == second
-    assert store.events() == events_before
-
-
-def test_collect_supersedes_failed_verification_with_transcript_fail(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    findings = (
-        "severity=high; location=source/a.py:1; explanation=first finding",
-        "severity=medium; location=source/b.py:2; explanation=second finding",
-        "severity=low; location=source/c.py:3; explanation=third finding",
-        "severity=high; location=source/d.py:4; explanation=fourth finding",
-    )
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(
-        campaign, tmp_path, verdict="FAIL", findings=findings
-    )
-
-    def fail_reserved_bundle(_root: Path, _expected_digest: str) -> str:
-        raise BundleError("x")
-
-    monkeypatch.setattr(review_evidence, "_verify_reserved_bundle", fail_reserved_bundle)
-    assert collect_review(store, attempt_id, core, sessions, projects).state == (
-        AttemptState.REVIEW_FAILED
-    )
-    monkeypatch.undo()
-
-    result = collect_review(store, attempt_id, core, sessions, projects)
-
-    assert result.state == AttemptState.REVIEW_FAILED
-    review = json.loads(store.evidence(attempt_id, "review"))
-    assert review["verdict"] == "FAIL"
-    assert review["findings"] == list(findings)
-    assert len([event for event in store.events() if event.kind == "review_recollected"]) == 1
-
-
-def test_historical_reserved_bundle_without_provenance_supersedes_without_worktree(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    findings = (
-        "severity=high; location=source/a.py:1; explanation=first finding",
-        "severity=medium; location=source/b.py:2; explanation=second finding",
-        "severity=low; location=source/c.py:3; explanation=third finding",
-        "severity=high; location=source/d.py:4; explanation=fourth finding",
-    )
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reservation = _reserve_legacy_bundle(store, attempt_id, bundle)
-    assert not (bundle / "containment-provenance.json").exists()
-    acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
-    core, sessions, projects = _host_fixture(
-        store, attempt_id, bundle, tmp_path, verdict="FAIL", findings=findings
-    )
-    attempt = store.get_attempt(attempt_id)
-    worktree = Path(attempt.worktree_path)
-    for path in worktree.rglob("*"):
-        path.chmod(path.stat().st_mode | 0o700)
-    worktree.chmod(worktree.stat().st_mode | 0o700)
-    shutil.rmtree(worktree)
-
-    def fail_reserved_bundle(_root: Path, expected_digest: str) -> str:
-        assert expected_digest == reservation.bundle_sha256
-        raise BundleError("historical host failure")
-
-    monkeypatch.setattr(review_evidence, "_verify_reserved_bundle", fail_reserved_bundle)
-    first = collect_review(store, attempt_id, core, sessions, projects)
-    assert first.state == AttemptState.REVIEW_FAILED
-    assert json.loads(store.evidence(attempt_id, "review"))["findings"] == [
-        "bundle_invalid: historical host failure"
-    ]
-
-    monkeypatch.undo()
-    second = collect_review(store, attempt_id, core, sessions, projects)
-    assert second.state == AttemptState.REVIEW_FAILED
-    review = json.loads(store.evidence(attempt_id, "review"))
-    assert review["verdict"] == "FAIL"
-    assert review["findings"] == list(findings)
-    attempt_dir = store.root / "hypotheses" / "H0001" / "attempts" / attempt_id
-    assert json.loads((attempt_dir / "review_superseded.json").read_text())["findings"] == [
-        "bundle_invalid: historical host failure"
-    ]
-    assert (attempt_dir / "review_host_evidence_superseded.json").is_file()
-    with store._connect() as conn:
-        counts = {
-            str(row[0]): int(row[1])
-            for row in conn.execute(
-                "SELECT kind, COUNT(*) FROM attempt_evidence WHERE attempt_id=? GROUP BY kind",
-                (attempt_id,),
-            ).fetchall()
-        }
-    assert counts["review_superseded"] == 1
-    assert counts["review_host_evidence_superseded"] == 1
-    assert len([event for event in store.events() if event.kind == "review_recollected"]) == 1
-
-    events_before = store.events()
-    assert collect_review(store, attempt_id, core, sessions, projects) == second
-    assert store.events() == events_before
-
-
-def test_transcript_verified_review_is_never_superseded(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-    first = collect_review(store, attempt_id, core, sessions, projects)
-    events_before = store.events()
-
-    def fail_reserved_bundle(_root: Path, _expected_digest: str) -> str:
-        raise AssertionError("transcript-verified evidence must replay without re-verification")
-
-    monkeypatch.setattr(review_evidence, "_verify_reserved_bundle", fail_reserved_bundle)
-    replay = collect_review(store, attempt_id, core, sessions, projects)
-
-    assert replay == first
-    assert store.events() == events_before
-
-
-def test_reconcile_review_recovers_ack_from_subagent_run(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reservation = reserve_review(store, attempt_id, bundle, "owner")
-    core, _sessions, _projects = _host_fixture(store, attempt_id, bundle, tmp_path)
-    reservation_ms = int(
-        datetime.fromisoformat(reservation.reserved_at.replace("Z", "+00:00")).timestamp() * 1000
-    )
-    with sqlite3.connect(core) as conn:
-        conn.execute("DELETE FROM task_runs")
-    _insert_subagent(core, reservation.label, reservation_ms)
-
-    ack = reconcile_review(store, attempt_id, core)
-
-    assert ack is not None
-    assert ack.run_id == "run-1"
-    assert ack.child_session_key == "agent:claude:acp:child"
-
-
-def test_collect_nonterminal_is_pending_and_bundle_mutation_is_rejected(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reserve_review(store, attempt_id, bundle, "owner")
-    acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
-    core, sessions, projects = _host_fixture(store, attempt_id, bundle, tmp_path, status="running")
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path, status="running")
     with pytest.raises(ReviewPending):
-        collect_review(store, attempt_id, core, sessions, projects)
+        collect_review(store, attempt_id, native.openclaw_database, native.codex_state_database)
+    assert store.get_attempt(attempt_id).state is AttemptState.IMPLEMENTED
+
+
+@pytest.mark.parametrize("field,value", (("model", "gpt-5.4"), ("effort", "high")))
+def test_native_collect_rejects_wrong_model_or_effort(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path, field: str, value: str
+) -> None:
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path)
+    column = "model" if field == "model" else "reasoning_effort"
+    with sqlite3.connect(native.codex_state_database) as connection:
+        connection.execute(
+            f"UPDATE threads SET {column}=? WHERE thread_source='subagent'", (value,)
+        )
+    with pytest.raises(ReviewUnresolved, match="correlation"):
+        collect_review(store, attempt_id, native.openclaw_database, native.codex_state_database)
+    assert store.campaign()[0] == "PAUSED"
+
+
+def test_native_collect_records_bundle_mutation_as_failed_review(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, attempt_id, bundle, native = prepare_review(campaign, tmp_path)
     bundle.chmod(0o755)
     (bundle / "instructions.md").chmod(0o644)
-    (bundle / "instructions.md").write_text("changed", encoding="utf-8")
-    with pytest.raises(BundleError):
-        reserve_review(store, attempt_id, bundle, "owner")
+    (bundle / "instructions.md").write_text("mutated", encoding="utf-8")
+    (bundle / "instructions.md").chmod(0o444)
+    bundle.chmod(0o555)
+    result = collect_review(
+        store, attempt_id, native.openclaw_database, native.codex_state_database
+    )
+    assert result.state is AttemptState.REVIEW_FAILED
+    assert json.loads(store.evidence(attempt_id, "review"))["findings"] == ["bundle_mutated"]
 
 
-def test_collect_wrong_owner_is_unresolved_and_pauses_campaign(
+@pytest.mark.parametrize("suffix", [" trailing", "\nprose"])
+def test_native_collect_rejects_non_bare_verdict(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path, suffix: str
+) -> None:
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path)
+    rollout = native.child_rollout
+    lines = rollout.read_text().splitlines()
+    event = json.loads(lines[-1])
+    event["payload"]["last_agent_message"] += suffix
+    lines[-1] = json.dumps(event)
+    rollout.write_text("\n".join(lines) + "\n")
+    result = collect_review(
+        store, attempt_id, native.openclaw_database, native.codex_state_database
+    )
+    assert result.state is AttemptState.REVIEW_FAILED
+
+
+def test_native_collect_rejects_duplicate_verdict_keys(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path)
+    rollout = native.child_rollout
+    lines = rollout.read_text().splitlines()
+    event = json.loads(lines[-1])
+    event["payload"]["last_agent_message"] = '{"verdict":"PASS","verdict":"PASS"}'
+    lines[-1] = json.dumps(event)
+    rollout.write_text("\n".join(lines) + "\n")
+    result = collect_review(
+        store, attempt_id, native.openclaw_database, native.codex_state_database
+    )
+    assert result.state is AttemptState.REVIEW_FAILED
+
+
+def test_native_reconcile_recovers_exact_official_child_ack(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
     store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reserve_review(store, attempt_id, bundle, "wrong-owner")
-    acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
-    core, sessions, projects = _host_fixture(store, attempt_id, bundle, tmp_path)
-    with pytest.raises(ReviewUnresolved):
-        collect_review(store, attempt_id, core, sessions, projects)
-    assert store.campaign()[0] == "PAUSED"
+    reservation = _reserve_native(store, attempt_id, bundle, tmp_path)
+    # The ACK needs no completion callback: the child is still running here.
+    native = create_native_stores(store, attempt_id, bundle, tmp_path, status="running")
+    ack = reconcile_review(store, attempt_id, native.openclaw_database, native.codex_state_database)
+    assert ack is not None
+    assert ack.child_thread_id == native.child_thread_id
+    assert ack.child_session_key is None and ack.run_id is None
+    assert ack.owner_run_id == reservation.owner_run_id
+    stored = json.loads(store.evidence(attempt_id, "review_ack"))
+    assert set(stored) == {
+        "mode",
+        "run_timeout_seconds",
+        "acked_at",
+        "owner_session_key",
+        "owner_run_id",
+        "owner_thread_id",
+        "child_thread_id",
+    }
+    with pytest.raises(ReviewEvidenceError):
+        acknowledge_review(store, attempt_id, "run", None, child_thread_id="forged-child")
 
 
-@pytest.mark.parametrize(
-    "format_name",
-    (
-        "fenced",
-        "prose",
-        "trailing",
-        "duplicate",
-        "extra",
-        "multiple",
-        "object_findings",
-        "tool_call",
-    ),
-)
-def test_collect_rejects_non_bare_or_non_exact_verdicts(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-    tmp_path: Path,
-    format_name: str,
+def test_native_collect_without_completion_callback_is_pending_not_failed(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-    transcript = _transcript_path(projects)
-    event = json.loads(transcript.read_text())
-    verdict_text = str(event["message"]["content"][0]["text"])
-    if format_name == "fenced":
-        verdict_text = f"```json\n{verdict_text}\n```"
-    elif format_name == "prose":
-        verdict_text = f"Review complete: {verdict_text}"
-    elif format_name == "trailing":
-        verdict_text += " trailing prose"
-    elif format_name == "duplicate":
-        verdict_text = verdict_text.replace(
-            '"verdict": "PASS"', '"verdict": "PASS", "verdict": "PASS"'
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    _reserve_native(store, attempt_id, bundle, tmp_path)
+    native = create_native_stores(store, attempt_id, bundle, tmp_path, announce=None)
+    reconcile_review(store, attempt_id, native.openclaw_database, native.codex_state_database)
+    with pytest.raises(ReviewPending):
+        collect_review(store, attempt_id, native.openclaw_database, native.codex_state_database)
+    assert store.get_attempt(attempt_id).state is AttemptState.IMPLEMENTED
+    assert store.campaign()[0] != "PAUSED"
+    add_announce(
+        native.openclaw_database,
+        owner_thread_id=OWNER_THREAD_ID,
+        child_thread_id=native.child_thread_id,
+        status="succeeded",
+        at_ms=int(time.time() * 1000),
+    )
+    result = collect_review(
+        store, attempt_id, native.openclaw_database, native.codex_state_database
+    )
+    assert result.state is AttemptState.REVIEW_PASSED
+
+
+def test_native_collect_failed_child_is_a_host_failure_without_a_parsed_verdict(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    _reserve_native(store, attempt_id, bundle, tmp_path)
+    native = create_native_stores(store, attempt_id, bundle, tmp_path, status="failed")
+    reconcile_review(store, attempt_id, native.openclaw_database, native.codex_state_database)
+    result = collect_review(
+        store, attempt_id, native.openclaw_database, native.codex_state_database
+    )
+    assert result.state is AttemptState.REVIEW_FAILED
+    review = json.loads(store.evidence(attempt_id, "review"))
+    assert review["findings"] == ["failed"]
+    host = json.loads(store.evidence(attempt_id, "review_host_evidence"))
+    assert host["task_status"] == "unresolved"
+    assert host["verdict_json"] == ""
+    assert host["reason"] == "failed"
+    assert host["announce_status"] == "failed"
+    assert host["child_thread_id"] == native.child_thread_id
+
+
+def test_native_collect_after_rotated_owner_thread_callback(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path)
+    assert native.announce_run_id is not None
+    assert ROTATED_OWNER_THREAD_ID != OWNER_THREAD_ID
+    result = collect_review(
+        store, attempt_id, native.openclaw_database, native.codex_state_database
+    )
+    assert result.state is AttemptState.REVIEW_PASSED
+
+
+def test_native_cancel_calls_chat_abort_once_and_pending_when_child_still_running(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path, status="running")
+    calls: list[tuple[str, str, str]] = []
+
+    async def request(owner_session: str, agent_id: str, run_id: str) -> dict[str, object]:
+        calls.append((owner_session, agent_id, run_id))
+        raise OpenClawTransportError("lost after send")
+
+    first = cancel_review(
+        store,
+        attempt_id,
+        "stop review",
+        native.openclaw_database,
+        request,
+        native.codex_state_database,
+    )
+    replay = cancel_review(
+        store,
+        attempt_id,
+        "stop review",
+        native.openclaw_database,
+        request,
+        native.codex_state_database,
+    )
+    assert first.pending is True and replay.pending is True
+    assert calls == [(OWNER_SESSION, "research-orchestrator", OWNER_RUN_ID)]
+
+
+def test_native_cancel_malformed_or_mismatched_reply_is_pending_without_resend(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path, status="running")
+    calls: list[tuple[str, str, str]] = []
+
+    async def request(owner_session: str, agent_id: str, run_id: str) -> dict[str, object]:
+        calls.append((owner_session, agent_id, run_id))
+        return {"status": "accepted", "taskId": "wrong-child"}
+
+    first = cancel_review(
+        store,
+        attempt_id,
+        "stop review",
+        native.openclaw_database,
+        request,
+        native.codex_state_database,
+    )
+    replay = cancel_review(
+        store,
+        attempt_id,
+        "stop review",
+        native.openclaw_database,
+        request,
+        native.codex_state_database,
+    )
+    assert first.pending and replay.pending
+    assert calls == [(OWNER_SESSION, "research-orchestrator", OWNER_RUN_ID)]
+
+
+def test_native_cancel_inactive_owner_run_reports_no_supported_child_cancel(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path, status="running")
+    calls: list[tuple[str, str, str]] = []
+
+    async def request(owner_session: str, agent_id: str, run_id: str) -> dict[str, object]:
+        calls.append((owner_session, agent_id, run_id))
+        return {"ok": True, "aborted": False, "runIds": []}
+
+    args = (store, attempt_id, "stop review", native.openclaw_database, request)
+    first = cancel_review(*args, native.codex_state_database)
+    replay = cancel_review(*args, native.codex_state_database)
+    assert first.pending and replay.pending
+    assert first.status == "pending"
+    assert first.rpc_result == review_evidence.CANCEL_OWNER_INACTIVE
+    assert replay.rpc_result == review_evidence.CANCEL_OWNER_INACTIVE
+    assert calls == [(OWNER_SESSION, "research-orchestrator", OWNER_RUN_ID)]
+    assert store.campaign()[0] == "PAUSED"
+    assert store.get_attempt(attempt_id).state is AttemptState.IMPLEMENTED
+
+
+def test_native_cancel_aborted_owner_run_stays_pending_until_child_terminal(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path, status="running")
+
+    async def request(owner_session: str, agent_id: str, run_id: str) -> dict[str, object]:
+        return {"ok": True, "aborted": True, "runIds": [run_id]}
+
+    outcome = cancel_review(
+        store,
+        attempt_id,
+        "stop review",
+        native.openclaw_database,
+        request,
+        native.codex_state_database,
+    )
+    assert outcome.pending is True
+    assert outcome.rpc_result == review_evidence.CANCEL_ABORTED
+
+
+def test_native_cancel_malformed_chat_abort_shape_is_pending(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path, status="running")
+
+    async def request(owner_session: str, agent_id: str, run_id: str) -> dict[str, object]:
+        return {"ok": True, "aborted": "yes"}
+
+    outcome = cancel_review(
+        store,
+        attempt_id,
+        "stop review",
+        native.openclaw_database,
+        request,
+        native.codex_state_database,
+    )
+    assert outcome.pending is True
+    assert outcome.rpc_result == "MALFORMED_RESPONSE"
+
+
+def test_historical_reservation_is_readable_but_not_reconciled(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    review_evidence.build_review_bundle(store, attempt_id, bundle)
+    payload = {
+        "attempt_id": attempt_id,
+        "commit": store.get_attempt(attempt_id).commit,
+        "hypothesis_spec_sha256": store.get_hypothesis("H0001").spec_sha256,
+        "bundle_dir": str(bundle.resolve()),
+        "bundle_sha256": review_evidence._bundle_digest(bundle),
+        "reserved_at": "2026-01-01T00:00:00Z",
+        "owner_session_key": OWNER_SESSION,
+        "label": "historical",
+        "reservation_nonce": "historical",
+    }
+    store.insert_review_evidence(
+        attempt_id, "review_reservation", json.dumps(payload), "review_reserved"
+    )
+    with pytest.raises(ReviewUnresolved, match="historical ACP"):
+        reconcile_review(
+            store, attempt_id, tmp_path / "missing.sqlite", tmp_path / "missing-state.sqlite"
         )
-    elif format_name == "extra":
-        verdict = json.loads(verdict_text)
-        verdict["extra"] = "reject"
-        verdict_text = json.dumps(verdict)
-    elif format_name == "multiple":
-        verdict_text = f"{verdict_text} {verdict_text}"
-    elif format_name == "object_findings":
-        verdict = json.loads(verdict_text)
-        verdict["findings"] = [{"severity": "high", "explanation": "reject"}]
-        verdict_text = json.dumps(verdict)
-    else:
-        event["message"]["content"] = [{"type": "tool_use", "id": "tool"}]
-    if format_name != "tool_call":
-        event["message"]["content"] = [{"type": "text", "text": verdict_text}]
-    transcript.write_text(json.dumps(event) + "\n")
-
-    assert (
-        collect_review(store, attempt_id, core, sessions, projects).state
-        == AttemptState.REVIEW_FAILED
-    )
 
 
-@pytest.mark.parametrize("field,value", (("model", "claude-sonnet"), ("effort", "low")))
-def test_collect_rejects_wrong_model_or_effort(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-    tmp_path: Path,
-    field: str,
-    value: str,
-) -> None:
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-    transcript = _transcript_path(projects)
-    event = json.loads(transcript.read_text())
-    if field == "model":
-        event["message"][field] = value
-    else:
-        event[field] = value
-    transcript.write_text(json.dumps(event) + "\n")
-    assert (
-        collect_review(store, attempt_id, core, sessions, projects).state
-        == AttemptState.REVIEW_FAILED
-    )
-
-
-def test_collect_rejects_non_terminal_final_assistant_event(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-    transcript = _transcript_path(projects)
-    event = json.loads(transcript.read_text())
-    event["message"]["stop_reason"] = "tool_use"
-    transcript.write_text(json.dumps(event) + "\n")
-    assert (
-        collect_review(store, attempt_id, core, sessions, projects).state
-        == AttemptState.REVIEW_FAILED
-    )
-
-
-def test_identity_or_transcript_host_error_is_unresolved(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-    shutil.rmtree(sessions)
-    sessions.mkdir()
-    (sessions / "malformed.json").write_text("{}")
-    with pytest.raises(ReviewUnresolved):
-        collect_review(store, attempt_id, core, sessions, projects)
-    assert store.get_attempt(attempt_id).state == AttemptState.IMPLEMENTED
-    assert any(event.kind == "review_unresolved" for event in store.events())
-
-
-def test_missing_transcript_is_unresolved(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-    _transcript_path(projects).unlink()
-    with pytest.raises(ReviewUnresolved):
-        collect_review(store, attempt_id, core, sessions, projects)
-    assert store.get_attempt(attempt_id).state == AttemptState.IMPLEMENTED
-
-
-def test_two_matching_tasks_are_unresolved(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-    with sqlite3.connect(core) as conn:
-        conn.execute("INSERT INTO task_runs SELECT * FROM task_runs")
-        conn.commit()
-    with pytest.raises(ReviewUnresolved):
-        collect_review(store, attempt_id, core, sessions, projects)
-    assert store.campaign()[0] == "PAUSED"
-
-
-def test_cancel_uses_exact_task_and_unknown_response_stays_pending(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
-    reserve_review(store, attempt_id, bundle, "owner")
-    acknowledge_review(store, attempt_id, "agent:claude:acp:child", "run-1", "run", None)
-    core, _sessions, _projects = _host_fixture(
-        store, attempt_id, bundle, tmp_path, status="running"
-    )
-    calls: list[tuple[str, str]] = []
-
-    async def lost_response(task_id: str, reason: str) -> dict[str, object]:
-        calls.append((task_id, reason))
-        raise OpenClawTransportError("connection lost after send")
-
-    outcome = cancel_review(store, attempt_id, "stop review", core, lost_response)
-    assert calls == [("task-1", "stop review")]
-    assert outcome.pending is True
-    assert outcome.rpc_result == "UNKNOWN_RESPONSE"
-    assert json.loads(store.evidence(attempt_id, "review_cancel"))["task_id"] == "task-1"
-
-    replay = cancel_review(store, attempt_id, "stop review", core, lost_response)
-    assert replay.pending is True
-    assert calls == [("task-1", "stop review")]
-
-
-def test_cancel_rejection_is_pending_until_terminal_reread(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, attempt_id, _bundle, core, _sessions, _projects = _prepare_review(
-        campaign, tmp_path, status="running"
-    )
-
-    async def rejected(task_id: str, reason: str) -> dict[str, object]:
-        del reason
-        return {"taskId": task_id, "status": "rejected"}
-
-    outcome = cancel_review(store, attempt_id, "stop review", core, rejected)
-    assert outcome.pending is True
-    assert outcome.status == "pending"
-    assert outcome.rpc_result == "RPC_REJECTED"
-
-
-def test_cancel_unexpected_error_uses_terminal_reread(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, attempt_id, _bundle, core, _sessions, _projects = _prepare_review(
-        campaign, tmp_path, status="running"
-    )
-
-    async def errored(task_id: str, reason: str) -> dict[str, object]:
-        del reason
-        with sqlite3.connect(core) as conn:
-            conn.execute(
-                "UPDATE task_runs SET status='cancelled', ended_at=created_at+3000 WHERE task_id=?",
-                (task_id,),
-            )
-            conn.commit()
-        raise RuntimeError("unexpected transport boundary")
-
-    outcome = cancel_review(store, attempt_id, "stop review", core, errored)
-    assert outcome.pending is False
-    assert outcome.status == "cancelled"
-    assert outcome.rpc_result == "RPC_ERROR:RuntimeError"
-
-
-def test_cancel_unexpected_error_replay_stays_pending_without_resend(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, attempt_id, _bundle, core, _sessions, _projects = _prepare_review(
-        campaign, tmp_path, status="running"
-    )
-    calls = 0
-
-    async def errored(task_id: str, reason: str) -> dict[str, object]:
-        nonlocal calls
-        calls += 1
-        del task_id, reason
-        raise RuntimeError("unexpected transport boundary")
-
-    outcome = cancel_review(store, attempt_id, "stop review", core, errored)
-    replay = cancel_review(store, attempt_id, "stop review", core, errored)
-    assert outcome.pending is True
-    assert replay.pending is True
-    assert replay.rpc_result == "RPC_ERROR:RuntimeError"
-    assert calls == 1
-
-
-def test_bundle_mutation_verification_fails_closed(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, attempt_id, bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
-    bundle.chmod(0o755)
-    (bundle / "test-evidence").chmod(0o644)
-    (bundle / "test-evidence").write_text("mutated", encoding="utf-8")
-    assert (
-        collect_review(store, attempt_id, core, sessions, projects).state
-        == AttemptState.REVIEW_FAILED
-    )
-    assert (
-        json.loads(store.evidence(attempt_id, "review_host_evidence"))["reason"]
-        == "bundle_invalid: bundle directory is mutable"
-    )
-
-
-def test_queue_refuses_missing_or_forced_review_host_evidence(
+def test_queue_refuses_forced_review_pass_without_native_host_evidence(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
     store, _source, hypothesis, attempt_id, _bundle = _setup(campaign, tmp_path)
@@ -1291,67 +737,27 @@ def test_queue_refuses_missing_or_forced_review_host_evidence(
         _queue(store, attempt_id, "job-forced-review")
 
 
-def test_queue_refuses_forced_pass_with_fail_host_evidence(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
-) -> None:
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(
-        campaign, tmp_path, verdict="FAIL"
-    )
-    assert (
-        collect_review(store, attempt_id, core, sessions, projects).state
-        == AttemptState.REVIEW_FAILED
-    )
-    attempt = store.get_attempt(attempt_id)
-    hypothesis = store.get_hypothesis(attempt.hypothesis_id)
-    forced = replace(
-        attempt,
-        state=AttemptState.REVIEW_PASSED,
-        review_verdict="PASS",
-        review_commit=attempt.commit,
-        review_spec_sha256=hypothesis.spec_sha256,
-    )
-    store.set_state(forced, event="test_forced_review_pass")
-    with pytest.raises(StoreConflict):
-        _queue(store, attempt_id, "job-fail-review")
-
-
-def test_self_report_submit_is_a_tombstone(
+def test_self_report_submit_remains_a_tombstone(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
     store, _source, hypothesis, attempt_id, _bundle = _setup(campaign, tmp_path)
     attempt = store.get_attempt(attempt_id)
-    record = ReviewRecord(
+    record = ReviewEvidence(
         attempt_id,
         str(attempt.commit),
         hypothesis.spec_sha256,
         "PASS",
         (),
-        "claude-opus-5",
-        "claude-opus-5",
-        "session",
+        "gpt-5.6-sol",
+        "gpt-5.6-sol",
+        "child-session",
         "2026-01-01T00:00:00Z",
     )
     with pytest.raises(StoreConflict, match="review-submit was removed"):
-        store.submit_review(attempt_id, record)  # type: ignore[arg-type]
+        store.submit_review(attempt_id, record)
 
 
-def test_all_decided_wake_requests_next_hypothesis_authoring(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-) -> None:
-    from gateway.research.wake import compose_wake
-
-    store, _source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
-    store.decide_hypothesis(hypothesis.hypothesis_id, HypothesisDecision.FINISHED, "done")
-    plan = compose_wake(store)
-    assert plan is not None
-    assert plan.state == "ALL_DECIDED"
-    assert plan.hypothesis_id == "H0002"
-    assert "author" in plan.message
-    assert "freeze" in plan.message
-
-
-def test_implemented_wake_requests_high_effort_review(
+def test_wake_asks_for_native_sol_xhigh_reviewer(
     campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
 ) -> None:
     store, _source, _hypothesis, _attempt_id, _bundle = _setup(campaign, tmp_path)
@@ -1359,5 +765,6 @@ def test_implemented_wake_requests_high_effort_review(
 
     plan = compose_wake(store)
     assert plan is not None
-    assert plan.state == "IMPLEMENTED"
-    assert "effort=high" in plan.message
+    assert "gpt-5.6-sol" in plan.message
+    assert "xhigh" in plan.message
+    assert "spawn_agent" in plan.message

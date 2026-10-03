@@ -6,8 +6,8 @@ read-only control operation and report the returned status in the same turn.
 
 The autonomous research owner is Astra in the separate
 `research-orchestrator` persona. Native Luna implements and runs admitted
-attempts; Claude Code Opus via ACP reviews once. OpenAI/Codex remains the
-provider. Do not invent a route, silently switch providers, or claim a result
+attempts; native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) reviews once.
+OpenAI/Codex remains the provider. Do not invent a route, silently switch providers, or claim a result
 from an unproven acknowledgement.
 
 The scientific boundary is price-panel-only and ETF-scoped. Stock work is

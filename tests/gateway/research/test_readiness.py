@@ -30,19 +30,44 @@ from gateway.research.status import ResearchStatus
 from gateway.research.store import ResearchStore, StoreConflict
 from gateway.research.wake import OpenClawWakeSender, compose_wake, deliver, poll_owner_turn
 
+from tests.gateway.research.native_review_fixtures import OWNER_SESSION, prepare_review
 from tests.gateway.research.test_admission import _admit, _document, _payload
-from tests.gateway.research.test_review_evidence import _prepare_review
 
 
 def _native_database(path: Path) -> Path:
-    with sqlite3.connect(path) as connection:
+    managed_root = path.parent / f"{path.stem}-managed"
+    core = managed_root / "state" / "openclaw.sqlite"
+    agent = managed_root / "agents" / "research-orchestrator" / "agent"
+    core.parent.mkdir(parents=True, exist_ok=True)
+    agent.joinpath("codex-home").mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(core) as connection:
         connection.executescript(
             """
             CREATE TABLE task_runs (task_id TEXT);
             """
         )
-    path.chmod(0o600)
-    return path
+    with sqlite3.connect(agent / "openclaw-agent.sqlite") as connection:
+        connection.executescript(
+            """
+            CREATE TABLE session_nodes (session_key TEXT, current_session_id TEXT,
+              parent_session_key TEXT, spawned_by TEXT, label TEXT, created_at INTEGER,
+              entry_valid INTEGER);
+            CREATE TABLE trajectory_runtime_events (session_id TEXT, seq INTEGER,
+              run_id TEXT, event_json TEXT, created_at INTEGER);
+            """
+        )
+    with sqlite3.connect(agent / "codex-home" / "state_5.sqlite") as connection:
+        connection.executescript(
+            """
+            CREATE TABLE threads (id TEXT, rollout_path TEXT, source TEXT,
+              model_provider TEXT, thread_source TEXT, agent_role TEXT, model TEXT,
+              reasoning_effort TEXT, agent_path TEXT, name TEXT);
+            CREATE TABLE thread_spawn_edges (parent_thread_id TEXT,
+              child_thread_id TEXT, status TEXT);
+            """
+        )
+    core.chmod(0o600)
+    return core
 
 
 def configure_real_readiness(
@@ -255,6 +280,10 @@ def test_native_guard_reports_database_schema_permissions_and_digest_refusals(
 
     database.unlink()
     _native_database(database)
+    monkeypatch.setenv(
+        "RESEARCH_CORE_DATABASE",
+        str(tmp_path / "native-core-managed" / "state" / "openclaw.sqlite"),
+    )
     record, digest = _native_runtime_record(tmp_path / "digest-rollout.jsonl")
     register_native_runtime_record(store.root, record, digest)
     record.write_bytes(b"mutated")
@@ -453,8 +482,8 @@ def test_production_factory_rejects_process_contract_mismatch(
 
 
 class _FakeGateway:
-    def __init__(self, core_database: Path) -> None:
-        self.core_database = core_database
+    def __init__(self, codex_state_database: Path) -> None:
+        self.codex_state_database = codex_state_database
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     async def request_once(
@@ -475,15 +504,8 @@ class _FakeGateway:
             }
         if method == "agent.wait":
             return {"runId": params["runId"], "status": "ok"}
-        if method == "tasks.cancel":
-            task_id = str(params["taskId"])
-            with sqlite3.connect(self.core_database) as connection:
-                connection.execute(
-                    "UPDATE task_runs SET status='cancelled' WHERE task_id=?",
-                    (task_id,),
-                )
-                connection.commit()
-            return {"taskId": task_id, "status": "cancelled"}
+        if method == "chat.abort":
+            return {"runId": params["runId"], "status": "accepted"}
         raise AssertionError(f"unexpected gateway method: {method}")
 
 
@@ -496,10 +518,10 @@ class _MismatchedCancelGateway(_FakeGateway):
         timeout_seconds: float,
         required_server_version: str | None = None,
     ) -> dict[str, object]:
-        if method == "tasks.cancel":
+        if method == "chat.abort":
             del timeout_seconds, required_server_version
             self.calls.append((method, dict(params)))
-            return {"taskId": "wrong-task", "status": "cancelled"}
+            return {"runId": "wrong-run", "status": "accepted"}
         return await super().request_once(
             method,
             params,
@@ -529,10 +551,8 @@ def test_fake_gateway_proves_wake_wait_and_exact_review_cancel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store, attempt_id, _bundle, core, _sessions, _projects = _prepare_review(
-        campaign, tmp_path, status="running"
-    )
-    gateway = _FakeGateway(core)
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path, status="running")
+    gateway = _FakeGateway(native.codex_state_database)
     monkeypatch.setattr(OpenClawClient, "request_once", gateway.request_once)
     sender = OpenClawWakeSender("127.0.0.1", 18789, "synthetic-token")
     session_key = "agent:research-orchestrator:autoresearch:quantipy-v2"
@@ -549,17 +569,19 @@ def test_fake_gateway_proves_wake_wait_and_exact_review_cancel(
     result = OwnerControl(
         store.root,
         unit=_ActiveUnit(),
-        review_canceller=OpenClawReviewCanceller(core, gateway.request_once),
+        review_canceller=OpenClawReviewCanceller(
+            native.openclaw_database, gateway.request_once, native.codex_state_database
+        ),
     ).stop()
 
-    assert result.completed is True
-    assert result.review_cancellation == "cancelled"
-    assert [method for method, _params in gateway.calls] == [
-        "agent",
-        "agent.wait",
-        "tasks.cancel",
-    ]
-    assert gateway.calls[-1][1]["taskId"] == "task-1"
+    assert result.completed is False
+    assert result.review_cancellation == "incomplete_pending"
+    assert [method for method, _params in gateway.calls] == ["agent", "agent.wait", "chat.abort"]
+    assert gateway.calls[-1][1] == {
+        "sessionKey": OWNER_SESSION,
+        "agentId": "research-orchestrator",
+        "runId": "owner-run-1",
+    }
     assert store.get_attempt(attempt_id).state.value == "IMPLEMENTED"
 
 
@@ -567,17 +589,26 @@ def test_mismatched_review_cancel_stays_pending_and_incomplete(
     campaign: tuple[ResearchStore, Path, Any],
     tmp_path: Path,
 ) -> None:
-    store, _attempt_id, _bundle, core, _sessions, _projects = _prepare_review(
-        campaign, tmp_path, status="running"
-    )
-    gateway = _MismatchedCancelGateway(core)
+    store, _attempt_id, _bundle, native = prepare_review(campaign, tmp_path, status="running")
+    gateway = _MismatchedCancelGateway(native.codex_state_database)
 
     result = OwnerControl(
         store.root,
         unit=_ActiveUnit(),
-        review_canceller=OpenClawReviewCanceller(core, gateway.request_once),
+        review_canceller=OpenClawReviewCanceller(
+            native.openclaw_database, gateway.request_once, native.codex_state_database
+        ),
     ).stop()
 
     assert result.review_cancellation == "incomplete_pending"
     assert result.completed is False
-    assert gateway.calls == [("tasks.cancel", {"taskId": "task-1", "reason": "operator stop"})]
+    assert gateway.calls == [
+        (
+            "chat.abort",
+            {
+                "sessionKey": OWNER_SESSION,
+                "agentId": "research-orchestrator",
+                "runId": "owner-run-1",
+            },
+        )
+    ]

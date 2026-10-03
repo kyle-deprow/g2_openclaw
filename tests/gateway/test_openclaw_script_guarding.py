@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
 import stat
 import subprocess
@@ -27,7 +26,7 @@ NATIVE_CRASH_HARDENING_DROPIN = (
     REPO_ROOT / "gateway/openclaw_config/openclaw-gateway-native-crash-hardening.conf"
 )
 
-STAGE_AGENT_IDS = ["implementer", "experiment_runner"]
+STAGE_AGENT_IDS = ["implementer", "experiment_runner", "reviewer"]
 EXPECTED_MAIN_ALLOW = [
     "g2-control__g2_autoresearch_status",
     "g2-control__g2_autoresearch_start",
@@ -825,7 +824,7 @@ if [[ "${OPENCLAW_STATE_DIR:-}" != "$EXPECTED_OPENCLAW_STATE_DIR" ]]; then
   exit 68
 fi
 case "${OPENCLAW_CONFIG_PATH:-}" in
-  "$EXPECTED_OPENCLAW_CONFIG_PATH"|"$TEST_ROOT"/push-openclaw-config-preflight.*/openclaw.repo-preflight.json|"$TEST_ROOT"/push-openclaw-config-preflight.*/openclaw.acpx-preflight.*.json|"$EXPECTED_OPENCLAW_STATE_DIR"/.openclaw.generated.*.json)
+  "$EXPECTED_OPENCLAW_CONFIG_PATH"|"$TEST_ROOT"/push-openclaw-config-preflight.*/openclaw.repo-preflight.json|"$EXPECTED_OPENCLAW_STATE_DIR"/.openclaw.generated.*.json)
     ;;
   *)
   printf 'unexpected OPENCLAW_CONFIG_PATH=%s\n' "${OPENCLAW_CONFIG_PATH:-<unset>}" >&2
@@ -1031,50 +1030,6 @@ JSON
     fi
     ;;
   plugins)
-    if [[ "${2:-}" == "inspect" \
-      && "${3:-}" == "acpx" \
-      && "${4:-}" == "--runtime" \
-      && "${5:-}" == "--json" ]]; then
-      if [[ -n "${MOCK_ACPX_INSPECT_STDERR:-}" ]]; then
-        printf '%s\n' "$MOCK_ACPX_INSPECT_STDERR" >&2
-      fi
-      if [[ "${MOCK_ACPX_EXPECT_NO_LOAD_PATH:-0}" == "1" ]] \
-        && ! jq -e '.plugins.load.paths? == null' "$OPENCLAW_CONFIG_PATH" >/dev/null; then
-        printf 'ACPX preflight retained a machine-local plugin load path\n' >&2
-        exit 73
-      fi
-      if [[ "${MOCK_ACPX_PLUGIN_PRESENT:-1}" != "1" ]]; then
-        cat <<JSON
-{
-  "plugin": {
-    "id": "acpx",
-    "packageName": "@openclaw/acpx",
-    "packageVersion": "2026.8.0",
-    "version": "2026.8.0",
-    "enabled": true,
-    "status": "loaded",
-    "rootDir": "${MOCK_ACPX_PLUGIN_PATH}"
-  }
-}
-JSON
-      exit 0
-      fi
-      cat <<JSON
-{
-  "plugin": {
-      "id": "acpx",
-      "packageName": "@openclaw/acpx",
-      "packageVersion": "2026.8.1",
-      "version": "2026.8.1",
-      "source": "${MOCK_ACPX_PLUGIN_PATH}/dist/index.js",
-      "rootDir": "${MOCK_ACPX_PLUGIN_ROOT-${MOCK_ACPX_PLUGIN_PATH}}",
-      "enabled": ${MOCK_ACPX_PLUGIN_ENABLED:-true},
-      "status": "${MOCK_ACPX_PLUGIN_STATUS:-loaded}"
-  }
-}
-JSON
-      exit 0
-    fi
     [[ "${2:-}" == "inspect" && "${3:-}" == "codex" && "${4:-}" == "--json" ]] || exit 45
     if [[ "$OPENCLAW_CONFIG_PATH" == "$EXPECTED_REPO_OPENCLAW_CONFIG_PATH" ]]; then
       printf 'plugin inspect used tracked repo overlay\n' >&2
@@ -1531,57 +1486,6 @@ def _prepare_push_script_home(
         ),
         encoding="utf-8",
     )
-    acpx_root = tmp_path / "mock-acpx/node_modules/@openclaw/acpx"
-    adapter_root = acpx_root / "node_modules/@agentclientprotocol/claude-agent-acp"
-    plugin_acpx_root = acpx_root / "node_modules/acpx"
-    sdk_root = adapter_root / "node_modules/@agentclientprotocol/sdk"
-    claude_sdk_root = adapter_root / "node_modules/@anthropic-ai/claude-agent-sdk"
-    adapter_bin = adapter_root / "dist/index.js"
-    acpx_root.mkdir(parents=True)
-    adapter_root.mkdir(parents=True)
-    plugin_acpx_root.mkdir(parents=True)
-    sdk_root.mkdir(parents=True)
-    claude_sdk_root.mkdir(parents=True)
-    (acpx_root / "package.json").write_text(
-        json.dumps(
-            {
-                "name": "@openclaw/acpx",
-                "version": "2026.8.1",
-                "dependencies": {
-                    "@agentclientprotocol/claude-agent-acp": "0.70.0",
-                    "acpx": "0.13.1",
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    (adapter_root / "package.json").write_text(
-        json.dumps(
-            {
-                "name": "@agentclientprotocol/claude-agent-acp",
-                "version": "0.70.0",
-                "bin": {"claude-agent-acp": "dist/index.js"},
-                "dependencies": {
-                    "@agentclientprotocol/sdk": "1.3.0",
-                    "@anthropic-ai/claude-agent-sdk": "0.3.232",
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    (plugin_acpx_root / "package.json").write_text(
-        json.dumps({"name": "acpx", "version": "0.13.1"}),
-        encoding="utf-8",
-    )
-    (sdk_root / "package.json").write_text(
-        json.dumps({"name": "@agentclientprotocol/sdk", "version": "1.3.0"}),
-        encoding="utf-8",
-    )
-    (claude_sdk_root / "package.json").write_text(
-        json.dumps({"name": "@anthropic-ai/claude-agent-sdk", "version": "0.3.232"}),
-        encoding="utf-8",
-    )
-    _write_executable(adapter_bin, "#!/usr/bin/env bash\nexit 0\n")
     env_file = tmp_path / "openclaw-push.env"
     env_file.write_text(
         "\n".join(
@@ -1642,7 +1546,6 @@ def _prepare_push_script_home(
             "MOCK_CODEX_RESOLVED_PATH": str(
                 home / "mock-openclaw-project/node_modules/@openai/codex"
             ),
-            "MOCK_ACPX_PLUGIN_PATH": str(acpx_root),
             "RESEARCH_OWNER_PERSONA_SRC": str(persona_dir),
             "SKILLS_SRC": str(skills_dir),
             "CODEX_DOCTOR_LOG": str(home / "codex-doctor.log"),
@@ -1790,21 +1693,18 @@ def test_push_script_rejects_corrupted_quantipy_api_unit_template(tmp_path: Path
 
 def test_repo_openclaw_config_has_g2_interface_and_bounded_research_owner() -> None:
     config = json.loads(OPENCLAW_CONFIG.read_text(encoding="utf-8"))
-    repo_config_text = json.dumps(config)
     assert config["cron"]["enabled"] is False
     assert config["memory"]["search"]["enabled"] is False
     assert config["agents"]["defaults"]["heartbeat"]["every"] == "0m"
     assert config["skills"]["workshop"]["autonomous"]["mode"] == "off"
-    assert config["plugins"]["allow"] == ["codex", "acpx", "openai"]
+    assert config["plugins"]["allow"] == ["codex", "openai"]
     openai_provider = config["models"]["providers"]["openai"]
     assert openai_provider["api"] == "openai-chatgpt-responses"
     assert openai_provider["baseUrl"] == "https://chatgpt.com/backend-api/codex"
     assert openai_provider["auth"] == "oauth"
     assert openai_provider["agentRuntime"] == {"id": "codex"}
     assert "apiKey" not in openai_provider
-    assert "__RESEARCH_REVIEWER_LAUNCHER__" not in repo_config_text
-    assert "__ACPX_ADAPTER_BIN__" not in repo_config_text
-    assert config["plugins"]["entries"]["acpx"]["config"] == {}
+    assert "acpx" not in config["plugins"]["entries"]
     assert config["plugins"]["entries"]["memory-core"]["enabled"] is False
     assert config["plugins"]["slots"]["memory"] == "none"
     assert config["agents"]["defaults"]["maxConcurrent"] == 2
@@ -1814,7 +1714,7 @@ def test_repo_openclaw_config_has_g2_interface_and_bounded_research_owner() -> N
     assert config["agents"]["ownership"] == "explicit"
     assert "list" not in config["agents"]
     assert all("id" not in agent for agent in config["agents"]["entries"].values())
-    assert "maxConcurrentSessions" not in config["acp"]
+    assert "acp" not in config
 
     agents = config["agents"]["entries"]
 
@@ -1833,15 +1733,9 @@ def test_repo_openclaw_config_has_g2_interface_and_bounded_research_owner() -> N
     assert owner["thinkingDefault"] == "high"
     assert owner["workspace"] == "workspace-research-orchestrator"
     assert owner["skills"] == ["research-loop"]
-    assert owner["subagents"]["allowAgents"] == ["claude"]
+    assert owner.get("subagents", {}).get("allowAgents", []) == []
     assert owner["tools"] == {"profile": "full"}
-    assert set(agents) == {"main", "research-orchestrator", "claude"}
-    assert agents["claude"] == {
-        "runtime": {
-            "type": "acp",
-            "acp": {"agent": "claude", "backend": "acpx", "mode": "oneshot"},
-        }
-    }
+    assert set(agents) == {"main", "research-orchestrator"}
 
     servers = config["mcp"]["servers"]
     assert list(servers) == ["mempalace-readonly", "g2-control"]
@@ -1875,7 +1769,7 @@ def test_push_script_invariants_target_research_owner_not_main() -> None:
     assert 'entries = agents.get("entries")' in config_merge
     assert 'owner = entries.get("research-orchestrator")' in config_merge
     assert "main interface, Astra research owner" in script
-    assert 'CODEX_NATIVE_STAGE_AGENT_IDS=("implementer" "experiment_runner")' in script
+    assert 'CODEX_NATIVE_STAGE_AGENT_IDS=("implementer" "experiment_runner" "reviewer")' in script
     assert "Research orchestrator tool policy" in script
     assert '.tools == {"profile": "full"}' in script
     assert ".agents.defaults.maxConcurrent == 2" in script
@@ -2391,252 +2285,6 @@ def test_push_script_rejects_non_exact_codex_runtime(
     cp_log = _read_cp_log(env)
     assert "openclaw.json.bak" not in cp_log
     assert "mempalace-readonly-server.py" not in cp_log
-
-
-def test_push_script_missing_pinned_acpx_fails_before_live_write(tmp_path: Path) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    env["MOCK_ACPX_PLUGIN_PRESENT"] = "0"
-    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
-    original = live_config.read_bytes()
-
-    result = _run_push_script(env)
-
-    assert result.returncode != 0
-    assert "@openclaw/acpx version 2026.8.1 was not found" in result.stderr
-    assert live_config.read_bytes() == original
-    assert not (live_config.parent / "openclaw.json.bak").exists()
-    assert not Path(env["CP_LOG"]).exists() or "openclaw.json.bak" not in _read_cp_log(env)
-
-
-@pytest.mark.parametrize(
-    ("variable", "value"),
-    [
-        ("MOCK_ACPX_PLUGIN_ENABLED", "false"),
-        ("MOCK_ACPX_PLUGIN_STATUS", "error"),
-        ("MOCK_ACPX_PLUGIN_ROOT", "relative/acpx"),
-    ],
-)
-def test_push_script_acpx_inspect_schema_mismatch_fails_closed(
-    tmp_path: Path, variable: str, value: str
-) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    env[variable] = value
-
-    result = _run_push_script(env)
-
-    assert result.returncode != 0
-    assert "@openclaw/acpx version 2026.8.1 was not found" in result.stderr
-
-
-def test_push_script_acpx_inspect_keeps_stderr_out_of_json_parser(tmp_path: Path) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    env["MOCK_ACPX_INSPECT_STDERR"] = "sqlite transaction warning"
-
-    result = _run_push_script(env)
-
-    assert result.returncode == 0, result.stderr
-    assert "sqlite transaction warning" in result.stderr
-
-
-def test_push_script_acpx_first_push_ignores_local_load_path_for_adapter_resolution(
-    tmp_path: Path,
-) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
-    old_linked_root = tmp_path / "old-linked-acpx"
-    config = json.loads(live_config.read_text(encoding="utf-8"))
-    config["plugins"] = {
-        "load": {"paths": [str(old_linked_root)]},
-    }
-    live_config.write_text(json.dumps(config), encoding="utf-8")
-    official_root = Path(env["MOCK_ACPX_PLUGIN_PATH"])
-    env["MOCK_ACPX_PLUGIN_ROOT"] = str(official_root)
-    env["MOCK_ACPX_EXPECT_NO_LOAD_PATH"] = "1"
-
-    result = _run_push_script(env)
-
-    assert result.returncode == 0, result.stderr
-    published = json.loads(live_config.read_text(encoding="utf-8"))
-    adapter_bin = published["plugins"]["entries"]["acpx"]["config"]["agents"]["claude"]["args"][1]
-    assert adapter_bin.startswith(str(official_root))
-    assert str(old_linked_root) not in json.dumps(published)
-    inspect_lines = [
-        line
-        for line in Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8").splitlines()
-        if "plugins inspect acpx --runtime --json" in line
-    ]
-    assert len(inspect_lines) == 1
-    assert str(live_config) not in inspect_lines[0]
-
-
-def test_push_script_acpx_resolver_uses_adapter_owned_sdk_tuple_without_separate_binary() -> None:
-    script = PUSH_SCRIPT.read_text(encoding="utf-8")
-
-    assert '"2026.8.1"' in script
-    assert '"0.13.1"' in script
-    assert '"@agentclientprotocol/claude-agent-acp"' in script
-    assert '"0.70.0"' in script
-    assert '"@agentclientprotocol/sdk"' in script
-    assert '"1.3.0"' in script
-    assert '"@anthropic-ai/claude-agent-sdk"' in script
-    assert '"0.3.232"' in script
-    assert 'resolve("@agentclientprotocol/sdk/package.json")' not in script
-    assert 'resolve("@anthropic-ai/claude-agent-sdk/package.json")' not in script
-    assert 'resolve("acpx/package.json")' not in script
-    assert 'require("acpx")' not in script
-    assert "claude-agent-acp executable" not in script
-
-
-def test_push_script_acpx_inspect_uses_openclaw_81_plugin_root_schema() -> None:
-    script = PUSH_SCRIPT.read_text(encoding="utf-8")
-
-    assert "plugins inspect acpx --runtime --json" in script
-    assert ".plugin" in script
-    assert '.packageName == "@openclaw/acpx"' in script
-    assert ".packageVersion == $version" in script
-    assert '.status == "loaded"' in script
-    assert '.rootDir | strings | startswith("/")' in script
-    assert ".root?" not in script
-    assert ".path?" not in script
-    assert ".packagePath?" not in script
-    assert ".entrypoint?" not in script
-    assert "2> >(cat >&2)" not in script
-
-
-@pytest.mark.parametrize(
-    ("dependency_value", "expected_error"),
-    [
-        (None, None),
-        ("9.9.9", "ACPX plugin dependency acpx must be 0.13.1"),
-    ],
-)
-def test_push_script_acpx_plugin_dependency_is_optional_but_exact_when_declared(
-    tmp_path: Path,
-    dependency_value: str | None,
-    expected_error: str | None,
-) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    plugin_package_path = Path(env["MOCK_ACPX_PLUGIN_PATH"]) / "package.json"
-    plugin_package = json.loads(plugin_package_path.read_text(encoding="utf-8"))
-    if dependency_value is None:
-        plugin_package["dependencies"].pop("acpx")
-    else:
-        plugin_package["dependencies"]["acpx"] = dependency_value
-    plugin_package_path.write_text(json.dumps(plugin_package), encoding="utf-8")
-
-    result = _run_push_script(env)
-
-    if expected_error is None:
-        assert result.returncode == 0, result.stderr
-    else:
-        assert result.returncode != 0
-        assert expected_error in result.stderr
-
-
-def test_push_script_acpx_rejects_reversed_adapter_sdk_tuple(tmp_path: Path) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    adapter_root = (
-        Path(env["MOCK_ACPX_PLUGIN_PATH"]) / "node_modules/@agentclientprotocol/claude-agent-acp"
-    )
-    sdk_package_path = adapter_root / "node_modules/@agentclientprotocol/sdk/package.json"
-    claude_sdk_package_path = (
-        adapter_root / "node_modules/@anthropic-ai/claude-agent-sdk/package.json"
-    )
-    sdk_package = json.loads(sdk_package_path.read_text(encoding="utf-8"))
-    claude_sdk_package = json.loads(claude_sdk_package_path.read_text(encoding="utf-8"))
-    sdk_package["version"], claude_sdk_package["version"] = (
-        claude_sdk_package["version"],
-        sdk_package["version"],
-    )
-    sdk_package_path.write_text(json.dumps(sdk_package), encoding="utf-8")
-    claude_sdk_package_path.write_text(json.dumps(claude_sdk_package), encoding="utf-8")
-
-    result = _run_push_script(env)
-
-    assert result.returncode != 0
-    assert "Agent Client Protocol SDK must be 1.3.0" in result.stderr
-
-
-def test_push_script_acpx_accepts_hoisted_adapter_owned_sdk(tmp_path: Path) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    acpx_root = Path(env["MOCK_ACPX_PLUGIN_PATH"])
-    adapter_sdk_package_path = (
-        acpx_root
-        / "node_modules/@agentclientprotocol/claude-agent-acp/node_modules"
-        / "@agentclientprotocol/sdk/package.json"
-    )
-    adapter_sdk_package_path.unlink()
-    plugin_sdk_package_path = acpx_root / "node_modules/@agentclientprotocol/sdk/package.json"
-    plugin_sdk_package_path.parent.mkdir(parents=True)
-    plugin_sdk_package_path.write_text(
-        json.dumps({"name": "@agentclientprotocol/sdk", "version": "1.3.0"}),
-        encoding="utf-8",
-    )
-
-    result = _run_push_script(env)
-
-    assert result.returncode == 0, result.stderr
-
-
-def test_push_script_acpx_rejects_adapter_resolved_above_frozen_stage(tmp_path: Path) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    acpx_root = Path(env["MOCK_ACPX_PLUGIN_PATH"])
-    nested_adapter_root = acpx_root / "node_modules/@agentclientprotocol/claude-agent-acp"
-    escaped_adapter_root = tmp_path / "node_modules/@agentclientprotocol/claude-agent-acp"
-    escaped_adapter_root.parent.mkdir(parents=True)
-    shutil.copytree(nested_adapter_root, escaped_adapter_root)
-    shutil.rmtree(nested_adapter_root)
-
-    result = _run_push_script(env)
-
-    assert result.returncode != 0
-    assert "not installed in the declared dependency tree" in result.stderr
-
-
-def test_push_script_acpx_rejects_installed_optional_package_version_mismatch(
-    tmp_path: Path,
-) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    package_path = Path(env["MOCK_ACPX_PLUGIN_PATH"]) / "node_modules/acpx/package.json"
-    package = json.loads(package_path.read_text(encoding="utf-8"))
-    package["version"] = "9.9.9"
-    package_path.write_text(json.dumps(package), encoding="utf-8")
-
-    result = _run_push_script(env)
-
-    assert result.returncode != 0
-    assert "ACPX plugin package must be acpx 0.13.1" in result.stderr
-
-
-def test_push_script_acpx_rejects_adapter_sdk_declaration_mismatch(tmp_path: Path) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    adapter_package_path = (
-        Path(env["MOCK_ACPX_PLUGIN_PATH"])
-        / "node_modules/@agentclientprotocol/claude-agent-acp/package.json"
-    )
-    adapter_package = json.loads(adapter_package_path.read_text(encoding="utf-8"))
-    adapter_package["dependencies"]["@agentclientprotocol/sdk"] = "1.2.0"
-    adapter_package_path.write_text(json.dumps(adapter_package), encoding="utf-8")
-
-    result = _run_push_script(env)
-
-    assert result.returncode != 0
-    assert "Adapter ACP SDK dependency declaration does not match" in result.stderr
-
-
-def test_push_script_acpx_rejects_missing_claude_agent_sdk(tmp_path: Path) -> None:
-    env = _prepare_push_script_home(tmp_path)
-    claude_sdk_package_path = (
-        Path(env["MOCK_ACPX_PLUGIN_PATH"])
-        / "node_modules/@agentclientprotocol/claude-agent-acp/node_modules"
-        / "@anthropic-ai/claude-agent-sdk/package.json"
-    )
-    claude_sdk_package_path.unlink()
-
-    result = _run_push_script(env)
-
-    assert result.returncode != 0
-    assert "Could not resolve the installed Claude ACP adapter" in result.stderr
 
 
 def test_push_script_missing_research_persona_is_explicit_p4_gate(tmp_path: Path) -> None:
@@ -3219,14 +2867,14 @@ def test_push_script_installs_runtime_caps_exactly_with_safe_modes_and_no_restar
     cp_log = Path(env["CP_LOG"]).read_text(encoding="utf-8")
     assert cp_log.count(str(GATEWAY_RUNTIME_CAPS_DROPIN)) == 1
     openclaw_log = Path(env["OPENCLAW_LOG"]).read_text(encoding="utf-8")
-    assert openclaw_log.count("OPENCLAW_HOME=<unset>") == 6
-    assert openclaw_log.count("OPENCLAW_PUSH_HOME=<unset>") == 6
-    assert openclaw_log.count(f"OPENCLAW_STATE_DIR={env['EXPECTED_OPENCLAW_STATE_DIR']}") == 6
-    assert openclaw_log.count(f"OPENCLAW_CONFIG_PATH={env['EXPECTED_OPENCLAW_CONFIG_PATH']}") == 2
+    assert openclaw_log.count("OPENCLAW_HOME=<unset>") == 5
+    assert openclaw_log.count("OPENCLAW_PUSH_HOME=<unset>") == 5
+    assert openclaw_log.count(f"OPENCLAW_STATE_DIR={env['EXPECTED_OPENCLAW_STATE_DIR']}") == 5
+    assert openclaw_log.count(f"OPENCLAW_CONFIG_PATH={env['EXPECTED_OPENCLAW_CONFIG_PATH']}") == 1
     assert "OPENCLAW_CONFIG_PATH=" + env["EXPECTED_REPO_OPENCLAW_CONFIG_PATH"] not in openclaw_log
     assert openclaw_log.count("push-openclaw-config-preflight.") == 3
     assert "config validate --json" in openclaw_log
-    assert openclaw_log.count("NODE_OPTIONS=<unset>") == 6
+    assert openclaw_log.count("NODE_OPTIONS=<unset>") == 5
     assert "inherited-openclaw-home" not in openclaw_log
     assert "inherited-state-dir" not in openclaw_log
     assert "inherited-config.json" not in openclaw_log
@@ -3394,7 +3042,7 @@ def test_push_script_prunes_only_exact_stale_owner_layer_files(tmp_path: Path) -
     openclaw_home = Path(env["OPENCLAW_PUSH_HOME"])
     owner_layers = openclaw_home / "workspace-research-orchestrator/.codex/agent-configs"
     owner_layers.mkdir(parents=True)
-    for stale_name in ("reviewer.toml", "debater-data.toml"):
+    for stale_name in ("debater-data.toml",):
         (owner_layers / stale_name).write_text("stale research layer\n", encoding="utf-8")
     manual_layer = owner_layers / "manual-local-layer.toml"
     manual_layer.write_text("manual layer\n", encoding="utf-8")
@@ -3402,7 +3050,6 @@ def test_push_script_prunes_only_exact_stale_owner_layer_files(tmp_path: Path) -
     result = _run_push_script(env)
 
     assert result.returncode == 0, result.stderr
-    assert not (owner_layers / "reviewer.toml").exists()
     assert not (owner_layers / "debater-data.toml").exists()
     assert manual_layer.read_text(encoding="utf-8") == "manual layer\n"
     assert sorted(path.name for path in owner_layers.glob("*.toml")) == sorted(
@@ -3962,6 +3609,7 @@ def test_push_script_cleans_generated_config_without_leaking_openrouter_secret(
     initial_config = openclaw_config.read_text(encoding="utf-8")
     fixture_value = "fixture-key-1234567890abcdef"
     env["OPENCLAW_PROVIDER"] = "openrouter"
+    env["OPENROUTER_MODEL"] = "openai/gpt-4.1"
     env["OPENROUTER_API_KEY"] = fixture_value
     env["MOCK_OPENCLAW_CONFIG_VALIDATE_FAIL"] = "1"
 
@@ -4243,7 +3891,6 @@ def test_push_script_rejects_symlink_live_config_before_preflight_without_mutati
     assert "Guarded file is a symlink while capturing local OpenClaw config identity" in (
         result.stderr
     )
-    assert "before ACPX preflight" in result.stderr
     assert "live.warning" not in result.stderr
     assert openclaw_config.is_symlink()
     assert os.readlink(openclaw_config) == initial_link_target

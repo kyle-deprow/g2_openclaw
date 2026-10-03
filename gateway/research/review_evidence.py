@@ -1,9 +1,10 @@
-"""Bounded, host-observed ACP review evidence.
+"""Bounded, host-observed native OpenAI Sol review evidence.
 
 This module is the review boundary for the research driver.  A reviewer does
 not submit a JSON file that changes campaign state: the driver reserves and
-freezes a source bundle, correlates one exact ACP task, reads one exact Claude
-transcript, and only then asks the existing store to apply a verified verdict.
+freezes a source bundle, correlates one exact native Codex child across the
+official OpenClaw and Codex stores, and only then asks the existing store to
+apply a verified verdict.
 
 The host readers trust same-user SQLite/filesystem metadata.  They detect
 wrong routing, stale identities, mutation, and model substitution; they are
@@ -17,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import stat
@@ -39,27 +41,30 @@ from .contracts import (
     RunPlan,
 )
 from .host_records import (
-    AcpIdentityHostRecord,
-    ClaudeTranscriptRecord,
     HostRecordError,
-    TaskRunHostRecord,
-    read_exact_acpx_identity,
-    read_exact_claude_transcript,
-    read_exact_task_run,
+    HostRecordPending,
+    NativeChildHostRecord,
+    read_exact_native_child,
+    read_exact_native_owner,
 )
-from .store import ResearchStore, StoreConflict, now_utc
+from .store import ResearchStore, StoreConflict, canonical_wake_key, now_utc
 
 MAX_BUNDLE_FILE_BYTES = 8 * 1024 * 1024
 MAX_BUNDLE_BYTES = 128 * 1024 * 1024
 MAX_TEST_EVIDENCE_BYTES = 8 * 1024 * 1024
-CLOCK_TOLERANCE_MS = 2_000
-REVIEW_MODEL = "claude-opus-5"
-REVIEW_EFFORT = "high"
-REVIEW_TASK_RUNTIME = "acp"
+REVIEW_MODEL = "gpt-5.6-sol"
+REVIEW_EFFORT = "xhigh"
+REVIEW_TASK_RUNTIME = "native"
 REVIEW_TASK_SCOPE = "session"
-REVIEW_AGENT = "claude"
-REVIEW_BACKEND = "acpx"
-REVIEW_ACP_MODE = "oneshot"
+REVIEW_AGENT = "reviewer"
+REVIEW_BACKEND = "native"
+REVIEW_NATIVE_MODE = "run"
+# chat.abort addresses only an active owner run.  The owner yields right after
+# spawning, so once a child is running its run is inactive and OpenClaw has no
+# supported way to stop the child; it ends on its own terminal evidence.
+CANCEL_ABORTED = "owner_run_aborted"
+CANCEL_OWNER_INACTIVE = "owner_run_inactive_no_supported_child_cancel"
+_NATIVE_TASK_NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _BUNDLE_ENTRIES = {
     "spec.json",
     "diff.patch",
@@ -101,6 +106,27 @@ class ReviewReservation:
     owner_session_key: str
     label: str
     reservation_nonce: str
+    owner_run_id: str | None = None
+    owner_thread_id: str | None = None
+    task_name: str | None = None
+    prompt_sha256: str | None = None
+    spawn_arguments_json: str | None = None
+
+    @property
+    def spawn_arguments(self) -> dict[str, str]:
+        """Return the exact native spawn arguments, never a caller retyping."""
+
+        if self.spawn_arguments_json is None:
+            return {}
+        try:
+            raw: object = json.loads(self.spawn_arguments_json)
+        except json.JSONDecodeError as exc:
+            raise StoreConflict("native spawn arguments are malformed") from exc
+        if not isinstance(raw, dict) or any(
+            not isinstance(key, str) or not isinstance(value, str) for key, value in raw.items()
+        ):
+            raise StoreConflict("native spawn arguments are malformed")
+        return dict(raw)
 
     def to_json(self) -> str:
         return to_json(
@@ -114,28 +140,56 @@ class ReviewReservation:
                 "owner_session_key": self.owner_session_key,
                 "label": self.label,
                 "reservation_nonce": self.reservation_nonce,
+                **(
+                    {
+                        "owner_run_id": self.owner_run_id,
+                        "owner_thread_id": self.owner_thread_id,
+                        "task_name": self.task_name,
+                        "prompt_sha256": self.prompt_sha256,
+                        "spawn_arguments": self.spawn_arguments,
+                    }
+                    if self.spawn_arguments_json is not None
+                    else {}
+                ),
             }
         )
 
 
 @dataclass(frozen=True, slots=True)
 class ReviewAck:
-    child_session_key: str
-    run_id: str
+    """Review ACK.  ``child_session_key``/``run_id`` exist only on historical ACP ACKs.
+
+    The installed host writes no OpenClaw session or run for a native child,
+    so a native ACK identifies the child by its Codex thread id alone.
+    """
+
+    child_session_key: str | None
+    run_id: str | None
     mode: str
     run_timeout_seconds: int | None
     acked_at: str
+    owner_session_key: str | None = None
+    owner_run_id: str | None = None
+    owner_thread_id: str | None = None
+    child_thread_id: str | None = None
 
     def to_json(self) -> str:
-        return to_json(
-            {
-                "child_session_key": self.child_session_key,
-                "run_id": self.run_id,
-                "mode": self.mode,
-                "run_timeout_seconds": self.run_timeout_seconds,
-                "acked_at": self.acked_at,
-            }
-        )
+        payload: dict[str, object] = {
+            "mode": self.mode,
+            "run_timeout_seconds": self.run_timeout_seconds,
+            "acked_at": self.acked_at,
+        }
+        for key, value in (
+            ("child_session_key", self.child_session_key),
+            ("run_id", self.run_id),
+            ("owner_session_key", self.owner_session_key),
+            ("owner_run_id", self.owner_run_id),
+            ("owner_thread_id", self.owner_thread_id),
+            ("child_thread_id", self.child_thread_id),
+        ):
+            if value is not None:
+                payload[key] = value
+        return to_json(payload)
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,7 +207,7 @@ class CancelOutcome:
     rpc_result: str
 
 
-CancelTransport = Callable[[str, str], Awaitable[Mapping[str, object]]]
+CancelTransport = Callable[..., Awaitable[Mapping[str, object]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -447,7 +501,9 @@ def build_review_bundle(
         "never objects, nested arrays, or null; encode severity, location, and explanation within "
         "each string, or use [] when there are no findings.\n"
         "containment-provenance.json is the host-verified in-sandbox import provenance "
-        f"for the tested commit.\nValid JSON example:\n{verdict_example}"
+        f"for the tested commit. The immutable bundle is at bundle_dir={bundle_dir.resolve()}; "
+        "the native spawn has no cwd, so use that absolute path exactly.\n"
+        f"Valid JSON example:\n{verdict_example}"
     )
     if tracked.excluded and instructions is None:
         text += (
@@ -656,11 +712,47 @@ def reserve_review(
     owner_session_key: str,
     *,
     instructions: str | None = None,
+    wake_pending_key: str,
+    openclaw_database: Path,
 ) -> ReviewReservation:
     """Build/verify a bundle and reserve one unique reviewer label."""
 
     if not owner_session_key:
         raise ReviewEvidenceError("owner session key must be non-empty")
+    if not wake_pending_key:
+        raise ReviewEvidenceError("native review reserve requires an exact completed wake key")
+    wake = store.wake_row(wake_pending_key)
+    attempt = store.get_attempt(attempt_id)
+    _campaign_status, current_resume_seq = store.campaign()
+    expected_wake_key = canonical_wake_key(
+        attempt.hypothesis_id, attempt_id, AttemptState.IMPLEMENTED.value, current_resume_seq
+    )
+    if wake_pending_key != expected_wake_key:
+        raise ReviewUnresolved("native review wake key is not the current canonical key")
+    if wake is None:
+        raise ReviewUnresolved("native review wake reservation is missing")
+    if wake["attempt_id"] != attempt_id or wake["state"] != AttemptState.IMPLEMENTED.value:
+        raise ReviewUnresolved(
+            "native review wake reservation does not bind the IMPLEMENTED attempt"
+        )
+    wake_run_id = wake["run_id"]
+    if not isinstance(wake_run_id, str) or not wake_run_id or wake_run_id == "PENDING":
+        raise ReviewUnresolved("native review wake has no completed owner run")
+    if wake["resume_seq"] != current_resume_seq:
+        raise ReviewUnresolved("native review wake reservation is stale")
+    if attempt.state is not AttemptState.IMPLEMENTED:
+        raise ReviewUnresolved("native review attempt is no longer IMPLEMENTED")
+    try:
+        owner = read_exact_native_owner(
+            openclaw_database,
+            owner_session_key,
+            _epoch_ms(str(wake["sent_at"])),
+            expected_run_id=wake_run_id,
+        )
+    except (HostRecordError, ReviewEvidenceError) as exc:
+        raise ReviewUnresolved("native review owner run/thread is unresolved") from exc
+    owner_run_id = owner.run_id
+    owner_thread_id = owner.thread_id
     if not bundle_dir.is_absolute():
         raise BundleError("bundle directory must be absolute")
     existing = _stored_json(store, attempt_id, "review_reservation")
@@ -671,6 +763,13 @@ def reserve_review(
             or Path(reservation.bundle_dir) != bundle_dir.resolve()
         ):
             raise StoreConflict("review reservation differs from the stored reservation")
+        if reservation.spawn_arguments_json is not None and (
+            reservation.owner_run_id != owner_run_id
+            or reservation.owner_thread_id != owner_thread_id
+        ):
+            raise StoreConflict(
+                "review reservation owner run/thread differs from stored reservation"
+            )
         _validate_bundle(
             store,
             attempt_id,
@@ -679,10 +778,19 @@ def reserve_review(
         )
         return reservation
     digest = build_review_bundle(store, attempt_id, bundle_dir, instructions=instructions)
-    attempt = store.get_attempt(attempt_id)
     hypothesis = store.get_hypothesis(attempt.hypothesis_id)
     reserved = now_utc()
     nonce = secrets.token_hex(12)
+    task_name = f"review_{attempt_id.lower().replace('-', '_')}_{nonce}"
+    if _NATIVE_TASK_NAME.fullmatch(task_name) is None:
+        raise ReviewEvidenceError("native review task name is not canonical")
+    prompt = (bundle_dir / "instructions.md").read_text(encoding="utf-8")
+    if str(bundle_dir.resolve()) not in prompt:
+        raise BundleError("native review prompt must contain the immutable absolute bundle path")
+    # Reservation-side evidence only: the installed host stores the spawn
+    # message as ciphertext, so this digest can never be compared with any
+    # rollout or host record.  Host binding rests on the nonce task name.
+    prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
     reservation = ReviewReservation(
         attempt_id=attempt_id,
         commit=cast(str, attempt.commit),
@@ -691,8 +799,20 @@ def reserve_review(
         bundle_sha256=digest,
         reserved_at=reserved,
         owner_session_key=owner_session_key,
-        label=f"{attempt_id}-{nonce}",
+        label=task_name,
         reservation_nonce=nonce,
+        owner_run_id=owner_run_id,
+        owner_thread_id=owner_thread_id,
+        task_name=task_name,
+        prompt_sha256=prompt_sha256,
+        spawn_arguments_json=to_json(
+            {
+                "agent_type": REVIEW_AGENT,
+                "fork_turns": "none",
+                "message": prompt,
+                "task_name": task_name,
+            }
+        ),
     )
     store.insert_review_evidence(
         attempt_id, "review_reservation", reservation.to_json(), "review_reserved"
@@ -703,21 +823,45 @@ def reserve_review(
 def acknowledge_review(
     store: ResearchStore,
     attempt_id: str,
-    child_session_key: str,
-    run_id: str,
     mode: str,
     run_timeout_seconds: int | None,
+    *,
+    owner_session_key: str | None = None,
+    owner_run_id: str | None = None,
+    owner_thread_id: str | None = None,
+    child_thread_id: str | None = None,
+    _verified_native: bool = False,
 ) -> ReviewAck:
     reservation = _reservation(store, attempt_id)
-    if not child_session_key or not run_id:
-        raise ReviewEvidenceError("review ACK identity fields must be non-empty")
     if mode != "run":
         raise ReviewEvidenceError("review ACK mode must be run")
     if run_timeout_seconds is not None and (
         type(run_timeout_seconds) is not int or run_timeout_seconds <= 0
     ):
         raise ReviewEvidenceError("run timeout must be a positive integer or null")
-    ack = ReviewAck(child_session_key, run_id, mode, run_timeout_seconds, now_utc())
+    if reservation.spawn_arguments_json is None:
+        raise ReviewEvidenceError("historical ACP review cannot be acknowledged")
+    if not _verified_native:
+        raise ReviewEvidenceError("native ACK must be produced by official child reconciliation")
+    if owner_session_key != reservation.owner_session_key:
+        raise ReviewEvidenceError("native ACK owner session does not match reservation")
+    if reservation.owner_run_id is not None and owner_run_id != reservation.owner_run_id:
+        raise ReviewEvidenceError("native ACK owner run does not match reservation")
+    if reservation.owner_thread_id is not None and owner_thread_id != reservation.owner_thread_id:
+        raise ReviewEvidenceError("native ACK owner thread does not match reservation")
+    if not child_thread_id:
+        raise ReviewEvidenceError("native ACK child thread is required")
+    ack = ReviewAck(
+        None,
+        None,
+        mode,
+        run_timeout_seconds,
+        now_utc(),
+        owner_session_key,
+        owner_run_id,
+        owner_thread_id,
+        child_thread_id,
+    )
     existing = _stored_json(store, attempt_id, "review_ack")
     if existing is not None:
         requested = json.loads(ack.to_json())
@@ -726,7 +870,6 @@ def acknowledge_review(
         if stored_comparable != comparable:
             raise StoreConflict("review ACK differs from the stored ACK")
         return _ack_from_payload(existing)
-    _ = reservation
     store.insert_review_evidence(attempt_id, "review_ack", ack.to_json(), "review_acknowledged")
     return ack
 
@@ -734,7 +877,8 @@ def acknowledge_review(
 def reconcile_review(
     store: ResearchStore,
     attempt_id: str,
-    core_database: Path,
+    openclaw_database: Path,
+    codex_state_database: Path | None = None,
 ) -> ReviewAck | None:
     """Recover one lost spawn ACK; ambiguous correlation pauses the campaign."""
 
@@ -742,21 +886,48 @@ def reconcile_review(
     existing = _stored_json(store, attempt_id, "review_ack")
     if existing is not None:
         return _ack_from_payload(existing)
-    try:
-        task = read_exact_task_run(
-            core_database,
-            reservation.owner_session_key,
-            reservation.label,
-            _epoch_ms(reservation.reserved_at),
-            expected_runtime=REVIEW_TASK_RUNTIME,
-            expected_scope_kind=REVIEW_TASK_SCOPE,
-            expected_agent_id=REVIEW_AGENT,
+    if reservation.spawn_arguments_json is not None:
+        if (
+            reservation.owner_run_id is None
+            or reservation.owner_thread_id is None
+            or codex_state_database is None
+        ):
+            store.pause(f"review_unresolved:{attempt_id}")
+            store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_identity"})
+            raise ReviewUnresolved("native owner run/thread identity is unresolved")
+        try:
+            child = read_exact_native_child(
+                openclaw_database,
+                codex_state_database,
+                reservation.owner_session_key,
+                reservation.owner_run_id,
+                reservation.owner_thread_id,
+                reservation.task_name or "",
+                _epoch_ms(reservation.reserved_at),
+            )
+        except HostRecordPending as exc:
+            raise ReviewPending("native owner turn has not reached its official end") from exc
+        except HostRecordError as exc:
+            store.pause(f"review_unresolved:{attempt_id}")
+            store.record_review_event(attempt_id, "review_unresolved", {"reason": "correlation"})
+            raise ReviewUnresolved("native review correlation is unresolved") from exc
+        return acknowledge_review(
+            store,
+            attempt_id,
+            REVIEW_NATIVE_MODE,
+            None,
+            owner_session_key=child.owner_session_key,
+            owner_run_id=child.owner_run_id,
+            owner_thread_id=child.parent_thread_id,
+            child_thread_id=child.child_thread_id,
+            _verified_native=True,
         )
-    except HostRecordError as exc:
-        store.pause(f"review_unresolved:{attempt_id}")
-        store.record_review_event(attempt_id, "review_unresolved", {"reason": "correlation"})
-        raise ReviewUnresolved("review task correlation is unresolved") from exc
-    return acknowledge_review(store, attempt_id, task.child_session_key, task.run_id, "run", None)
+    # Historical ACP reservations remain readable by the store, but there is
+    # no active ACP reconciliation path.  Reusing their old task projection
+    # here would silently revive the retired runtime.
+    store.pause(f"review_unresolved:{attempt_id}")
+    store.record_review_event(attempt_id, "review_unresolved", {"reason": "legacy_review"})
+    raise ReviewUnresolved("historical ACP review cannot be reconciled")
 
 
 def _epoch_ms(value: str) -> int:
@@ -797,7 +968,7 @@ def _stored_containment_provenance(
 
 
 def _reservation_from_payload(payload: Mapping[str, object]) -> ReviewReservation:
-    fields = (
+    legacy_fields = (
         "attempt_id",
         "commit",
         "hypothesis_spec_sha256",
@@ -808,11 +979,75 @@ def _reservation_from_payload(payload: Mapping[str, object]) -> ReviewReservatio
         "label",
         "reservation_nonce",
     )
-    if set(payload) != set(fields) or any(
-        not isinstance(payload[field], str) or not payload[field] for field in fields
+    native_fields = set(legacy_fields) | {
+        "owner_run_id",
+        "owner_thread_id",
+        "task_name",
+        "prompt_sha256",
+        "spawn_arguments",
+    }
+    if set(payload) not in (set(legacy_fields), native_fields) or any(
+        not isinstance(payload[field], str) or not payload[field] for field in legacy_fields
     ):
         raise StoreConflict("review reservation payload is malformed")
-    return ReviewReservation(*(str(payload[field]) for field in fields))
+    if set(payload) == set(legacy_fields):
+        return ReviewReservation(*(str(payload[field]) for field in legacy_fields))
+    optional = {
+        key: payload[key]
+        for key in ("owner_run_id", "owner_thread_id", "task_name", "prompt_sha256")
+    }
+    if any(
+        key in {"task_name", "prompt_sha256"} and (not isinstance(value, str) or not value)
+        for key, value in optional.items()
+    ) or any(
+        key in {"owner_run_id", "owner_thread_id"}
+        and value is not None
+        and (not isinstance(value, str) or not value)
+        for key, value in optional.items()
+    ):
+        raise StoreConflict("native review reservation identity is malformed")
+    arguments = payload["spawn_arguments"]
+    if not isinstance(arguments, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) for key, value in arguments.items()
+    ):
+        raise StoreConflict("native spawn arguments are malformed")
+    if set(arguments) != {"agent_type", "fork_turns", "message", "task_name"}:
+        raise StoreConflict("native spawn arguments have an unexpected key set")
+    canonical_arguments = json.dumps(arguments, sort_keys=True, separators=(",", ":"))
+    message = arguments.get("message")
+    if (
+        not isinstance(message, str)
+        or hashlib.sha256(message.encode()).hexdigest() != optional["prompt_sha256"]
+    ):
+        raise StoreConflict("native spawn prompt digest is malformed")
+    if (
+        arguments.get("agent_type") != REVIEW_AGENT
+        or arguments.get("fork_turns") != "none"
+        or arguments.get("task_name") != optional["task_name"]
+        or str(payload["bundle_dir"]) not in message
+        or _NATIVE_TASK_NAME.fullmatch(str(optional["task_name"])) is None
+    ):
+        raise StoreConflict("native spawn arguments do not match reservation")
+    return ReviewReservation(
+        attempt_id=str(payload["attempt_id"]),
+        commit=str(payload["commit"]),
+        hypothesis_spec_sha256=str(payload["hypothesis_spec_sha256"]),
+        bundle_dir=str(payload["bundle_dir"]),
+        bundle_sha256=str(payload["bundle_sha256"]),
+        reserved_at=str(payload["reserved_at"]),
+        owner_session_key=str(payload["owner_session_key"]),
+        label=str(payload["label"]),
+        reservation_nonce=str(payload["reservation_nonce"]),
+        owner_run_id=(
+            optional["owner_run_id"] if isinstance(optional["owner_run_id"], str) else None
+        ),
+        owner_thread_id=(
+            optional["owner_thread_id"] if isinstance(optional["owner_thread_id"], str) else None
+        ),
+        task_name=str(optional["task_name"]),
+        prompt_sha256=str(optional["prompt_sha256"]),
+        spawn_arguments_json=canonical_arguments,
+    )
 
 
 def _reservation(store: ResearchStore, attempt_id: str) -> ReviewReservation:
@@ -823,94 +1058,63 @@ def _reservation(store: ResearchStore, attempt_id: str) -> ReviewReservation:
 
 
 def _ack_from_payload(payload: Mapping[str, object]) -> ReviewAck:
-    required = {"child_session_key", "run_id", "mode", "run_timeout_seconds", "acked_at"}
-    if set(payload) != required:
+    historical = {"child_session_key", "run_id", "mode", "run_timeout_seconds", "acked_at"}
+    native = {
+        "mode",
+        "run_timeout_seconds",
+        "acked_at",
+        "owner_session_key",
+        "owner_run_id",
+        "owner_thread_id",
+        "child_thread_id",
+    }
+    keys = set(payload)
+    if keys not in (historical, native):
         raise StoreConflict("review ACK payload is malformed")
-    child = payload["child_session_key"]
-    run = payload["run_id"]
     mode = payload["mode"]
     timeout = payload["run_timeout_seconds"]
     at = payload["acked_at"]
-    if (
-        not isinstance(child, str)
-        or not child
-        or not isinstance(run, str)
-        or not run
-        or not isinstance(mode, str)
-        or not mode
-        or not isinstance(at, str)
-        or not at
-    ):
+    if not isinstance(mode, str) or not mode or not isinstance(at, str) or not at:
         raise StoreConflict("review ACK identity is malformed")
     if mode != "run":
         raise StoreConflict("review ACK mode is not run")
     if timeout is not None and (type(timeout) is not int or timeout <= 0):
         raise StoreConflict("review ACK timeout is malformed")
-    return ReviewAck(child, run, mode, timeout, at)
+    identity = sorted(keys - {"mode", "run_timeout_seconds", "acked_at"})
+    for field in identity:
+        value = payload[field]
+        if not isinstance(value, str) or not value:
+            raise StoreConflict("review ACK identity is malformed")
+    if keys == historical:
+        return ReviewAck(
+            str(payload["child_session_key"]), str(payload["run_id"]), mode, timeout, at
+        )
+    return ReviewAck(
+        None,
+        None,
+        mode,
+        timeout,
+        at,
+        str(payload["owner_session_key"]),
+        str(payload["owner_run_id"]),
+        str(payload["owner_thread_id"]),
+        str(payload["child_thread_id"]),
+    )
 
 
-def _assistant_events(content: bytes) -> list[dict[str, object]]:
-    events: list[dict[str, object]] = []
-    for index, line in enumerate(content.splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            raw: object = json.loads(line)
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise ReviewEvidenceError(f"transcript line {index} is not JSON") from exc
-        if not isinstance(raw, dict):
-            raise ReviewEvidenceError(f"transcript line {index} is not an object")
-        if raw.get("type") == "assistant":
-            events.append(cast(dict[str, object], raw))
-    if not events:
-        raise ReviewEvidenceError("transcript has no assistant events")
-    return events
-
-
-def _event_ms(event: Mapping[str, object]) -> int:
-    value = event.get("timestamp", event.get("ts"))
-    if isinstance(value, bool):
-        raise ReviewEvidenceError("assistant event timestamp is invalid")
-    if isinstance(value, int):
-        return value if value > 10**12 else value * 1000
-    if isinstance(value, float) and value >= 0:
-        return int(value if value > 10**12 else value * 1000)
-    if isinstance(value, str):
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ReviewEvidenceError("assistant event timestamp is invalid") from exc
-        if parsed.tzinfo is None:
-            raise ReviewEvidenceError("assistant event timestamp must be timezone-aware")
-        return int(parsed.timestamp() * 1000)
-    raise ReviewEvidenceError("assistant event timestamp is missing")
-
-
-def _final_verdict(
-    event: Mapping[str, object], reservation: ReviewReservation
+def _final_verdict_text(
+    text: str, reservation: ReviewReservation
 ) -> tuple[str, tuple[str, ...], str]:
-    message = event.get("message")
-    if not isinstance(message, dict) or message.get("stop_reason") != "end_turn":
-        raise ReviewEvidenceError("final assistant event is not end_turn")
-    content = message.get("content")
-    if not isinstance(content, list):
-        raise ReviewEvidenceError("final assistant message content is not a list")
-    pieces: list[str] = []
-    for block in content:
-        if (
-            not isinstance(block, dict)
-            or block.get("type") != "text"
-            or not isinstance(block.get("text"), str)
-        ):
-            raise ReviewEvidenceError(
-                "final assistant event contains a tool call or non-text block"
-            )
-        pieces.append(str(block["text"]))
-    text = "".join(pieces).strip()
-    if not text.startswith("{") or not text.endswith("}"):
+    """Parse the native task_complete last-agent message strictly."""
+
+    if (
+        not isinstance(text, str)
+        or not text.strip().startswith("{")
+        or not text.strip().endswith("}")
+    ):
         raise ReviewEvidenceError("final review verdict must be bare JSON")
     try:
-        raw: object = json.loads(text, object_pairs_hook=_strict_json_object)
+        raw: object = json.loads(text.strip(), object_pairs_hook=_strict_json_object)
     except json.JSONDecodeError as exc:
         raise ReviewEvidenceError("final review verdict is not valid JSON") from exc
     if not isinstance(raw, dict):
@@ -918,23 +1122,153 @@ def _final_verdict(
     required = {"verdict", "attempt_id", "commit", "spec_sha256", "findings"}
     if set(raw) != required:
         raise ReviewEvidenceError("final review verdict has unexpected keys")
-    verdict = raw.get("verdict")
-    attempt_id = raw.get("attempt_id")
-    commit = raw.get("commit")
-    spec = raw.get("spec_sha256")
-    findings = raw.get("findings")
     if (
-        verdict not in {"PASS", "FAIL"}
-        or attempt_id != reservation.attempt_id
-        or commit != reservation.commit
-        or spec != reservation.hypothesis_spec_sha256
+        raw.get("verdict") not in {"PASS", "FAIL"}
+        or raw.get("attempt_id") != reservation.attempt_id
+        or raw.get("commit") != reservation.commit
+        or raw.get("spec_sha256") != reservation.hypothesis_spec_sha256
     ):
         raise ReviewEvidenceError("verdict_binding")
+    findings = raw.get("findings")
     if not isinstance(findings, list) or any(
         not isinstance(item, str) or not item for item in findings
     ):
         raise ReviewEvidenceError("review findings are malformed")
-    return str(verdict), tuple(findings), text
+    return str(raw["verdict"]), tuple(findings), text.strip()
+
+
+def verify_native_review(
+    store: ResearchStore,
+    attempt_id: str,
+    openclaw_database: Path,
+    codex_state_database: Path,
+) -> ReviewVerification:
+    """Verify one exact native Sol child and persist no mutable host state."""
+
+    reservation = _reservation(store, attempt_id)
+    if reservation.spawn_arguments_json is None:
+        raise ReviewEvidenceError("native review reservation is missing spawn arguments")
+    if (
+        reservation.owner_run_id is None
+        or reservation.owner_thread_id is None
+        or reservation.task_name is None
+    ):
+        raise ReviewUnresolved("native review reservation is missing owner identity")
+    ack_payload = _stored_json(store, attempt_id, "review_ack")
+    if ack_payload is None:
+        raise ReviewPending("review ACK is pending")
+    ack = _ack_from_payload(ack_payload)
+    if (
+        ack.owner_session_key != reservation.owner_session_key
+        or ack.owner_run_id != reservation.owner_run_id
+        or ack.owner_thread_id != reservation.owner_thread_id
+        or not ack.child_thread_id
+    ):
+        store.pause(f"review_unresolved:{attempt_id}")
+        raise ReviewUnresolved("native review ACK identity does not match reservation")
+    try:
+        child = read_exact_native_child(
+            openclaw_database,
+            codex_state_database,
+            reservation.owner_session_key,
+            reservation.owner_run_id,
+            reservation.owner_thread_id,
+            reservation.task_name,
+            _epoch_ms(reservation.reserved_at),
+            require_completion_callback=True,
+        )
+    except HostRecordPending as exc:
+        raise ReviewPending("native owner turn has not reached its official end") from exc
+    except HostRecordError as exc:
+        store.pause(f"review_unresolved:{attempt_id}")
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "correlation"})
+        raise ReviewUnresolved("native review correlation is unresolved") from exc
+    if child.child_thread_id != ack.child_thread_id:
+        store.pause(f"review_unresolved:{attempt_id}")
+        raise ReviewUnresolved("native review child differs from ACK")
+    if child.terminal_state == "pending":
+        # No completion callback, an unfinished child, or a mid-append rollout
+        # tail: never a FAIL, never a verdict.
+        raise ReviewPending("native review completion is pending")
+    if child.terminal_state != "succeeded":
+        # failed/cancelled child: the host-failure path below records a FAIL
+        # with the terminal state as the reason; the rollout is never parsed.
+        return _failed_verification(
+            reservation,
+            child.terminal_state,
+            child.terminal_state,
+            native_child=child,
+        )
+    if child.last_agent_message is None:
+        return _failed_verification(
+            reservation,
+            "terminal_verdict_missing",
+            "native task_complete has no last_agent_message",
+            native_child=child,
+        )
+    try:
+        verdict, findings, verdict_json = _final_verdict_text(child.last_agent_message, reservation)
+        _verify_reserved_bundle(Path(reservation.bundle_dir), reservation.bundle_sha256)
+    except BundleError as exc:
+        reason = (
+            "bundle_mutated"
+            if str(exc) == "reserved review bundle was modified"
+            else f"bundle_invalid: {exc}"
+        )
+        return _failed_verification(
+            reservation,
+            reason,
+            reason,
+            native_child=child,
+            verdict_json=child.last_agent_message,
+        )
+    except ReviewEvidenceError as exc:
+        reason = str(exc) or "review_evidence_invalid"
+        return _failed_verification(
+            reservation,
+            reason,
+            reason,
+            native_child=child,
+            verdict_json=child.last_agent_message,
+        )
+    host = {
+        "owner_session_key": reservation.owner_session_key,
+        "owner_run_id": reservation.owner_run_id,
+        "owner_thread_id": reservation.owner_thread_id,
+        "child_thread_id": child.child_thread_id,
+        "spawn_call_id": child.spawn_call_id,
+        "announce_run_id": child.announce_run_id,
+        "announce_status": child.announce_status,
+        "task_name": child.task_name,
+        "task_status": child.terminal_state,
+        "rollout_path": str(child.rollout_path),
+        "rollout_sha256": child.rollout_sha256,
+        "model_observed": child.model,
+        "reasoning_effort_observed": child.reasoning_effort,
+        "agent_role_observed": child.agent_role,
+        "verdict_json": verdict_json,
+        "bound_commit": reservation.commit,
+        "bound_spec_sha256": reservation.hypothesis_spec_sha256,
+        "collected_at": now_utc(),
+        "verdict": verdict,
+    }
+    stored_plan = _stored_json(store, reservation.attempt_id, "run_plan")
+    if stored_plan is not None:
+        host["bound_run_plan_sha256"] = hashlib.sha256(
+            json.dumps(stored_plan, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    review = ReviewEvidence(
+        attempt_id,
+        reservation.commit,
+        reservation.hypothesis_spec_sha256,
+        verdict,
+        findings,
+        REVIEW_MODEL,
+        REVIEW_MODEL,
+        child.child_thread_id,
+        str(host["collected_at"]),
+    )
+    return ReviewVerification(review, to_json(host))
 
 
 def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -949,192 +1283,37 @@ def _strict_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 def verify_review(
     store: ResearchStore,
     attempt_id: str,
-    core_database: Path,
-    acpx_sessions_dir: Path,
-    claude_projects_root: Path,
-    *,
-    expected_backend: str = REVIEW_BACKEND,
-    expected_mode: str = REVIEW_ACP_MODE,
+    openclaw_database: Path,
+    codex_state_database: Path,
 ) -> ReviewVerification:
-    """Verify exact host records and return a store-ready evidence record."""
+    """Verify native Sol evidence from official OpenClaw/Codex stores."""
 
-    reservation = _reservation(store, attempt_id)
-    ack_payload = _stored_json(store, attempt_id, "review_ack")
-    if ack_payload is None:
-        raise ReviewPending("review ACK is pending")
-    ack = _ack_from_payload(ack_payload)
+    if not codex_state_database.is_file() or codex_state_database.is_symlink():
+        raise ReviewUnresolved("native Codex state database is missing or unsafe")
     try:
-        task = read_exact_task_run(
-            core_database,
-            reservation.owner_session_key,
-            reservation.label,
-            _epoch_ms(reservation.reserved_at),
-            expected_runtime=REVIEW_TASK_RUNTIME,
-            expected_scope_kind=REVIEW_TASK_SCOPE,
-            expected_agent_id=REVIEW_AGENT,
-            ack_child_session_key=ack.child_session_key,
-            ack_run_id=ack.run_id,
-        )
-    except HostRecordError as exc:
-        store.pause(f"review_unresolved:{attempt_id}")
-        store.record_review_event(attempt_id, "review_unresolved", {"reason": "correlation"})
-        raise ReviewUnresolved("review task correlation is unresolved") from exc
-    if task.is_pending:
-        raise ReviewPending(f"review task is pending: {task.status}")
-    if task.status != "succeeded":
-        return _failed_verification(
-            reservation, task.child_session_key, task.status, task.status, task
-        )
-    if task.ended_at_ms is None:
-        return _failed_verification(
-            reservation,
-            task.child_session_key,
-            "task_end_missing",
-            "task has no terminal timestamp",
-            task,
-        )
-    identity: AcpIdentityHostRecord | None = None
-    transcript: ClaudeTranscriptRecord | None = None
-    events: list[dict[str, object]] = []
-    verdict_json = ""
-    try:
-        identity = read_exact_acpx_identity(
-            acpx_sessions_dir,
-            task.child_session_key,
-            reservation.bundle_dir,
-            expected_backend=expected_backend,
-            expected_agent=REVIEW_AGENT,
-            expected_mode=expected_mode,
-            expected_run_id=task.run_id,
-            reservation_at_ms=_epoch_ms(reservation.reserved_at),
-            task_started_at_ms=task.started_at_ms,
-            task_ended_at_ms=task.ended_at_ms,
-        )
-        transcript = read_exact_claude_transcript(
-            claude_projects_root,
-            identity.effective_cwd,
-            identity.claude_session_id,
-        )
-        events = _assistant_events(transcript.content)
-        models: set[str] = set()
-        efforts: set[str] = set()
-        lower = _epoch_ms(reservation.reserved_at) - CLOCK_TOLERANCE_MS
-        upper = task.ended_at_ms + 60_000
-        for event in events:
-            if event.get("sessionId") != identity.claude_session_id:
-                raise ReviewEvidenceError("assistant sessionId does not match ACP identity")
-            if event.get("cwd") != reservation.bundle_dir:
-                raise ReviewEvidenceError("assistant cwd does not match the review bundle")
-            event_time = _event_ms(event)
-            if event_time < lower or event_time > upper:
-                raise ReviewEvidenceError("assistant event timestamp is outside the task window")
-            effort = event.get("effort")
-            if effort != REVIEW_EFFORT:
-                raise ReviewEvidenceError(f"assistant effort is not {REVIEW_EFFORT} on every event")
-            message = event.get("message")
-            if not isinstance(message, dict) or message.get("model") != REVIEW_MODEL:
-                raise ReviewEvidenceError("assistant model is not claude-opus-5 on every event")
-            models.add(REVIEW_MODEL)
-            efforts.add(REVIEW_EFFORT)
-        verdict, findings, verdict_json = _final_verdict(events[-1], reservation)
-        try:
-            _verify_reserved_bundle(Path(reservation.bundle_dir), reservation.bundle_sha256)
-        except BundleError as exc:
-            if str(exc) == "reserved review bundle was modified":
-                raise ReviewEvidenceError("bundle_mutated") from exc
-            raise ReviewEvidenceError(f"bundle_invalid: {exc}") from exc
-        host = {
-            "task_id": task.task_id,
-            "task_owner_key": task.owner_key,
-            "child_session_key": task.child_session_key,
-            "run_id": task.run_id,
-            "task_status": task.status,
-            "task_source": task.source,
-            "task_started_at": task.started_at_ms,
-            "task_ended_at": task.ended_at_ms,
-            "acpx_record_id": identity.acpx_record_id,
-            "acpx_record_path": str(identity.acpx_record_path),
-            "acpx_record_sha256": identity.acpx_record_sha256,
-            "acpx_candidate_count": identity.acpx_candidate_count,
-            "acpx_session_id": identity.acp_session_id,
-            "acpx_created_at": identity.created_at_ms,
-            "acpx_last_used_at": identity.last_used_at_ms,
-            "acpx_closed_at": identity.closed_at_ms,
-            "acpx_model": identity.model,
-            "acpx_effort": identity.effort,
-            "acp_session_uuid": identity.canonical_session_uuid,
-            "transcript_path": str(transcript.path),
-            "transcript_sha256": transcript.sha256,
-            "assistant_events": len(events),
-            "models_seen": sorted(models),
-            "efforts_seen": sorted(efforts),
-            "verdict_json": verdict_json,
-            "bound_commit": reservation.commit,
-            "bound_spec_sha256": reservation.hypothesis_spec_sha256,
-            "collected_at": now_utc(),
-            "verdict": verdict,
-        }
-        stored_plan = _stored_json(store, reservation.attempt_id, "run_plan")
-        if stored_plan is not None:
-            host["bound_run_plan_sha256"] = hashlib.sha256(
-                json.dumps(stored_plan, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest()
-        review = ReviewEvidence(
-            attempt_id,
-            reservation.commit,
-            reservation.hypothesis_spec_sha256,
-            verdict,
-            findings,
-            REVIEW_MODEL,
-            REVIEW_MODEL,
-            identity.canonical_session_uuid,
-            str(host["collected_at"]),
-        )
-        return ReviewVerification(review, to_json(host))
-    except HostRecordError as exc:
-        store.pause(f"review_unresolved:{attempt_id}")
-        store.record_review_event(attempt_id, "review_unresolved", {"reason": "host_record"})
-        raise ReviewUnresolved("review host correlation is unresolved") from exc
-    except ReviewEvidenceError as exc:
-        reason = str(exc) or "review_evidence_invalid"
-        return _failed_verification(
-            reservation,
-            identity.canonical_session_uuid if identity is not None else ack.child_session_key,
-            reason,
-            reason,
-            task,
-            transcript_path=str(transcript.path) if transcript is not None else "",
-            transcript_sha256=transcript.sha256 if transcript is not None else "",
-            verdict_json=verdict_json,
-            assistant_events=len(events),
-        )
+        return verify_native_review(store, attempt_id, openclaw_database, codex_state_database)
+    except ReviewUnresolved:
+        raise
 
 
 def _failed_verification(
     reservation: ReviewReservation,
-    session_id: str,
     reason: str,
     detail: str,
-    task: TaskRunHostRecord | None = None,
     *,
-    transcript_path: str = "",
-    transcript_sha256: str = "",
     verdict_json: str = "",
-    assistant_events: int = 0,
+    native_child: NativeChildHostRecord,
 ) -> ReviewVerification:
+    """Record a host-side FAIL.  No reviewer verdict is parsed or invented.
+
+    The recorded finding is the host reason itself (for example ``failed`` or
+    ``bundle_mutated``), and ``task_status`` is ``unresolved``.
+    """
+
     collected = now_utc()
     host: dict[str, object] = {
-        "task_id": task.task_id if task else "",
-        "task_status": task.status if task else "unresolved",
-        "task_source": task.source if task else "unresolved",
-        "task_started_at": task.started_at_ms if task else None,
-        "task_ended_at": task.ended_at_ms if task else None,
-        "acp_session_uuid": session_id,
-        "transcript_path": transcript_path,
-        "transcript_sha256": transcript_sha256,
-        "assistant_events": assistant_events,
-        "models_seen": [],
-        "efforts_seen": [],
+        "child_thread_id": native_child.child_thread_id,
+        "task_status": "unresolved",
         "verdict_json": verdict_json,
         "bound_commit": reservation.commit,
         "bound_spec_sha256": reservation.hypothesis_spec_sha256,
@@ -1142,6 +1321,19 @@ def _failed_verification(
         "verdict": "FAIL",
         "reason": reason,
         "detail": detail[:256],
+        "owner_session_key": native_child.owner_session_key,
+        "owner_run_id": native_child.owner_run_id,
+        "owner_thread_id": native_child.parent_thread_id,
+        "spawn_call_id": native_child.spawn_call_id,
+        "announce_run_id": native_child.announce_run_id,
+        "announce_status": native_child.announce_status,
+        "child_terminal_state": native_child.terminal_state,
+        "task_name": native_child.task_name,
+        "rollout_path": str(native_child.rollout_path),
+        "rollout_sha256": native_child.rollout_sha256,
+        "model_observed": native_child.model,
+        "reasoning_effort_observed": native_child.reasoning_effort,
+        "agent_role_observed": native_child.agent_role,
     }
     review = ReviewEvidence(
         reservation.attempt_id,
@@ -1151,20 +1343,23 @@ def _failed_verification(
         (reason,),
         REVIEW_MODEL,
         REVIEW_MODEL,
-        session_id,
+        native_child.child_thread_id,
         collected,
     )
     return ReviewVerification(review, to_json(host))
 
 
 async def request_cancel(
-    request_once: Callable[..., Awaitable[Mapping[str, object]]], task_id: str, reason: str
+    request_once: Callable[..., Awaitable[Mapping[str, object]]],
+    owner_session_key: str,
+    agent_id: str,
+    run_id: str,
 ) -> Mapping[str, object]:
-    """Narrow adapter around the existing authenticated OpenClaw RPC client."""
+    """Abort one exact native owner run and its controlled subagents."""
 
     return await request_once(
-        "tasks.cancel",
-        {"taskId": task_id, "reason": reason},
+        "chat.abort",
+        {"sessionKey": owner_session_key, "agentId": agent_id, "runId": run_id},
         timeout_seconds=30,
     )
 
@@ -1173,13 +1368,25 @@ def cancel_review(
     store: ResearchStore,
     attempt_id: str,
     reason: str,
-    core_database: Path,
+    openclaw_database: Path,
     request_once: CancelTransport,
+    codex_state_database: Path | None = None,
 ) -> CancelOutcome:
-    """Pause, correlate, request cancellation, and report unknown responses pending."""
-
+    """Pause, abort one exact native owner run, and reread child evidence."""
     store.pause(f"review_cancel:{attempt_id}")
     existing_cancel = _stored_json(store, attempt_id, "review_cancel")
+    reservation = _reservation(store, attempt_id)
+    if reservation.spawn_arguments_json is None:
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "legacy_review"})
+        return CancelOutcome(attempt_id, None, "unresolved", True, "not_requested")
+    if (
+        codex_state_database is None
+        or reservation.owner_run_id is None
+        or reservation.owner_thread_id is None
+        or reservation.task_name is None
+    ):
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_identity"})
+        return CancelOutcome(attempt_id, None, "unresolved", True, "not_requested")
     if existing_cancel is not None:
         task_value = existing_cancel.get("task_id")
         result_value = existing_cancel.get("rpc_result")
@@ -1192,16 +1399,19 @@ def cancel_review(
             "MALFORMED_RESPONSE",
             "MISMATCHED_RESPONSE",
             "RPC_REJECTED",
+            CANCEL_ABORTED,
+            CANCEL_OWNER_INACTIVE,
         } or rpc_result.startswith("RPC_ERROR:")
         if pending and task_id is not None:
-            try:
-                reservation = _reservation(store, attempt_id)
-                ack = _ack_from_payload(_stored_json(store, attempt_id, "review_ack") or {})
-                return _cancel_after_reread(
-                    core_database, reservation, ack, attempt_id, task_id, rpc_result
-                )
-            except (ReviewEvidenceError, StoreConflict):
-                pass
+            return _cancel_native_after_reread(
+                store,
+                openclaw_database,
+                codex_state_database,
+                reservation,
+                attempt_id,
+                task_id,
+                rpc_result,
+            )
         return CancelOutcome(
             attempt_id,
             task_id,
@@ -1216,123 +1426,142 @@ def cancel_review(
         # the host task remains the authority for terminal confirmation.
         if requested_task[1] != reason:
             raise StoreConflict("review cancellation reason differs from stored request")
-        return CancelOutcome(attempt_id, requested_task[0], "pending", True, "UNKNOWN_RESPONSE")
-    # Reconcile all reservations that lack ACKs before touching the target.
-    for candidate in store.review_reservation_attempts():
-        if _stored_json(store, candidate, "review_ack") is None:
-            try:
-                reconcile_review(store, candidate, core_database)
-            except ReviewUnresolved:
-                if candidate == attempt_id:
-                    return CancelOutcome(attempt_id, None, "unresolved", True, "not_requested")
-    reservation = _reservation(store, attempt_id)
-    ack_payload = _stored_json(store, attempt_id, "review_ack")
-    if ack_payload is None:
-        return CancelOutcome(attempt_id, None, "unresolved", True, "not_requested")
-    ack = _ack_from_payload(ack_payload)
-    try:
-        task = read_exact_task_run(
-            core_database,
-            reservation.owner_session_key,
-            reservation.label,
-            _epoch_ms(reservation.reserved_at),
-            expected_runtime=REVIEW_TASK_RUNTIME,
-            expected_scope_kind=REVIEW_TASK_SCOPE,
-            expected_agent_id=REVIEW_AGENT,
-            ack_child_session_key=ack.child_session_key,
-            ack_run_id=ack.run_id,
+        return _cancel_native_after_reread(
+            store,
+            openclaw_database,
+            codex_state_database,
+            reservation,
+            attempt_id,
+            requested_task[0],
+            "UNKNOWN_RESPONSE",
         )
+    try:
+        child = read_exact_native_child(
+            openclaw_database,
+            codex_state_database,
+            reservation.owner_session_key,
+            reservation.owner_run_id,
+            reservation.owner_thread_id,
+            reservation.task_name,
+            _epoch_ms(reservation.reserved_at),
+            require_completion_callback=True,
+        )
+    except HostRecordPending:
+        return CancelOutcome(attempt_id, None, "pending", True, "not_requested")
     except HostRecordError:
         store.record_review_event(attempt_id, "review_unresolved", {"reason": "cancel_correlation"})
         return CancelOutcome(attempt_id, None, "unresolved", True, "not_requested")
-    if task.is_terminal:
-        result = "terminal:" + task.status
-        store.record_review_cancel(attempt_id, task.task_id, reason, result)
-        return CancelOutcome(attempt_id, task.task_id, task.status, False, result)
-    if not store.record_review_cancel_request(attempt_id, task.task_id, reason):
-        return CancelOutcome(attempt_id, task.task_id, "pending", True, "UNKNOWN_RESPONSE")
+    task_id = child.child_thread_id
+    if child.terminal_state != "pending":
+        result = "terminal:" + child.terminal_state
+        store.record_review_cancel(attempt_id, task_id, reason, result)
+        return CancelOutcome(attempt_id, task_id, child.terminal_state, False, result)
+    if not store.record_review_cancel_request(attempt_id, task_id, reason):
+        return CancelOutcome(attempt_id, task_id, "pending", True, "UNKNOWN_RESPONSE")
 
     async def invoke_cancel() -> Mapping[str, object]:
-        return await request_once(task.task_id, reason)
+        # chat.abort addresses the owner run.  ``reviewer`` is the child role,
+        # not the owning OpenClaw agent id; derive the owner id from the exact
+        # persisted session key instead of trusting a caller-supplied value.
+        owner_parts = reservation.owner_session_key.split(":")
+        if len(owner_parts) < 2 or owner_parts[0] != "agent" or not owner_parts[1]:
+            raise ReviewUnresolved("owner session key has no canonical agent id")
+        owner_agent_id = owner_parts[1]
+        return await request_once(
+            reservation.owner_session_key,
+            owner_agent_id,
+            reservation.owner_run_id or "",
+        )
 
     try:
         response = asyncio.run(invoke_cancel())
-        result = _safe_rpc_result(response, task.task_id)
+        result = _safe_rpc_result(response, reservation.owner_run_id)
     except (OpenClawTransportError, TimeoutError, OSError):
         result = "UNKNOWN_RESPONSE"
-        store.record_review_cancel(attempt_id, task.task_id, reason, result)
-        return _cancel_after_reread(
-            core_database, reservation, ack, attempt_id, task.task_id, result
+        store.record_review_cancel(attempt_id, task_id, reason, result)
+        return _cancel_native_after_reread(
+            store, openclaw_database, codex_state_database, reservation, attempt_id, task_id, result
         )
     except OpenClawError:
         result = "RPC_REJECTED"
-        store.record_review_cancel(attempt_id, task.task_id, reason, result)
-        return _cancel_after_reread(
-            core_database, reservation, ack, attempt_id, task.task_id, result
+        store.record_review_cancel(attempt_id, task_id, reason, result)
+        return _cancel_native_after_reread(
+            store, openclaw_database, codex_state_database, reservation, attempt_id, task_id, result
         )
     except Exception as exc:
         result = f"RPC_ERROR:{type(exc).__name__}"
-        store.record_review_cancel(attempt_id, task.task_id, reason, result)
-        return _cancel_after_reread(
-            core_database, reservation, ack, attempt_id, task.task_id, result
+        store.record_review_cancel(attempt_id, task_id, reason, result)
+        return _cancel_native_after_reread(
+            store, openclaw_database, codex_state_database, reservation, attempt_id, task_id, result
         )
-    store.record_review_cancel(attempt_id, task.task_id, reason, result)
-    return _cancel_after_reread(core_database, reservation, ack, attempt_id, task.task_id, result)
+    store.record_review_cancel(attempt_id, task_id, reason, result)
+    return _cancel_native_after_reread(
+        store, openclaw_database, codex_state_database, reservation, attempt_id, task_id, result
+    )
 
 
-def _cancel_after_reread(
-    core_database: Path,
+def _cancel_native_after_reread(
+    store: ResearchStore,
+    openclaw_database: Path,
+    codex_state_database: Path,
     reservation: ReviewReservation,
-    ack: ReviewAck,
     attempt_id: str,
     task_id: str,
     result: str,
 ) -> CancelOutcome:
     try:
-        after = read_exact_task_run(
-            core_database,
+        after = read_exact_native_child(
+            openclaw_database,
+            codex_state_database,
             reservation.owner_session_key,
-            reservation.label,
+            reservation.owner_run_id or "",
+            reservation.owner_thread_id or "",
+            reservation.task_name or "",
             _epoch_ms(reservation.reserved_at),
-            expected_runtime=REVIEW_TASK_RUNTIME,
-            expected_scope_kind=REVIEW_TASK_SCOPE,
-            expected_agent_id=REVIEW_AGENT,
-            ack_child_session_key=ack.child_session_key,
-            ack_run_id=ack.run_id,
+            require_completion_callback=True,
         )
     except HostRecordError:
         return CancelOutcome(attempt_id, task_id, "pending", True, result)
-    if after.task_id != task_id:
+    if after.child_thread_id != task_id:
         return CancelOutcome(attempt_id, task_id, "pending", True, result)
-    if not after.is_terminal:
+    if after.terminal_state == "pending":
         return CancelOutcome(attempt_id, task_id, "pending", True, result)
-    return CancelOutcome(attempt_id, task_id, after.status, False, result)
+    return CancelOutcome(attempt_id, task_id, after.terminal_state, False, result)
 
 
-def _safe_rpc_result(response: Mapping[str, object], task_id: str) -> str:
-    if not isinstance(response, Mapping):
+def _safe_rpc_result(response: Mapping[str, object], owner_run_id: str) -> str:
+    """Classify the installed ``chat.abort`` reply, which has exactly three fields.
+
+    ``{ok: true, aborted: false, runIds: []}`` means the run was not active;
+    ``{ok: true, aborted: true, runIds: [...]}`` means it was aborted.  Any
+    other shape is malformed and any run id other than the owner's mismatched.
+    """
+
+    if not isinstance(response, Mapping) or set(response) != {"ok", "aborted", "runIds"}:
         return "MALFORMED_RESPONSE"
-    response_task = response.get("taskId", response.get("task_id"))
-    if response_task is not None and response_task != task_id:
+    aborted = response["aborted"]
+    run_ids = response["runIds"]
+    if (
+        response["ok"] is not True
+        or not isinstance(aborted, bool)
+        or not isinstance(run_ids, list)
+        or any(not isinstance(item, str) or not item for item in run_ids)
+    ):
+        return "MALFORMED_RESPONSE"
+    if not aborted:
+        return CANCEL_OWNER_INACTIVE if not run_ids else "MALFORMED_RESPONSE"
+    if not run_ids:
+        return "MALFORMED_RESPONSE"
+    if owner_run_id not in run_ids:
         return "MISMATCHED_RESPONSE"
-    status = response.get("status", response.get("state"))
-    if not isinstance(status, str) or not status:
-        return "MALFORMED_RESPONSE"
-    normalized = status[:64]
-    if normalized.lower() in {"rejected", "denied", "error", "failed"}:
-        return "RPC_REJECTED"
-    return normalized
+    return CANCEL_ABORTED
 
 
 def collect_review(
     store: ResearchStore,
     attempt_id: str,
-    core_database: Path,
-    acpx_sessions_dir: Path,
-    claude_projects_root: Path,
-    *,
-    expected_backend: str = REVIEW_BACKEND,
-    expected_mode: str = REVIEW_ACP_MODE,
+    openclaw_database: Path,
+    codex_state_database: Path,
 ) -> Attempt:
     """Verify and atomically persist host evidence plus review transition."""
 
@@ -1353,31 +1582,6 @@ def collect_review(
                 parsed.acp_session_id,
                 parsed.submitted_at,
             )
-            reason = existing.get("reason")
-            if (
-                current.state != AttemptState.REVIEW_FAILED
-                or not isinstance(reason, str)
-                or not reason
-            ):
-                return store.collect_review_evidence(
-                    attempt_id, stored, store.evidence(attempt_id, "review_host_evidence")
-                )
-            verification = verify_review(
-                store,
-                attempt_id,
-                core_database,
-                acpx_sessions_dir,
-                claude_projects_root,
-                expected_backend=expected_backend,
-                expected_mode=expected_mode,
-            )
-            replacement_host = json.loads(verification.host_payload)
-            if not isinstance(replacement_host, dict):
-                raise StoreConflict("review host evidence must be an object")
-            if "reason" not in replacement_host:
-                return store.supersede_failed_review(
-                    attempt_id, verification.review, verification.host_payload
-                )
             return store.collect_review_evidence(
                 attempt_id, stored, store.evidence(attempt_id, "review_host_evidence")
             )
@@ -1386,10 +1590,7 @@ def collect_review(
     verification = verify_review(
         store,
         attempt_id,
-        core_database,
-        acpx_sessions_dir,
-        claude_projects_root,
-        expected_backend=expected_backend,
-        expected_mode=expected_mode,
+        openclaw_database,
+        codex_state_database,
     )
     return store.collect_review_evidence(attempt_id, verification.review, verification.host_payload)

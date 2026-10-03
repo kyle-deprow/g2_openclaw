@@ -76,6 +76,8 @@ def test_wake_composes_each_state_and_failed_owner_turn_is_recorded(
     assert opened_wake is not None and opened_wake.state == "OPENED"
     assert "--run-plan run-plan.json" in opened_wake.message
     assert "--provenance-evidence provenance.json" in opened_wake.message
+    assert "stop this owner turn" in opened_wake.message
+    assert "Do not reserve or spawn review" in opened_wake.message
     impl = implementation(attempt.attempt_id, "a" * 40)
     implemented = store.submit_implementation(
         attempt.attempt_id,
@@ -84,7 +86,13 @@ def test_wake_composes_each_state_and_failed_owner_turn_is_recorded(
         containment_provenance=provenance_evidence(attempt.attempt_id, impl.commit),
     )
     assert implemented.state == AttemptState.IMPLEMENTED
-    assert compose_wake(store).state == "IMPLEMENTED"  # type: ignore[union-attr]
+    implemented_wake = compose_wake(store)
+    assert implemented_wake is not None and implemented_wake.state == "IMPLEMENTED"
+    assert (
+        "native review reviewer model=gpt-5.6-sol effort=xhigh is unavailable"
+        in implemented_wake.message
+    )
+    assert "do not invoke spawn_agent" in implemented_wake.message
     passed = verified_review(store, review(attempt.attempt_id, "a" * 40, hypothesis.spec_sha256))
     assert passed.state == AttemptState.REVIEW_PASSED
     assert compose_wake(store).state == "REVIEW_PASSED"  # type: ignore[union-attr]

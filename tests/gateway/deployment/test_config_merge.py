@@ -228,6 +228,7 @@ def test_assembly_emits_native_model_policy_and_drops_inherited_legacy_map(
             "openai/gpt-5.4",
             "openai/gpt-6-astra",
             "openai/gpt-5.6-luna",
+            "openai/gpt-5.6-sol",
         ]
     }
     assert cast(JsonObject, cast(JsonObject, assembled["gateway"])["auth"]) == {
@@ -273,36 +274,22 @@ def test_assembly_removes_restrictive_owner_tool_filters(tmp_path: Path) -> None
     assert g2_codex["agents"] == ["main"]
 
 
-def test_assembly_keeps_explicit_alternate_interface_route_without_opus_fallback(
+def test_assembly_rejects_explicit_non_openai_interface_route(
     tmp_path: Path,
 ) -> None:
     inputs = _assembly_inputs(
         tmp_path,
-        provider="openrouter",
-        model_primary="openrouter/anthropic/claude-sonnet-4-20250514",
-        model_provider="openrouter",
-        model_id="anthropic/claude-sonnet-4-20250514",
+        model_primary="anthropic/claude-sonnet-4",
+        model_provider="openai",
+        model_id="gpt-5.4",
     )
 
-    assembled = assemble_config(
-        cast(JsonObject, {"agents": {"defaults": {"models": {"openai/unselected": {}}}}}),
-        cast(JsonObject, load_json(REPO_CONFIG)),
-        inputs,
-    )
-
-    defaults = cast(JsonObject, cast(JsonObject, assembled["agents"])["defaults"])
-    assert "models" not in defaults
-    assert defaults["modelPolicy"] == {
-        "allow": [
-            "openrouter/anthropic/claude-sonnet-4-20250514",
-            "openai/gpt-6-astra",
-            "openai/gpt-5.6-luna",
-        ]
-    }
-    policy = defaults["modelPolicy"]
-    assert isinstance(policy, dict)
-    allow = cast(list[JsonValue], policy["allow"])
-    assert all(isinstance(ref, str) and "opus" not in ref.lower() for ref in allow)
+    with pytest.raises(ConfigMergeError, match="approved OpenAI model route"):
+        assemble_config(
+            cast(JsonObject, {"agents": {"defaults": {"models": {"openai/unselected": {}}}}}),
+            cast(JsonObject, load_json(REPO_CONFIG)),
+            inputs,
+        )
 
 
 def test_assembly_deduplicates_native_model_policy_and_jq_oracle(tmp_path: Path) -> None:
@@ -318,7 +305,9 @@ def test_assembly_deduplicates_native_model_policy_and_jq_oracle(tmp_path: Path)
     assembled = assemble_config(local, cast(JsonObject, load_json(REPO_CONFIG)), inputs)
 
     defaults = cast(JsonObject, cast(JsonObject, assembled["agents"])["defaults"])
-    assert defaults["modelPolicy"] == {"allow": ["openai/gpt-6-astra", "openai/gpt-5.6-luna"]}
+    assert defaults["modelPolicy"] == {
+        "allow": ["openai/gpt-6-astra", "openai/gpt-5.6-luna", "openai/gpt-5.6-sol"]
+    }
 
     local_path = tmp_path / "local.json"
     _write_json(local_path, local)
@@ -632,8 +621,6 @@ def _assembly_inputs(
         model_provider=model_provider,
         model_id=model_id,
         orchestrator_model_primary=orchestrator_model_primary,
-        research_reviewer_launcher=str(REPO_ROOT / "scripts/research-reviewer-cli.py"),
-        acpx_adapter_bin="/opt/acpx/claude-agent-acp",
     )
 
 
@@ -801,7 +788,7 @@ def _jq_full_assembly(
             inputs.orchestrator_model_primary,
             ".agents.defaults.model.primary = $primary | "
             ".agents.defaults.modelPolicy = "
-            '{"allow": ([$primary, $owner, "openai/gpt-5.6-luna"] | '
+            '{"allow": ([$primary, $owner, "openai/gpt-5.6-luna", "openai/gpt-5.6-sol"] | '
             "reduce .[] as $ref ([]; if index($ref) then . else . + [$ref] end))} | "
             "del(.agents.defaults.models)",
         ],
@@ -854,20 +841,8 @@ def _jq_full_assembly(
     )
     merged = _run_jq(
         [
-            "--arg",
-            "launcher",
-            inputs.research_reviewer_launcher,
-            "--arg",
-            "adapter",
-            inputs.acpx_adapter_bin,
-            '.acp = {"enabled":true,"dispatch":{"enabled":true},'
-            '"backend":"acpx","allowedAgents":["claude"]} | '
-            ".plugins.entries.acpx.config = {"
-            '"agents":{"claude":{"command":"/usr/bin/env","args":[('
-            '"CLAUDE_CODE_EXECUTABLE=" + $launcher),$adapter]}},'
-            '"permissionMode":"approve-reads","nonInteractivePermissions":"fail",'
-            '"pluginToolsMcpBridge":false,"openClawToolsMcpBridge":false,"mcpServers":{}'
-            "}",
+            "del(.acp) | del(.plugins.entries.acpx) | "
+            '.plugins.allow = ((.plugins.allow // []) | map(select(. != "acpx")))'
         ],
         input_bytes=merged,
     )
@@ -961,23 +936,12 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
         "OPENCLAW_PORT": inputs.openclaw_port,
         "G2_OWNER_ENV_FILE": inputs.owner_env_file,
     }
-    assert python_config["acp"] == {
-        "enabled": True,
-        "dispatch": {"enabled": True},
-        "backend": "acpx",
-        "allowedAgents": ["claude"],
-    }
+    assert "acp" not in python_config
     assembled_agents = cast(JsonObject, python_config["agents"])
     assert assembled_agents["ownership"] == "explicit"
     assert "list" not in assembled_agents
     assembled_entries = cast(JsonObject, assembled_agents["entries"])
-    assert set(assembled_entries) == {"main", "research-orchestrator", "claude"}
-    assert assembled_entries["claude"] == {
-        "runtime": {
-            "type": "acp",
-            "acp": {"agent": "claude", "backend": "acpx", "mode": "oneshot"},
-        }
-    }
+    assert set(assembled_entries) == {"main", "research-orchestrator"}
     assert all(
         isinstance(entry, dict) and "id" not in entry for entry in assembled_entries.values()
     )
@@ -988,55 +952,36 @@ def test_actual_repo_overlay_full_assembly_is_byte_identical_to_jq(tmp_path: Pat
     plugins = cast(JsonObject, python_config["plugins"])
     assert "load" not in plugins
     entries = cast(JsonObject, plugins["entries"])
-    acpx = cast(JsonObject, entries["acpx"])
-    assert acpx["machineOnly"] is True
-    assert acpx["config"] == {
-        "agents": {
-            "claude": {
-                "command": "/usr/bin/env",
-                "args": [
-                    "CLAUDE_CODE_EXECUTABLE=" + inputs.research_reviewer_launcher,
-                    inputs.acpx_adapter_bin,
-                ],
-            }
-        },
-        "permissionMode": "approve-reads",
-        "nonInteractivePermissions": "fail",
-        "pluginToolsMcpBridge": False,
-        "openClawToolsMcpBridge": False,
-        "mcpServers": {},
-    }
+    assert "acpx" not in entries
 
 
-@pytest.mark.skipif(JQ is None, reason="jq is required for byte-equivalence golden tests")
-def test_openrouter_api_key_substitution_is_byte_identical_to_jq(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("provider", "model_primary", "model_provider", "model_id"),
+    [
+        ("azure", "azure-oai-g2/gpt-5.4", "azure-oai-g2", "gpt-5.4"),
+        ("openrouter", "openrouter/openai/gpt-4.1", "openrouter", "openai/gpt-4.1"),
+    ],
+)
+def test_explicit_alternate_openai_routes_remain_available(
+    tmp_path: Path,
+    provider: str,
+    model_primary: str,
+    model_provider: str,
+    model_id: str,
 ) -> None:
-    api_key = "openrouter-test-key"  # pragma: allowlist secret
-    monkeypatch.setenv("OPENROUTER_API_KEY", api_key)
-    local_path = tmp_path / "live.json"
-    _write_json(local_path, {})
     inputs = _assembly_inputs(
         tmp_path,
-        provider="openrouter",
-        model_primary="openrouter/anthropic/claude-sonnet-4-20250514",
-        model_provider="openrouter",
-        model_id="anthropic/claude-sonnet-4-20250514",
+        provider=provider,
+        model_primary=model_primary,
+        model_provider=model_provider,
+        model_id=model_id,
     )
 
-    python_config = assemble_config(
-        cast(JsonObject, load_json(local_path)),
-        cast(JsonObject, load_json(REPO_CONFIG)),
-        inputs,
+    assembled = assemble_config(
+        cast(JsonObject, {}), cast(JsonObject, load_json(REPO_CONFIG)), inputs
     )
-
-    assert serialize_json(python_config) == _jq_full_assembly(
-        local_path, REPO_CONFIG, inputs, openrouter_api_key=api_key
-    )
-    models = cast(JsonObject, python_config["models"])
-    providers = cast(JsonObject, models["providers"])
-    openrouter = cast(JsonObject, providers["openrouter"])
-    assert openrouter["apiKey"] == api_key
+    defaults = cast(JsonObject, cast(JsonObject, assembled["agents"])["defaults"])
+    assert cast(JsonObject, defaults["model"])["primary"] == model_primary
 
 
 def test_empty_provider_environment_defaults_to_codex_in_python_cli(
@@ -1073,8 +1018,6 @@ def test_empty_provider_environment_defaults_to_codex_in_python_cli(
         str(tmp_path / "custom research root with spaces"),
         json.dumps(list(READONLY_AGENTS)),
         json.dumps(list(G2_AGENTS)),
-        str(REPO_ROOT / "scripts/research-reviewer-cli.py"),
-        "/opt/acpx/claude-agent-acp",
     ]
     environment = os.environ.copy()
     owner_env_file = tmp_path / "owner.env"

@@ -12,10 +12,20 @@ from typing import TypedDict
 # control MCP server is the narrow boundary; the research owner and native
 # children receive their explicit task roots below instead.
 CODEX_WRITABLE_ROOTS: tuple[Path, ...] = ()
-NATIVE_RESEARCH_AGENT_IDS: tuple[str, ...] = ("implementer", "experiment_runner")
+NATIVE_RESEARCH_AGENT_IDS: tuple[str, ...] = (
+    "implementer",
+    "experiment_runner",
+    "reviewer",
+)
 NATIVE_RESEARCH_AGENT_MODELS: dict[str, str] = {
     "implementer": "gpt-5.6-luna",
     "experiment_runner": "gpt-5.6-luna",
+    "reviewer": "gpt-5.6-sol",
+}
+NATIVE_RESEARCH_AGENT_MAX_DEPTH: dict[str, int] = {
+    "implementer": 1,
+    "experiment_runner": 1,
+    "reviewer": 0,
 }
 
 
@@ -113,23 +123,31 @@ def _validate_stage_agents(
         except tomllib.TOMLDecodeError as exc:
             raise SystemExit(f"invalid native Codex research layer TOML {layer}: {exc}") from exc
         layer_agents = layer_data.get("agents")
-        if not isinstance(layer_agents, dict) or layer_agents.get("max_depth") != 1:
-            raise SystemExit(f"native Codex research agent {name} must set agents.max_depth=1")
+        if (
+            not isinstance(layer_agents, dict)
+            or layer_agents.get("max_depth") != NATIVE_RESEARCH_AGENT_MAX_DEPTH[name]
+        ):
+            raise SystemExit(
+                f"native Codex research agent {name} must set "
+                f"agents.max_depth={NATIVE_RESEARCH_AGENT_MAX_DEPTH[name]}"
+            )
         if layer_agents.get("max_threads") != 1:
             raise SystemExit(f"native Codex research agent {name} must set agents.max_threads=1")
         if layer_data.get("model") != model or layer_data.get("model_reasoning_effort") != "xhigh":
             raise SystemExit(f"native Codex research layer {layer} has wrong model settings")
         if layer_data.get("service_tier") != "fast":
             raise SystemExit(f"native Codex research layer {layer} must use service_tier=fast")
+        if name == "reviewer" and layer_data.get("sandbox_mode") != "read-only":
+            raise SystemExit(f"native Codex research layer {layer} must set sandbox_mode=read-only")
         sandbox = layer_data.get("sandbox_workspace_write")
         if not isinstance(sandbox, dict) or sandbox.get("network_access") is not True:
             raise SystemExit(f"native Codex research layer {layer} must enable network_access")
         if allow_root_templates:
-            expected_roots = (
-                ["@RESEARCH_V2_ROOT@"]
-                if name == "experiment_runner"
-                else ["@HYPOTHESIS_WORKTREES_ROOT@"]
-            )
+            expected_roots = {
+                "implementer": ["@HYPOTHESIS_WORKTREES_ROOT@"],
+                "experiment_runner": ["@RESEARCH_V2_ROOT@"],
+                "reviewer": [],
+            }[name]
         else:
             research_root = (
                 os.environ.get("CODEX_RUNTIME_RESEARCH_V2_ROOT")
@@ -141,7 +159,11 @@ def _validate_stage_agents(
                 or os.environ.get("HYPOTHESIS_WORKTREES_ROOT")
                 or "@HYPOTHESIS_WORKTREES_ROOT@"
             )
-            expected_roots = [research_root] if name == "experiment_runner" else [hypothesis_root]
+            expected_roots = {
+                "implementer": [hypothesis_root],
+                "experiment_runner": [research_root],
+                "reviewer": [],
+            }[name]
         if sandbox.get("writable_roots") != expected_roots:
             raise SystemExit(
                 f"native Codex research layer {layer} has an unexpected writable_roots scope"
@@ -210,6 +232,7 @@ def validate_native_research_runtime_roles() -> None:
     expected_roots = {
         "implementer": [sys.argv[5]],
         "experiment_runner": [sys.argv[4]],
+        "reviewer": [],
     }
     try:
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -236,13 +259,23 @@ def validate_native_research_runtime_roles() -> None:
             raise SystemExit(f"native Codex runtime layer {layer_path} has wrong model settings")
         if layer.get("service_tier") != "fast":
             raise SystemExit(f"native Codex runtime layer {layer_path} must use service_tier=fast")
+        if name == "reviewer" and layer.get("sandbox_mode") != "read-only":
+            raise SystemExit(
+                f"native Codex runtime layer {layer_path} must set sandbox_mode=read-only"
+            )
         if not isinstance(layer.get("developer_instructions"), str):
             raise SystemExit(
                 f"native Codex runtime layer {layer_path} needs developer_instructions"
             )
         layer_agents = layer.get("agents")
-        if not isinstance(layer_agents, dict) or layer_agents.get("max_depth") != 1:
-            raise SystemExit(f"native Codex runtime layer {layer_path} must set agents.max_depth=1")
+        if (
+            not isinstance(layer_agents, dict)
+            or layer_agents.get("max_depth") != NATIVE_RESEARCH_AGENT_MAX_DEPTH[name]
+        ):
+            raise SystemExit(
+                f"native Codex runtime layer {layer_path} must set "
+                f"agents.max_depth={NATIVE_RESEARCH_AGENT_MAX_DEPTH[name]}"
+            )
         if layer_agents.get("max_threads") != 1:
             raise SystemExit(
                 f"native Codex runtime layer {layer_path} must set agents.max_threads=1"

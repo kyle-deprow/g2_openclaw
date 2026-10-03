@@ -11,9 +11,10 @@ runtime. It does not create a second orchestration route.
 ## Research roles
 
 - Astra is the research owner and receives every child result.
-- Native Luna is the approved implementer and experiment runner.
-- Claude Code Opus via ACP is reviewer-only and receives one reserved review
-  bundle per attempt.
+- Native Luna is the approved implementer and experiment runner; native Sol is
+  the read-only reviewer.
+- Native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is reviewer-only and
+  receives one reserved review bundle per attempt.
 - Main is read-only and never dispatches research work.
 
 Use only configured native Codex roles. Do not discover roles from session
@@ -30,11 +31,15 @@ The implementer changes only its experiment worktree. The runner executes only
 the admitted committed worktree and performs no repair, retry, substitution,
 evaluator substitution, or invented result.
 
-Reserve immutable review evidence before the one ACP Opus review. Verify the
-acknowledgement, child task identity, run, mode, attempt, commit, and spec
-digest. Collect a strict bound verdict. Never retype a verdict or respawn after
-an unknown acknowledgement. An exact cancel rereads the current task and is
-sent once; unknown correlation remains pending and pauses the owner.
+Reserve immutable review evidence before the one native Sol review and spawn
+exactly once in the owner turn. After the normal native spawn ACK, STOP and
+call `sessions_yield` for the owned completion. Do not reconcile or collect in
+that turn: exact owner run/thread correlation requires the original owner turn
+to end. The later completion callback reconciles and collects the official
+child run exactly once; it never respawns. Never retype a verdict after an
+unknown result. An exact cancel rereads the current task and is sent once;
+unknown correlation remains pending and pauses the owner. An unknown native
+spawn acknowledgement or outcome never authorizes repeat dispatch.
 
 When a new owner turn needs a completion-required coding or runner stage, spawn
 a fresh configured native child bound to the same hypothesis, attempt, worktree,

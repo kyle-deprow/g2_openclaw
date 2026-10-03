@@ -11,7 +11,8 @@ completion announcements. Return the control result to the requesting human.
 
 Astra owns the bounded research loop in the separate
 `research-orchestrator` workspace. Native Luna is the approved implementer and
-runner; Claude Code Opus via ACP is the one reviewer per attempt. Delegation is
+runner; native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is the one reviewer
+per attempt. Delegation is
 through native Codex `spawn_agent` with the configured roles, never an ad-hoc
 provider or route. Read the frozen `research --help` surface before using a
 research operation.

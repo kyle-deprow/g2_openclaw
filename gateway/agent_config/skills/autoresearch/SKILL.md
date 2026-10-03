@@ -13,8 +13,9 @@ integration and it does not deploy or prove an installed runtime.
 
 - Astra owns admission, dispatch, status, decisions, and the owner wake.
 - Native Luna is the approved implementer and experiment runner.
-- Claude Code Opus via ACP is reviewer-only: reserve one immutable review bundle
-  before the review and collect exactly one bound verdict.
+- Native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is reviewer-only:
+  reserve one immutable review bundle before the review and collect exactly
+  one bound verdict.
 - OpenAI/Codex is the configured provider. Do not invent a provider, route, or
   model when the configured route is unavailable.
 - Main is a read-only G2 control interface and never conducts research.
@@ -60,8 +61,9 @@ uv run gateway-cli research --help
 The top-level help enumerates research subcommands. Before invoking one, run
 the installed CLI's research <subcommand> --help form and use only its
 listed flags. The historical frozen appendix is not an exhaustive current CLI
-allowlist. The existing review-collect operation is authorized; consult its
-live help before using the exact command below.
+allowlist. The native review-reserve, review-reconcile, review-collect, and
+review-cancel operations are authorized; consult each live help before using
+them.
 Live help defines syntax only and grants no additional permission. Owner actions
 remain limited to the operations authorized by this contract (including
 review-collect); operator-only policy, ledger, and runtime-registration
@@ -80,21 +82,49 @@ replace unknown evidence with a synthetic result. An exact cancel rereads the
 current task and is sent once; an unknown response remains pending and pauses
 the owner. Read-only main controls must remain available.
 
-For review collection, pass the required --core-database option exactly as:
-
-    gateway-cli research review-collect ATTEMPT_ID --root ROOT --core-database /home/dev/.openclaw/state/openclaw.sqlite --acpx-sessions ACPX_SESSIONS_DIR --claude-projects PROJECTS
-
-This is the owner environment's RESEARCH_CORE_DATABASE value; model shells
-may not inherit that variable, so do not infer or substitute a database path.
+Reserve with `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY
+--owner-key OWNER_KEY --openclaw-database
+/home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`.
+The reservation output's
+top-level `model`, `effort`, and `prompt_sha256` are authoritative. Its
+`spawn_arguments` contains only `task_name`, `message`, `agent_type`, and
+`fork_turns` (which is `none`); it has no `cwd` argument, and the generated
+`message` carries the immutable absolute bundle path. Invoke exactly the
+returned native `collaboration.spawn_agent` arguments. The command derives
+the owner run/thread only from the completed IMPLEMENTED wake and official
+event. Reserve and spawn exactly once in this owner turn. After the normal
+native spawn ACK, STOP and call `sessions_yield` for the owned completion. Do
+not reconcile or collect in this owner turn: exact owner run/thread correlation
+requires the original owner turn to end. The completion callback after that
+turn ends may reconcile and collect exactly once from the official child-thread
+ACK; it must never respawn. No separate acknowledgement is created or
+retyped. Those later reconcile/collect/cancel operations use these same
+managed-root database paths
+`/home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`
+and
+`/home/dev/.openclaw/agents/research-orchestrator/agent/codex-home/state_5.sqlite`,
+and pass the latter as `--codex-state-database` to review-reconcile,
+review-collect, and review-cancel. The CLI derives these paths from the managed OpenClaw root that contains `--root` (the wake text renders them concretely) and rejects any other path, including arbitrary/latest records
+or caller-invented paths. The spawn message is encrypted on the host, so
+`prompt_sha256` is reservation-side evidence only and is never host-verified;
+binding rests on the exact task name plus host role, model, effort, and the
+strict verdict binding. Collect needs the child's `announce:codex-native`
+completion callback in the owner store; without it the review stays pending,
+never FAIL. A failed, errored, or aborted reviewer child makes the attempt a terminal REVIEW_FAILED with the host reason as the sole finding, with no supersession or re-review; it is distinct from a reviewer FAIL verdict but final for the attempt. Limitation: an operator cannot stop a running native reviewer
+through `chat.abort` after the owner yields (the reply reports
+`owner_run_inactive_no_supported_child_cancel`); it ends on its own terminal
+evidence. Do not use the retired `--core-database`, ACPX, or Claude-project
+flags, infer paths, search arbitrary records, or repair a verdict.
 
 ## Dispatch and review
 
-Spawn only the configured native implementer and experiment runner. Bind each
-child handoff to the exact hypothesis, attempt, worktree, commit, and task
-identity. Reserve immutable review evidence before the ACP Opus review and
-verify its acknowledgement, child identity, commit, specification digest, and
-strict verdict. Never respawn after an unknown acknowledgement or retype a
-verdict.
+Spawn only the configured native implementer, experiment runner, and read-only
+Sol reviewer. Bind each child handoff to the exact hypothesis, attempt,
+worktree, commit, and task identity. Reserve immutable review evidence before
+the native Sol review and reconcile the official child run's identity, commit,
+specification digest, and strict verdict. Never respawn after an unknown result
+or retype a verdict. An unknown native spawn acknowledgement or outcome remains
+pending and never authorizes repeat dispatch.
 
 Completion ownership is per owner turn: a completion-required coding or runner
 stage spawns a fresh configured native child bound to the same hypothesis,
@@ -107,6 +137,14 @@ current turn remain allowed. On `sessions_yield`, report the exact result/error
 and durable checkpoint; no owned pending completion is not an owned wait/autowake,
 and do not fabricate a callback. That error is not permission to duplicate or
 re-run the completed stage, restart it, or switch route/provider.
+
+An implementation completion callback may verify and submit the implementation
+result, then must STOP. It must not reserve or spawn review from the original
+OPENED callback. Only the next canonical IMPLEMENTED wake supplies `WAKE_KEY`
+for exactly one review reservation and native Sol dispatch; a later correction
+must likewise wait for its next IMPLEMENTED wake. This implementation callback
+is separate from the later review completion callback, which only reconciles
+and collects the already-spawned child and never dispatches again.
 
 Run only an admitted committed worktree after review PASS. The runner performs
 no repair, retry, substitution, evaluator substitution, or invented result. A

@@ -18,9 +18,11 @@ uses an owner-only environment, and fails closed on an invalid or missing
 research root. The source template is
 `gateway/openclaw_config/research-owner.service.template`.
 
-The owner is Astra. Native Luna implements and runs admitted work. Claude Code
-Opus via ACP is reviewer-only, once per attempt. A hypothesis equals one
-iteration; each attempt is code → review → run, with at most three attempts.
+The owner is Astra. Native Luna implements and runs admitted work. Native
+OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is reviewer-only, once per
+attempt; the reviewer is read-only, cannot spawn children, and cannot repair
+or retry. A hypothesis equals one iteration; each attempt is code → review →
+run, with at most three attempts.
 Astra chooses FINISH, ABANDON, or PAUSE after exhaustion. Review evidence is
 reserved before review and binds the child, attempt, commit, and spec digest.
 

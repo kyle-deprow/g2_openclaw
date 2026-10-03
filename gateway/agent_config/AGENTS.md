@@ -9,7 +9,8 @@ under `gateway/agent_config/research-orchestrator/`. Do not merge those roles.
 - `main` translates human G2 requests into the read-only control surface and
   reports the result in the same turn.
 - Astra is the research owner. Native Luna implements and runs admitted
-  attempts; Claude Code Opus via ACP reviews once per attempt.
+  attempts; native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) reviews once
+  per attempt.
 - OpenAI/Codex is the configured provider. Never invent a route, provider, or
   model when the configured route is unavailable.
 - The G2 application is a thin interface. It does not edit research worktrees,
@@ -32,8 +33,13 @@ refusal, never an inferred success.
 A hypothesis is one iteration. Each attempt is code → review → run, with at
 most three attempts. Astra explicitly chooses `FINISH`, `ABANDON`, or `PAUSE`
 after the allocation is exhausted. Review evidence is reserved before the one
-ACP Opus review and binds the child task, attempt, commit, and specification
-digest. Never retype an unknown acknowledgement or verdict.
+native Sol review and binds the child task, attempt, commit, and specification
+digest. Never retype an unknown result or verdict.
+For review dispatch, reserve and spawn exactly once after the completed
+IMPLEMENTED wake. After the normal spawn ACK, STOP and use `sessions_yield`;
+only a completion callback after the original owner turn ends may reconcile
+and collect the child, exactly once and without respawn. This is separate from
+the implementation callback, which submits and stops before the next wake.
 
 The initial scientific capability is price-panel-only and ETF-scoped. Refuse
 stock work without trusted point-in-time earnings coverage and fail closed on

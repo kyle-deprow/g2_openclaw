@@ -13,21 +13,52 @@ or proof that a current-price ETF feed is installed.
 
 - Astra is the research owner.
 - Native Luna is the implementer and runner.
-- Claude Code Opus via ACP is reviewer-only.
+- Native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is reviewer-only.
 - OpenAI/Codex remains the provider; no fallback or route switching.
 - Rule: hypothesis equals iteration; each attempt is code → review → run.
 - Use maximum three attempts; Astra explicitly chooses FINISH, ABANDON, or PAUSE.
 - Every attempt outcome, refusal, and terminal state returns to Astra.
-- Reserve review evidence before the one ACP Opus review; the evidence and
+- Reserve review evidence before the one native Sol review; the evidence and
   bundle are immutable.
-- The ACK binds the exact child task, run, mode, attempt, commit, and spec
-  digest. Never retype a verdict or respawn after an unknown acknowledgement.
-- Review collection uses the verified local paths
-  `--core-database /home/dev/.openclaw/state/openclaw.sqlite`,
-  `--acpx-sessions /home/dev/.openclaw/workspace/state/sessions`, and
-  `--claude-projects /home/dev/.claude/projects`; do not infer alternatives,
-  search arbitrary records, or repair a verdict. Preserve refusal if correlation
-  remains unavailable.
+- Reconcile the official child run and bind its identity, verdict, mode, attempt,
+  commit, and spec digest. Never retype a verdict or respawn after an unknown
+  result.
+- Native review collection reserves with
+  `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY --owner-key OWNER_KEY
+  --openclaw-database
+  /home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`;
+  the command derives the owner run/thread only from
+  the completed IMPLEMENTED wake and official event. Reserve and spawn exactly
+  once in this owner turn. After the normal native spawn ACK, STOP and call
+  `sessions_yield` for the owned completion. Do not reconcile or collect in
+  this owner turn: exact owner run/thread correlation requires the original
+  owner turn to end. The completion callback after that turn ends may reconcile
+  and collect exactly once from the official child-thread ACK; it must never
+  respawn. The reservation output's
+  top-level `model`, `effort`, and `prompt_sha256` are authoritative. Its
+  `spawn_arguments` contains only `task_name`, `message`, `agent_type`, and
+  `fork_turns` (`none`), with no `cwd`; `message` contains the immutable
+  absolute bundle path. Invoke exactly the returned native spawn arguments.
+  That later reconcile records the official child-thread ACK; no separate
+  acknowledgement is created or retyped. Reconcile/collect/cancel use these same
+  managed-root database paths
+  `/home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`
+  and
+  `/home/dev/.openclaw/agents/research-orchestrator/agent/codex-home/state_5.sqlite`,
+  and pass the latter as `--codex-state-database` to review-reconcile,
+  review-collect, and review-cancel. The CLI derives these paths from the managed OpenClaw root that contains `--root` (the wake text renders them concretely) and rejects any other path, including arbitrary/latest
+  records or caller-invented paths. The spawn message is encrypted on the host,
+  so `prompt_sha256` is reservation-side evidence only and is never
+  host-verified; binding rests on the exact task name plus host role, model,
+  effort, and the strict verdict binding. Collect needs the child's
+  `announce:codex-native` completion callback in the owner store; without it the
+  review stays pending, never FAIL. A failed, errored, or aborted reviewer child makes the attempt a terminal REVIEW_FAILED with the host reason as the sole finding, with no supersession or re-review; it is distinct from a reviewer FAIL verdict but final for the attempt. Limitation: an operator cannot stop a
+  running native reviewer through `chat.abort` after the owner yields (the reply
+  reports `owner_run_inactive_no_supported_child_cancel`); it ends on its own
+  terminal evidence. Do not use the retired `--core-database`, ACPX, or Claude
+  paths, infer
+  alternatives, search arbitrary records, or repair a verdict. Preserve
+  refusal if correlation remains unavailable.
 - Analysis uses `--scenarios /scenarios --inputs /inputs --out /stage/analysis`;
   cost specs are `/inputs/evaluation-specs/{spec_id}.json`, not
   `/evaluation-specs`. The canonical EvaluationSpecSet and RunPlan are
@@ -104,11 +135,14 @@ Exposure counting uses a digest-matched immutable ledger and the classifications
 NONE, KNOWN_EXPOSED, and UNKNOWN_HISTORY. Unknown history blocks FINAL_HOLDOUT;
 development may record it. A holding horizon above five sessions is refused.
 
-Reserve the immutable review bundle before the one ACP Opus review; collect a
-strict ACK/verdict bound to the child task, run, mode, attempt, commit, and spec.
+Reserve the immutable review bundle before the one native Sol review; reconcile
+the official child run and collect a strict verdict bound to the child task,
+run, mode, attempt, commit, and spec.
 An exact cancel is at most once, with unknown correlation left pending and
-paused. Never retype a verdict, respawn after unknown acknowledgement, or launch
-without operator policy and proven route. The runner runs admitted committed work
+paused. Never retype a verdict, respawn after an unknown result, or launch
+without operator policy and proven route. An unknown native spawn
+acknowledgement or outcome remains pending and never authorizes repeat dispatch.
+The runner runs admitted committed work
 only, with no-repair/no-retry, substitution, or invented result.
 
 - Completion ownership is per owner turn: a completion-required coding or runner
@@ -122,6 +156,13 @@ only, with no-repair/no-retry, substitution, or invented result.
   durable checkpoint; no owned pending completion is not an owned wait/autowake,
   and do not fabricate a callback. That error is not permission to duplicate or
   re-run the completed stage, restart it, or switch route/provider.
+- An implementation completion callback may verify and submit the implementation
+  result, then must STOP. It must not reserve or spawn review from the original
+  OPENED callback. Only the next canonical IMPLEMENTED wake supplies `WAKE_KEY`
+  for exactly one review reservation and native Sol dispatch; a later correction
+  must likewise wait for its next IMPLEMENTED wake. This implementation callback
+  is separate from the later review completion callback, which only reconciles
+  and collects the already-spawned child and never dispatches again.
 
 Synthetic-versus-installed proof boundary: smoke or synthetic data does not
 prove installed readiness. Make no alpha claim from smoke or synthetic data.

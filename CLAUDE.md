@@ -21,8 +21,9 @@ never blend them into repo skills.
 ## Current research roles
 
 Astra (research-orchestrator) owns the bounded loop. Native Luna is the
-implementer and runner. Claude Code Opus via ACP is reviewer-only, once per
-attempt. The route remains OpenAI/Codex with no invented provider or route.
+implementer and runner. Native Sol (`gpt-5.6-sol`, xhigh) is reviewer-only,
+once per attempt. The route remains OpenAI/Codex with no invented provider or
+route; historical Opus/ACP review evidence stays readable but is not a live path.
 
 A hypothesis equals one iteration and each attempt is code → review → run.
 There are at most three attempts; Astra explicitly chooses FINISH, ABANDON, or

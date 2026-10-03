@@ -62,9 +62,19 @@ def _validate_contract_file(raw_path: str, *, private: bool, label: str) -> str:
 STALE_CODING_PROVIDER_KEYS = frozenset({"github-copilot", "copilot-proxy", "copilot-cli"})
 
 # These are native OpenAI/Codex routes used by the managed research owner and
-# its bounded stage agents.  The reviewer-only Claude Code ACP route is not an
-# OpenAI model and must never be added to this policy.
+# its bounded stage agents. The reviewer is native Sol and read-only.
 NATIVE_LUNA_MODEL_REF = "openai/gpt-5.6-luna"
+NATIVE_SOL_MODEL_REF = "openai/gpt-5.6-sol"
+# Explicit non-Codex delivery routes remain available only for catalogued
+# OpenAI models.  Keep this exact set in lockstep with openclaw.json; provider
+# prefixes alone must never make an arbitrary model active.
+OPENAI_ALTERNATE_MODEL_REFS = frozenset(
+    {
+        "azure-oai-g2/gpt-5.4",
+        "azure-oai-g2-mini/gpt-5-mini",
+        "openrouter/openai/gpt-4.1",
+    }
+)
 
 # These are the exact paths rejected by the OpenClaw 8.1 runtime schema.  The
 # migration intentionally does not walk by key name: similarly named nested
@@ -106,8 +116,6 @@ class AssemblyInputs:
     model_provider: str
     model_id: str
     orchestrator_model_primary: str
-    research_reviewer_launcher: str
-    acpx_adapter_bin: str
 
 
 _NUMBER_RE = re.compile(
@@ -525,7 +533,12 @@ def _provider_selection(
     if provider == "azure":
         return "azure-oai-g2/gpt-5.4", "azure-oai-g2", "gpt-5.4"
     if provider == "openrouter":
-        model_id = openrouter_model or "anthropic/claude-sonnet-4-20250514"
+        model_id = openrouter_model
+        if not model_id:
+            raise ConfigMergeError(
+                "ERROR: OPENROUTER_MODEL is required when OPENCLAW_PROVIDER=openrouter; "
+                "refusing an implicit model fallback."
+            )
         return f"openrouter/{model_id}", "openrouter", model_id
     raise ConfigMergeError(
         f"ERROR: Unknown OPENCLAW_PROVIDER '{provider}'. Use 'codex', 'azure', or 'openrouter'."
@@ -557,6 +570,10 @@ def _model_declared(config: JsonObject, provider: str, model_id: str) -> bool:
     if not isinstance(declared, list):
         return False
     return any(isinstance(item, dict) and item.get("id") == model_id for item in declared)
+
+
+def _is_approved_openai_model_route(model_ref: str) -> bool:
+    return model_ref.startswith("openai/") or model_ref in OPENAI_ALTERNATE_MODEL_REFS
 
 
 def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs) -> JsonObject:
@@ -696,6 +713,22 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
             "repo config.\n"
             "       Add it to gateway/openclaw_config/openclaw.json before pushing."
         )
+    if not _model_declared(merged, "openai", NATIVE_SOL_MODEL_REF.removeprefix("openai/")):
+        raise ConfigMergeError(
+            f"ERROR: Native research model '{NATIVE_SOL_MODEL_REF}' is not declared in "
+            "repo config.\n"
+            "       Add it to gateway/openclaw_config/openclaw.json before pushing."
+        )
+    if not _is_approved_openai_model_route(inputs.model_primary):
+        raise ConfigMergeError(
+            f"ERROR: Active model '{inputs.model_primary}' must be an approved OpenAI model "
+            "route; refusing a provider fallback."
+        )
+    if not _is_approved_openai_model_route(inputs.orchestrator_model_primary):
+        raise ConfigMergeError(
+            f"ERROR: Research orchestrator model '{inputs.orchestrator_model_primary}' "
+            "must be an approved OpenAI model route."
+        )
 
     defaults["model"] = _get_object(defaults, "model") or {}
     cast(JsonObject, defaults["model"])["primary"] = inputs.model_primary
@@ -704,6 +737,7 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
         inputs.model_primary,
         inputs.orchestrator_model_primary,
         NATIVE_LUNA_MODEL_REF,
+        NATIVE_SOL_MODEL_REF,
     ):
         if model_ref not in model_policy_allow:
             model_policy_allow.append(model_ref)
@@ -760,12 +794,8 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
     )
     plugins = _get_object(merged, "plugins")
     if plugins is not None:
-        # Plugin load paths are machine-local source overrides.  In particular,
-        # an old linked ACPX cohort here takes precedence over the official
-        # npm-installed plugin that `plugins inspect --runtime` validated.
-        # Remove the override and let the native catalog/install resolver pick
-        # the trusted package; the adapter path is injected below from that
-        # runtime inspection, never from a hardcoded cohort path.
+        # Plugin load paths are machine-local source overrides. Remove them so
+        # stale linked packages cannot survive the managed merge.
         plugin_load = _get_object(plugins, "load")
         if plugin_load is not None:
             plugin_load.pop("paths", None)
@@ -782,35 +812,17 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
             "/home/dev/.openclaw/autoresearch/model-workspaces"
         ):
             app_server.pop("defaultWorkspaceDir", None)
-    # ACP is a managed research dispatch contract.  Replace the whole object
-    # so machine-local stream/default-agent/probe settings cannot survive the
-    # merge and make the generated route ambiguous.
-    merged["acp"] = {
-        "enabled": True,
-        "dispatch": {"enabled": True},
-        "backend": "acpx",
-        "allowedAgents": ["claude"],
-    }
+    # The active reviewer is a native Codex role. Remove inherited dispatch
+    # surfaces instead of allowing stale machine-local wiring to survive.
+    merged.pop("acp", None)
     plugins = _object(merged.setdefault("plugins", {}), "merged plugins")
     entries = _object(plugins.setdefault("entries", {}), "merged plugin entries")
-    acpx = _object(entries.setdefault("acpx", {}), "merged acpx plugin entry")
-    acpx["enabled"] = True
-    acpx["config"] = {
-        "agents": {
-            "claude": {
-                "command": "/usr/bin/env",
-                "args": [
-                    f"CLAUDE_CODE_EXECUTABLE={inputs.research_reviewer_launcher}",
-                    inputs.acpx_adapter_bin,
-                ],
-            }
-        },
-        "permissionMode": "approve-reads",
-        "nonInteractivePermissions": "fail",
-        "pluginToolsMcpBridge": False,
-        "openClawToolsMcpBridge": False,
-        "mcpServers": {},
-    }
+    entries.pop("acpx", None)
+    plugins["allow"] = [
+        plugin for plugin in cast(list[JsonValue], plugins.get("allow", [])) if plugin != "acpx"
+    ]
+    if not plugins["allow"]:
+        plugins.pop("allow", None)
     return merged
 
 
@@ -867,7 +879,7 @@ def _assemble_from_files(args: argparse.Namespace) -> bytes:
     model_primary, model_provider, model_id = _provider_selection(
         provider,
         os.environ.get("OPENAI_MODEL", "gpt-5.4"),
-        os.environ.get("OPENROUTER_MODEL", "anthropic/claude-sonnet-4-20250514"),
+        os.environ.get("OPENROUTER_MODEL", ""),
     )
     orchestrator_primary = orchestrator_model_primary(repo)
     owner_env_file = os.environ.get("G2_OWNER_ENV_FILE", "")
@@ -917,8 +929,6 @@ def _assemble_from_files(args: argparse.Namespace) -> bytes:
         model_provider=model_provider,
         model_id=model_id,
         orchestrator_model_primary=orchestrator_primary,
-        research_reviewer_launcher=args.research_reviewer_launcher,
-        acpx_adapter_bin=args.acpx_adapter_bin,
     )
     config, migration_record = assemble_config_with_migration(local, repo, inputs)
     migration_record_path = getattr(args, "migration_record", None)
@@ -946,8 +956,6 @@ def _build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("research_v2_root")
     assemble.add_argument("readonly_agents_json")
     assemble.add_argument("g2_agents_json")
-    assemble.add_argument("research_reviewer_launcher")
-    assemble.add_argument("acpx_adapter_bin")
     assemble.add_argument(
         "--migration-record",
         type=Path,

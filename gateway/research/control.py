@@ -19,6 +19,7 @@ from dotenv import dotenv_values
 from gateway.openclaw_client import OpenClawClient
 
 from .contracts import Attempt
+from .host_records import HostRecordError, managed_native_databases
 from .jobs import JobRecord
 from .jobs import cancel as cancel_job
 from .readiness import build_readiness_gate
@@ -202,33 +203,40 @@ class ReviewCanceller(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class ReviewCancellation:
-    """Structured result from the future native/ACP review adapter."""
+    """Structured result from the native OpenClaw review adapter."""
 
     state: str
     detail: str | None = None
 
 
 class OpenClawReviewCanceller:
-    """Bind the exact review cancellation protocol to one trusted core DB."""
+    """Bind native ``chat.abort`` to one exact owner and child state store."""
 
     def __init__(
         self,
-        core_database: Path,
+        openclaw_database: Path,
         request_once: Callable[..., Awaitable[Mapping[str, object]]],
+        codex_state_database: Path | None = None,
     ) -> None:
-        self._core_database = core_database
+        self._openclaw_database = openclaw_database
+        self._codex_state_database = codex_state_database or (
+            openclaw_database.parent / "codex-home" / "state_5.sqlite"
+        )
         self._request_once = request_once
 
     def cancel(self, attempt: Attempt, root: Path, reason: str) -> ReviewCancellation:
-        async def request(task_id: str, cancel_reason: str) -> Mapping[str, object]:
-            return await request_cancel(self._request_once, task_id, cancel_reason)
+        async def request(
+            owner_session_key: str, agent_id: str, run_id: str
+        ) -> Mapping[str, object]:
+            return await request_cancel(self._request_once, owner_session_key, agent_id, run_id)
 
         outcome = cancel_review(
             ResearchStore(root),
             attempt.attempt_id,
             reason,
-            self._core_database,
+            self._openclaw_database,
             request,
+            self._codex_state_database,
         )
         if outcome.pending:
             return ReviewCancellation("pending", outcome.status)
@@ -609,13 +617,27 @@ def production_owner_control(root: Path | None = None) -> OwnerControl:
             environment = _owner_environment_refusal(database_refusal)
 
     review_canceller: ReviewCanceller | None = None
+    codex_state_database: Path | None = None
+    managed_openclaw_database: Path | None = None
+    if core_database is not None:
+        try:
+            managed = managed_native_databases(core_database)
+            managed_openclaw_database = managed.openclaw_database
+            codex_state_database = managed.codex_state_database
+        except HostRecordError as exc:
+            if environment.refusal is None:
+                environment = _owner_environment_refusal(f"native_databases:{type(exc).__name__}")
     if environment.refusal is None and core_database is not None:
         client = OpenClawClient(
             values["OPENCLAW_HOST"],
             int(values["OPENCLAW_PORT"]),
             values["OPENCLAW_GATEWAY_TOKEN"],
         )
-        review_canceller = OpenClawReviewCanceller(core_database, client.request_once)
+        review_canceller = OpenClawReviewCanceller(
+            managed_openclaw_database or core_database,
+            client.request_once,
+            codex_state_database,
+        )
 
     return OwnerControl(
         configured_root,

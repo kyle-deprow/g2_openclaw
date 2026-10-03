@@ -122,16 +122,6 @@
         "api": "openai-completions",
         "models": [
           {
-            "id": "anthropic/claude-sonnet-4-20250514",
-            "name": "Claude Sonnet 4 (via OpenRouter)",
-            "reasoning": false,
-            "input": [
-              "text"
-            ],
-            "contextWindow": 200000,
-            "maxTokens": 16384
-          },
-          {
             "id": "openai/gpt-4.1",
             "name": "GPT-4.1 (via OpenRouter)",
             "reasoning": false,
@@ -140,16 +130,6 @@
             ],
             "contextWindow": 1047576,
             "maxTokens": 32768
-          },
-          {
-            "id": "google/gemini-2.5-flash-preview",
-            "name": "Gemini 2.5 Flash Preview (via OpenRouter)",
-            "reasoning": false,
-            "input": [
-              "text"
-            ],
-            "contextWindow": 1048576,
-            "maxTokens": 65536
           }
         ]
       }
@@ -235,23 +215,8 @@
           "primary": "openai/gpt-6-astra"
         },
         "thinkingDefault": "high",
-        "subagents": {
-          "allowAgents": [
-            "claude"
-          ]
-        },
         "tools": {
           "profile": "full"
-        }
-      },
-      "claude": {
-        "runtime": {
-          "type": "acp",
-          "acp": {
-            "agent": "claude",
-            "backend": "acpx",
-            "mode": "oneshot"
-          }
         }
       }
     }
@@ -309,7 +274,6 @@
   "plugins": {
     "allow": [
       "codex",
-      "acpx",
       "openai"
     ],
     "entries": {
@@ -320,10 +284,6 @@
             "sandbox": "workspace-write"
           }
         }
-      },
-      "acpx": {
-        "enabled": true,
-        "config": {}
       },
       "memory-core": {
         "enabled": false
@@ -339,16 +299,6 @@
         "mode": "off"
       }
     }
-  },
-  "acp": {
-    "enabled": true,
-    "dispatch": {
-      "enabled": true
-    },
-    "backend": "acpx",
-    "allowedAgents": [
-      "claude"
-    ]
   },
   "messages": {
     "ackReactionScope": "group-mentions"

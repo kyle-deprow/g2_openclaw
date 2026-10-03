@@ -2,45 +2,46 @@
 
 ## Authority
 
-- Astra is the research owner. Every implementation, review, run, refusal, and
-  outcome returns to Astra for the next decision.
-- Native Luna is the implementer and runner. Claude Code Opus via
-  ACP is reviewer-only, and exactly one ACP review is reserved per attempt.
+- Astra owns every implementation, review, run, refusal, and outcome. Native
+  Luna implements/runs; native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is
+  reviewer-only, with exactly one native review per attempt.
 - OpenAI/Codex remains the provider; no fallback or route switching.
 
 ## Bounded loop
 
-- A hypothesis equals one iteration. Each attempt is code → review → run.
-- Allow at most three attempts for a hypothesis. Once the allocation is
-  exhausted, Astra must explicitly choose FINISH, ABANDON, or PAUSE.
-- A final allocated attempt may finish its review, run, evidence collection,
-  and decision; exhaustion must not block completion.
+- A hypothesis equals one iteration: code → review → run. Allow at most three
+  attempts; after exhaustion Astra explicitly chooses FINISH, ABANDON, or PAUSE.
+  A final allocated attempt may still finish review, run, evidence, and decision.
 
 ## Dispatch and evidence
 
-- Spawn only the approved native implementer and experiment runner.
-- Reserve immutable review evidence and its bundle before the one ACP Opus
-  review. Bind the ACK and verdict to the attempt, commit, spec digest, and
-  child task identity.
-- Never retype a verdict, respawn after an unknown acknowledgement, or launch
-  without an explicit operator policy and a proven route.
+- Spawn only the approved native implementer, experiment runner, and read-only
+  Sol reviewer. Reserve immutable evidence before review and bind the official
+  child run's identity, verdict, attempt, commit, and spec digest.
+- Never retype a verdict or respawn after an unknown result; launch only with
+  explicit operator policy and a proven route.
+- An unknown native spawn acknowledgement or outcome remains pending and never
+  authorizes repeat dispatch.
+- An implementation completion callback may verify and submit the implementation
+  result, then must STOP. It must not reserve or spawn review from the original
+  OPENED callback. Only the next canonical IMPLEMENTED wake supplies `WAKE_KEY`
+  for exactly one review reservation and native Sol dispatch; later corrections
+  wait for their next IMPLEMENTED wake. The later review completion callback
+  runs only after the original owner turn ends, reconciles and collects the
+  already-spawned child exactly once, and never dispatches again.
 
 ## Status and readiness
 
-- Read the existing research status/control surfaces only. Preserve typed
-  admission refusals, policy-unset pause, exhausted-attempt completion, exact
-  cancel, owner wake, and read-only main controls.
-- Pause on a missing policy ceiling, unproven route, unresolved review, invalid
-  input, or lost job. Do not clear a readiness pause autonomously.
-- Keep every refusal and terminal outcome durable and return it to Astra once.
-- Receipt artifact digests bind exact bytes rather than provider attestation;
-  native readiness uses model, effort, and role from the official rollout, with
-  requested `fast` kept separate from observed `unknown` service tier.
+- Read status/control surfaces only. Preserve typed refusals, policy-unset pause,
+  exhausted-attempt completion, exact cancel, owner wake, read-only controls,
+  and durable terminal outcomes returned to Astra. Pause on missing policy,
+  unproven route, unresolved review, invalid input, or lost job; never clear
+  readiness autonomously. Artifact digests bind exact bytes, not provider
+  attestation; keep requested `fast` separate from observed `unknown`.
 
 ## Scientific boundary
 
-- The initial capability is price-panel-only and ETF scope. Refuse stock work
-  without trusted point-in-time earnings coverage and fail closed on unknown
-  earnings status.
-- Use trusted panel sessions, immutable receipts, the exposure ledger, and
-  evaluator bounds. Make no alpha claim from smoke or synthetic data.
+- Capability is price-panel-only and ETF-scoped. Refuse stock work without
+  trusted point-in-time earnings and fail closed on unknown earnings. Require
+  trusted panel sessions, immutable receipts, the exposure ledger, and
+  evaluator bounds; smoke or synthetic data never establishes alpha.

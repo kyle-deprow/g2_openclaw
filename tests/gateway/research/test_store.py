@@ -18,7 +18,6 @@ from gateway.research.contracts import (
     EvaluationSpecSet,
     HypothesisSpec,
     ImplementationRecord,
-    ReviewEvidence,
 )
 from gateway.research.machine import IllegalTransition
 from gateway.research.store import OwnerLockHeld, ResearchStore, StoreConflict
@@ -98,37 +97,6 @@ def _failed_review_setup(
     )
     store.collect_review_evidence(attempt.attempt_id, record, host_payload)
     return store, hypothesis, attempt
-
-
-def _replacement_review(
-    hypothesis: HypothesisSpec,
-    attempt: Attempt,
-    *,
-    session_id: str = "old-session",
-    verdict: str = "PASS",
-) -> tuple[ReviewEvidence, str]:
-    record = replace(
-        review(attempt.attempt_id, attempt.commit, hypothesis.spec_sha256, verdict),
-        acp_session_id=session_id,
-        submitted_at="2026-01-02T00:00:00Z",
-    )
-    payload = json.dumps(
-        {
-            "task_id": "verified-task",
-            "task_status": "succeeded",
-            "acp_session_uuid": session_id,
-            "transcript_path": "/tmp/review.jsonl",
-            "transcript_sha256": "b" * 64,
-            "assistant_events": 1,
-            "verdict_json": record.to_json(),
-            "bound_commit": record.commit,
-            "bound_spec_sha256": record.spec_sha256,
-            "verdict": record.verdict,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return record, payload
 
 
 def test_pre_review_retry_closes_implemented_and_preserves_evidence(
@@ -699,53 +667,23 @@ def test_review_is_idempotent_repairs_projection_and_is_insert_only(
         )
 
 
-def test_supersede_failed_review_refuses_closed_attempt(
+def test_review_supersession_operation_is_removed_and_evidence_is_immutable(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
-    store, hypothesis, attempt = _failed_review_setup(campaign)
-    replacement, host_payload = _replacement_review(hypothesis, attempt)
-    store.close_attempt(attempt.attempt_id, AttemptDecision.RETRY, "retry")
-
-    with pytest.raises(StoreConflict):
-        store.supersede_failed_review(attempt.attempt_id, replacement, host_payload)
-
-
-def test_supersede_failed_review_refuses_stored_verified_record(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-) -> None:
-    store, _source, hypothesis, attempt, _implementation = _implemented_attempt(campaign)
-    original = review(attempt.attempt_id, attempt.commit, hypothesis.spec_sha256, "FAIL")
-    verified_review(store, original)
-    replacement, host_payload = _replacement_review(hypothesis, attempt)
-
-    with pytest.raises(StoreConflict):
-        store.supersede_failed_review(attempt.attempt_id, replacement, host_payload)
+    store, _hypothesis, attempt = _failed_review_setup(campaign)
+    assert not hasattr(store, "supersede_failed_review")
+    with (
+        pytest.raises(sqlite3.DatabaseError, match="attempt evidence is insert-only"),
+        store._connect() as conn,
+    ):
+        conn.execute(
+            "UPDATE attempt_evidence SET payload_json='resurrected' "
+            "WHERE attempt_id=? AND kind='review'",
+            (attempt.attempt_id,),
+        )
 
 
-def test_supersede_failed_review_refuses_acp_session_mismatch(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-) -> None:
-    store, hypothesis, attempt = _failed_review_setup(campaign)
-    replacement, host_payload = _replacement_review(
-        hypothesis, attempt, session_id="different-session"
-    )
-
-    with pytest.raises(StoreConflict):
-        store.supersede_failed_review(attempt.attempt_id, replacement, host_payload)
-
-
-def test_supersede_failed_review_refuses_second_supersession(
-    campaign: tuple[ResearchStore, Path, HypothesisSpec],
-) -> None:
-    store, hypothesis, attempt = _failed_review_setup(campaign)
-    replacement, host_payload = _replacement_review(hypothesis, attempt, verdict="FAIL")
-    store.supersede_failed_review(attempt.attempt_id, replacement, host_payload)
-
-    with pytest.raises(StoreConflict, match="review evidence was already superseded once"):
-        store.supersede_failed_review(attempt.attempt_id, replacement, host_payload)
-
-
-def test_attempt_evidence_review_update_requires_superseded_archive(
+def test_attempt_evidence_review_update_stays_blocked_with_historical_archive(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, hypothesis, attempt = _failed_review_setup(campaign)
@@ -803,9 +741,32 @@ def test_initialize_migrates_old_attempt_evidence_trigger(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, hypothesis, attempt = _failed_review_setup(campaign)
+    _insert_raw_evidence(store, attempt.attempt_id, "review_superseded")
+    _insert_raw_evidence(store, attempt.attempt_id, "review_host_evidence_superseded")
+    old_review_payload = store.evidence(attempt.attempt_id, "review")
+    old_host_payload = store.evidence(attempt.attempt_id, "review_host_evidence")
+    attempt_dir = (
+        store.root / "hypotheses" / hypothesis.hypothesis_id / "attempts" / attempt.attempt_id
+    )
+    old_review_projection = (attempt_dir / "review.json").read_bytes()
+    old_host_projection = (attempt_dir / "review_host_evidence.json").read_bytes()
+    superseded_review_projection = attempt_dir / "review_superseded.json"
+    superseded_host_projection = attempt_dir / "review_host_evidence_superseded.json"
+    superseded_review_projection.write_bytes(b"legacy review projection\n")
+    superseded_host_projection.write_bytes(b"legacy host projection\n")
+    old_superseded_review_projection = superseded_review_projection.read_bytes()
+    old_superseded_host_projection = superseded_host_projection.read_bytes()
+    old_superseded_review_payload = store.evidence(attempt.attempt_id, "review_superseded")
+    old_superseded_host_payload = store.evidence(
+        attempt.attempt_id, "review_host_evidence_superseded"
+    )
     old_trigger = """
         CREATE TRIGGER immutable_attempt_evidence
         BEFORE UPDATE ON attempt_evidence
+        WHEN NOT (OLD.kind = 'review' AND EXISTS (
+          SELECT 1 FROM attempt_evidence AS archived
+          WHERE archived.attempt_id = OLD.attempt_id
+        ))
         BEGIN SELECT RAISE(ABORT, 'attempt evidence is insert-only'); END;
     """
     with store._connect() as conn:
@@ -815,6 +776,18 @@ def test_initialize_migrates_old_attempt_evidence_trigger(
 
     store.initialize()
 
+    assert store.evidence(attempt.attempt_id, "review") == old_review_payload
+    assert store.evidence(attempt.attempt_id, "review_host_evidence") == old_host_payload
+    assert (attempt_dir / "review.json").read_bytes() == old_review_projection
+    assert (attempt_dir / "review_host_evidence.json").read_bytes() == old_host_projection
+    assert store.evidence(attempt.attempt_id, "review_superseded") == old_superseded_review_payload
+    assert (
+        store.evidence(attempt.attempt_id, "review_host_evidence_superseded")
+        == old_superseded_host_payload
+    )
+    assert superseded_review_projection.read_bytes() == old_superseded_review_projection
+    assert superseded_host_projection.read_bytes() == old_superseded_host_projection
+
     with store._connect() as conn:
         trigger_sql = str(
             conn.execute(
@@ -822,12 +795,9 @@ def test_initialize_migrates_old_attempt_evidence_trigger(
                 "WHERE type='trigger' AND name='immutable_attempt_evidence'"
             ).fetchone()[0]
         )
-    assert "OLD.kind IN" in trigger_sql
-    assert "review_host_evidence" in trigger_sql
-    replacement, host_payload = _replacement_review(hypothesis, attempt)
-    assert store.supersede_failed_review(attempt.attempt_id, replacement, host_payload).state == (
-        AttemptState.REVIEW_PASSED
-    )
+    assert "archived" not in trigger_sql
+    assert "review_host_evidence" not in trigger_sql
+    assert not hasattr(store, "supersede_failed_review")
 
 
 def test_initialize_trigger_migration_holds_write_lock(
@@ -838,6 +808,10 @@ def test_initialize_trigger_migration_holds_write_lock(
     old_trigger = """
         CREATE TRIGGER immutable_attempt_evidence
         BEFORE UPDATE ON attempt_evidence
+        WHEN NOT (OLD.kind = 'review' AND EXISTS (
+          SELECT 1 FROM attempt_evidence AS archived
+          WHERE archived.attempt_id = OLD.attempt_id
+        ))
         BEGIN SELECT RAISE(ABORT, 'attempt evidence is insert-only'); END;
     """
     with store._connect() as conn:

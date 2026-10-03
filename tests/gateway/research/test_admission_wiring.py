@@ -43,8 +43,8 @@ from tests.gateway.research.conftest import (
     run_plan,
     verified_review,
 )
+from tests.gateway.research.native_review_fixtures import prepare_review
 from tests.gateway.research.test_admission import _admit, _document, _payload
-from tests.gateway.research.test_review_evidence import _prepare_review
 
 LEDGER_FIXTURE = Path(__file__).parent / "fixtures" / "exposure-ledger.json"
 RECEIPT_FIXTURE = Path(__file__).parent / "fixtures" / "receipt.json"
@@ -808,14 +808,12 @@ def test_final_allocated_attempt_completes_review_run_collect_and_decision(
 ) -> None:
     from gateway.research.review_evidence import collect_review
 
-    monkeypatch.setitem(
-        _prepare_review.__globals__,
-        "_PROVENANCE",
-        provenance_evidence("H0001-A001", "0" * 40),
-    )
-    store, attempt_id, _bundle, core, sessions, projects = _prepare_review(campaign, tmp_path)
+    del monkeypatch
+    store, attempt_id, _bundle, native = prepare_review(campaign, tmp_path)
     assert (
-        collect_review(store, attempt_id, core, sessions, projects).state
+        collect_review(
+            store, attempt_id, native.openclaw_database, native.codex_state_database
+        ).state
         is AttemptState.REVIEW_PASSED
     )
     run_dir = store.root / "hypotheses" / "H0001" / "attempts" / attempt_id / "run"

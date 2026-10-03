@@ -20,10 +20,11 @@ provider switch.
 
 The config keeps the G2 interface agent main on openai/gpt-5.4 and the bounded
 research owner research-orchestrator on openai/gpt-6-astra. Native Luna is the
-approved implementation/runner child and Claude Code Opus via ACP is the
-review-only child. Child identity, attempt, commit, spec digest, and evidence
-are bound by the research owner; no deleted debate roster or retired service
-unit is configured.
+approved implementation/runner child and native Sol is the read-only review
+child (`gpt-5.6-sol`, xhigh, fast). Child identity, attempt, commit, spec
+digest, role, model, effort, and evidence are bound by the research owner; no
+ACP/ACPX/Claude reviewer route, deleted debate roster, or retired service unit
+is configured.
 
 ## Sessions and lifecycle
 
@@ -52,8 +53,8 @@ built-in memory or add a provider fallback. It also keeps
 `cron.enabled=false`, sets the default heartbeat cadence to `0m`, and sets
 `skills.workshop.autonomous.mode=off`; the host research-owner service is the
 only intended loop owner.
-The provider allowlist retains the bundled `codex`, `acpx`, and `openai`
-plugins; `memory-core` remains explicitly disabled, and the managed
+The provider allowlist retains only the bundled `codex` and `openai` plugins;
+`memory-core` remains explicitly disabled, and the managed
 `plugins.slots.memory` value is `none` so the implicit memory slot cannot be
 re-enabled by a machine-local entry.
 
@@ -67,7 +68,8 @@ readiness or alpha.
 ## Guarded publication
 
 The push script validates the generated JSON against the installed 9.2 schema,
-the OpenAI/Codex provider, the main and research-owner agent IDs, main's
+the OpenAI/Codex provider, the main and research-owner agent IDs, the native
+Sol reviewer role, main's
 bounded tool profile, the research owner's full native profile, main-only MCP
 projections, memory denial, and the research-owner unit. It publishes
 atomically with rollback evidence and prunes stale installed copies using its

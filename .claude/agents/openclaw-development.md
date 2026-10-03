@@ -57,7 +57,7 @@ Key env vars: `OPENCLAW_HOME` (default `~/.openclaw`), `OPENCLAW_GATEWAY_TOKEN` 
 - **Preserve configured model selections.** Use the model fields declared in repo-managed OpenClaw and Codex agent config; never replace them with generic role-based aliases.
 - **Hub-and-spoke topology.** Specialists report back through the coordinator only.
 - **Avoid deep spawn nesting (>2 levels).** Use sequential spawns from the coordinator.
-- **In this repo, OpenClaw session tools are NOT the delegation path for research:** `research-orchestrator` delegates bounded work via native Codex `spawn_agent` to the configured Luna child and reserves one ACP Opus review.
+- **In this repo, OpenClaw session tools are NOT the delegation path for research:** `research-orchestrator` delegates bounded work via native Codex `spawn_agent` to configured Luna children and the read-only Sol reviewer.
 
 ## Priority 5: Automation — Cron, Hooks, Webhooks (HIGH)
 
