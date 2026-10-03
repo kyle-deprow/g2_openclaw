@@ -369,3 +369,53 @@ def test_changed_economic_claim_changes_digest(document_payload: dict[str, objec
     revised = HypothesisDocument.from_json(_json(changed))
 
     assert revised.sha256 != original.sha256
+
+
+# Deliberately pins hypothesis._MAX_TEXT_LENGTH; update both together.
+_TEXT_FIELD_BOUND = 16_384
+
+
+@pytest.mark.parametrize("field", ["entry_rule", "position_sizing_rule", "missing_data_rule"])
+def test_text_field_accepts_exactly_the_maximum_length(
+    document_payload: dict[str, object], field: str
+) -> None:
+    changed = copy.deepcopy(document_payload)
+    changed[field] = "x" * _TEXT_FIELD_BOUND
+
+    document = HypothesisDocument.from_json(_json(changed))
+
+    assert len(getattr(document, field)) == _TEXT_FIELD_BOUND
+
+
+@pytest.mark.parametrize("field", ["entry_rule", "position_sizing_rule", "missing_data_rule"])
+def test_text_field_rejects_one_over_the_maximum_length(
+    document_payload: dict[str, object], field: str
+) -> None:
+    changed = copy.deepcopy(document_payload)
+    changed[field] = "x" * (_TEXT_FIELD_BOUND + 1)
+
+    with pytest.raises(ValueError, match=f"{field} exceeds the maximum length"):
+        HypothesisDocument.from_json(_json(changed))
+
+
+def test_text_array_items_share_the_maximum_length(document_payload: dict[str, object]) -> None:
+    accepted = copy.deepcopy(document_payload)
+    accepted["null_tests"] = ["x" * _TEXT_FIELD_BOUND]
+    assert HypothesisDocument.from_json(_json(accepted)).null_tests == ("x" * _TEXT_FIELD_BOUND,)
+
+    rejected = copy.deepcopy(document_payload)
+    rejected["null_tests"] = ["x" * (_TEXT_FIELD_BOUND + 1)]
+    with pytest.raises(ValueError, match="null_tests"):
+        HypothesisDocument.from_json(_json(rejected))
+
+
+def test_text_field_above_the_historical_bound_round_trips(
+    document_payload: dict[str, object],
+) -> None:
+    changed = copy.deepcopy(document_payload)
+    changed["position_sizing_rule"] = "x" * 8_883
+
+    document = HypothesisDocument.from_json(_json(changed))
+
+    assert len(document.position_sizing_rule) == 8_883
+    assert HypothesisDocument.from_json(document.to_json()).to_json() == document.to_json()

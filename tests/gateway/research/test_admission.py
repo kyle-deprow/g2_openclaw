@@ -253,6 +253,21 @@ def test_hypothesis_spec_json_mismatch_is_refused(payload: dict[str, object]) ->
     assert result.reason is AdmissionReason.HYPOTHESIS_SPEC_MISMATCH
 
 
+def test_long_position_sizing_rule_is_not_a_spec_mismatch(payload: dict[str, object]) -> None:
+    # Frozen H0008 carried an 8883-character position_sizing_rule that the old
+    # 8192 per-field bound refused at admission as HYPOTHESIS_SPEC_MISMATCH.
+    payload["position_sizing_rule"] = "x" * 8_883
+    raw = json.dumps(payload, separators=(",", ":"))
+
+    document = HypothesisDocument.from_json(raw)
+
+    assert len(document.position_sizing_rule) == 8_883
+    assert document.to_json() == HypothesisDocument.from_json(document.to_json()).to_json()
+    result = _admit(document)
+    assert result.reason is not AdmissionReason.HYPOTHESIS_SPEC_MISMATCH
+    assert result.admitted is True
+
+
 def test_receipt_semantic_digest_mismatch_is_refused(payload: dict[str, object]) -> None:
     receipt = replace(_receipt(), spec_sha256_semantic=hashlib.sha256(b"changed").hexdigest())
 
