@@ -877,6 +877,22 @@ def _validate_scenario_result(
     return True, canonical
 
 
+def _scenario_succeeded(scenario: dict[str, object]) -> bool:
+    """Accept the worker's success shape: no ``status`` key, or an explicit success.
+
+    The worker records a per-scenario ``status`` only on failure (``"failed"``), so a
+    completed scenario carries none.  Any other status value, or a stage exit that is
+    absent or not integer zero, is a failure.
+    """
+    if "status" in scenario and scenario["status"] != "succeeded":
+        return False
+    for key in ("targets_exit", "evaluator_exit"):
+        value = scenario.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value != 0:
+            return False
+    return True
+
+
 def _validate_worker_success_evidence(
     run_dir: Path,
     plan: RunPlan,
@@ -893,7 +909,7 @@ def _validate_worker_success_evidence(
     primary_path: Path | None = None
     for item in plan.scenarios:
         scenario = scenarios.get(item.scenario_id)
-        if not isinstance(scenario, dict) or scenario.get("status") != "succeeded":
+        if not isinstance(scenario, dict) or not _scenario_succeeded(scenario):
             return False, None
         valid, result_path = _validate_scenario_result(
             run_dir,
@@ -1706,6 +1722,68 @@ def run_release_unstarted(
         finally:
             store.release_run_lock()
         typer.echo(f"released {job_id} state={released.state.value}")
+    except Exception as exc:
+        _fail(exc)
+    finally:
+        if store is not None:
+            store.release_run_lock()
+
+
+@app.command("run-reverify")
+def run_reverify(
+    attempt_id: str,
+    root: Path = typer.Option(..., "--root"),
+    job_id: str = typer.Option(..., "--job-id"),
+    reason: str = typer.Option(..., "--reason"),
+    operator_reference: str = typer.Option(..., "--operator-reference"),
+) -> None:
+    """Operator-only: re-verify a run_evidence_mismatch run from its immutable run files.
+
+    Recomputes the outcome from the on-disk terminal.json and run-evidence.json and,
+    only when it now verifies as a success, moves the attempt to RUN_SUCCEEDED once.
+    """
+    store: ResearchStore | None = None
+    try:
+        store = ResearchStore(_root(root))
+        store.acquire_run_lock()
+        try:
+            attempt = store.get_attempt(attempt_id)
+            terminal_path = (
+                store.root
+                / "hypotheses"
+                / attempt.hypothesis_id
+                / "attempts"
+                / attempt_id
+                / "run"
+                / "terminal.json"
+            )
+            evidence_path = terminal_path.with_name("run-evidence.json")
+            for path in (terminal_path, evidence_path):
+                if path.is_symlink() or not path.is_file():
+                    raise JobError(f"{path.name} is missing or not a regular file")
+            try:
+                terminal_bytes = terminal_path.read_bytes()
+                terminal = json.loads(terminal_bytes.decode("utf-8"))
+                evidence_sha256 = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise JobError(f"run files are unreadable: {exc}") from exc
+            if not isinstance(terminal, dict):
+                raise JobError("terminal.json is not a JSON object")
+            outcome = _terminal_outcome(store, attempt_id, terminal, origin="terminal.json")
+            # The store re-reads both files and refuses if either differs from the
+            # bytes verified here, so the recorded digests are the verified bytes.
+            updated = store.reverify_run_outcome(
+                attempt_id,
+                job_id,
+                outcome,
+                reason,
+                operator_reference,
+                hashlib.sha256(terminal_bytes).hexdigest(),
+                evidence_sha256,
+            )
+        finally:
+            store.release_run_lock()
+        typer.echo(f"reverified {job_id} state={updated.state.value}")
     except Exception as exc:
         _fail(exc)
     finally:

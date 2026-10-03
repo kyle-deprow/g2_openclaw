@@ -312,12 +312,15 @@ def _canonical_terminal_fixture(
         )
         trades_path.write_bytes(b"trades")
         daily_path.write_bytes(b"daily")
+        # Exactly the keys worker.py records for a completed scenario: there is no
+        # per-scenario ``status`` (the worker sets one only on failure).
         scenarios[scenario.scenario_id] = {
-            "status": "succeeded",
             "spec_id": scenario.spec_id,
             "spec_sha256": scenario.evaluation_spec_sha256,
             "targets_sha256": hashlib.sha256(target_path.read_bytes()).hexdigest(),
             "targets_exit": 0,
+            "targets_provenance": {"stage": f"targets-{scenario.scenario_id}"},
+            "evaluator_provenance": {"stage": f"evaluate-{scenario.scenario_id}"},
             "evaluator_exit": 0,
             "result_path": str(result_path),
             "result_sha256": hashlib.sha256(result_path.read_bytes()).hexdigest(),
@@ -1352,3 +1355,100 @@ def test_running_job_is_not_duplicated_when_owner_turn_is_pending(
         store.release_owner_lock()
     assert launches == 1
     assert compose_wake(store) is None
+
+
+def test_terminal_outcome_accepts_real_worker_success_shape(
+    campaign: tuple[ResearchStore, Path, Any],
+) -> None:
+    """The worker's success evidence has no per-scenario status key."""
+    store, attempt, plan, run_dir, evidence, terminal = _canonical_terminal_fixture(campaign)
+    scenarios = evidence["scenarios"]
+    assert isinstance(scenarios, dict)
+    assert all("status" not in scenario for scenario in scenarios.values())
+    assert set(scenarios["s000"]) == {
+        "spec_id",
+        "spec_sha256",
+        "targets_sha256",
+        "targets_exit",
+        "targets_provenance",
+        "evaluator_provenance",
+        "evaluator_exit",
+        "result_path",
+        "result_sha256",
+        "trades_sha256",
+        "daily_sha256",
+    }
+
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == "succeeded"
+    assert outcome.exit_code == 0
+    assert outcome.result_path == str(
+        run_dir / "scenarios" / plan.primary_scenario_id / "evaluator-stage" / "out" / "result.json"
+    )
+
+
+def test_terminal_outcome_still_accepts_explicit_scenario_success_status(
+    campaign: tuple[ResearchStore, Path, Any],
+) -> None:
+    store, attempt, _plan, run_dir, evidence, terminal = _canonical_terminal_fixture(campaign)
+    scenarios = evidence["scenarios"]
+    assert isinstance(scenarios, dict)
+    for scenario in scenarios.values():
+        scenario["status"] = "succeeded"
+    _rewrite_terminal_evidence(run_dir, evidence, terminal)
+
+    assert research_cli._terminal_outcome(store, attempt.attempt_id, terminal).status == (
+        "succeeded"
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("status", "failed"),
+        ("status", "scenario_failed"),
+        ("status", ""),
+        ("targets_exit", 1),
+        ("evaluator_exit", 3),
+        ("evaluator_exit", -9),
+        ("evaluator_exit", True),
+        ("evaluator_exit", "0"),
+        ("targets_exit", None),
+    ],
+)
+@pytest.mark.parametrize("scenario_id", ["s000", "s001"])
+def test_terminal_outcome_rejects_failed_scenario_in_success_run(
+    campaign: tuple[ResearchStore, Path, Any], scenario_id: str, key: str, value: object
+) -> None:
+    store, attempt, _plan, run_dir, evidence, terminal = _canonical_terminal_fixture(campaign)
+    scenarios = evidence["scenarios"]
+    assert isinstance(scenarios, dict)
+    scenario = scenarios[scenario_id]
+    assert isinstance(scenario, dict)
+    scenario[key] = value
+    _rewrite_terminal_evidence(run_dir, evidence, terminal)
+
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == "run_evidence_mismatch"
+
+
+@pytest.mark.parametrize(
+    "missing", [("targets_exit",), ("evaluator_exit",), ("targets_exit", "evaluator_exit")]
+)
+def test_terminal_outcome_rejects_scenario_without_recorded_exits(
+    campaign: tuple[ResearchStore, Path, Any], missing: tuple[str, ...]
+) -> None:
+    store, attempt, _plan, run_dir, evidence, terminal = _canonical_terminal_fixture(campaign)
+    scenarios = evidence["scenarios"]
+    assert isinstance(scenarios, dict)
+    scenario = scenarios["s001"]
+    assert isinstance(scenario, dict)
+    for key in missing:
+        scenario.pop(key)
+    _rewrite_terminal_evidence(run_dir, evidence, terminal)
+
+    outcome = research_cli._terminal_outcome(store, attempt.attempt_id, terminal)
+
+    assert outcome.status == "run_evidence_mismatch"

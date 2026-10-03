@@ -176,9 +176,17 @@ def _boundary_failure(events: list[sqlite3.Row], attempt: sqlite3.Row | None) ->
             if str(event["attempt_id"] or "") == attempt_id
             or (str(event["kind"]) == "owner_turn_failed" and event["attempt_id"] is None)
         ]
+    reverified = False
     for event in reversed(events):
         kind = str(event["kind"])
         detail = _json_detail(event["detail"])
+        if kind == "run_reverified":
+            # An operator re-verification supersedes every earlier run failure
+            # of this attempt; later events (scanned first) still apply.
+            reverified = True
+            continue
+        if kind == "run_finished" and reverified:
+            continue
         if kind == "owner_turn_failed":
             return str(detail.get("status") or detail.get("reason") or "owner_turn_failed")
         if kind == "review_submitted" and detail.get("verdict") == "FAIL":

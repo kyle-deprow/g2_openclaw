@@ -143,6 +143,45 @@ def test_status_surfaces_review_and_run_failure_evidence(tmp_path: Path) -> None
     assert status.last_event_at == "2026-09-06T00:02:00Z"
 
 
+def _reverify_events(conn: sqlite3.Connection, *, later_owner_failure: bool = False) -> None:
+    conn.execute("INSERT INTO hypotheses VALUES ('H0001','FROZEN','2026-09-06T00:00:00Z')")
+    conn.execute(
+        "INSERT INTO attempts VALUES ('H0001-A001','H0001','RUN_SUCCEEDED','2026-09-06T00:01:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO events VALUES (1,'2026-09-06T00:02:00Z','H0001','H0001-A001',"
+        '\'run_finished\',\'{"exit_code":-1,"status":"run_evidence_mismatch",'
+        '"state":"RUN_FAILED"}\',\'driver\')'
+    )
+    conn.execute(
+        "INSERT INTO events VALUES (2,'2026-09-06T00:03:00Z','H0001','H0001-A001',"
+        "'run_reverified','{\"job_id\":\"job-1\"}','operator')"
+    )
+    if later_owner_failure:
+        conn.execute(
+            "INSERT INTO events VALUES (3,'2026-09-06T00:04:00Z','H0001',NULL,"
+            "'owner_turn_failed','{\"status\":\"owner_unavailable\"}','owner')"
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_status_run_reverified_supersedes_earlier_run_failure(tmp_path: Path) -> None:
+    _reverify_events(_db(tmp_path))
+
+    status = read_status(tmp_path, unit_state=lambda _: "inactive")
+
+    assert status.boundary_failure is None
+
+
+def test_status_run_reverified_does_not_hide_later_failures(tmp_path: Path) -> None:
+    _reverify_events(_db(tmp_path), later_owner_failure=True)
+
+    status = read_status(tmp_path, unit_state=lambda _: "inactive")
+
+    assert status.boundary_failure == "owner_unavailable"
+
+
 def test_status_keeps_owner_failure_visible_when_attempt_id_is_null(tmp_path: Path) -> None:
     conn = _db(tmp_path)
     conn.execute("INSERT INTO hypotheses VALUES ('H0001','FROZEN','2026-09-06T00:00:00Z')")

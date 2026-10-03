@@ -44,6 +44,7 @@ from .machine import (
     decide_hypothesis,
     freeze,
     queue_run,
+    reverify_run,
     start_run,
     submit_implementation,
     submit_review,
@@ -2664,3 +2665,173 @@ class ResearchStore:
                 "state": updated.state.value,
             },
         )
+
+    _REVERIFY_JOB_STATES = frozenset({"EXITED"})
+
+    def reverify_run_outcome(
+        self,
+        attempt_id: str,
+        job_id: str,
+        outcome: RunOutcome,
+        reason: str,
+        operator_reference: str,
+        terminal_sha256: str,
+        run_evidence_sha256: str,
+    ) -> Attempt:
+        """Move a ``run_evidence_mismatch`` RUN_FAILED attempt to RUN_SUCCEEDED, once.
+
+        Operator-only recovery for a host verification defect: the worker's
+        immutable ``terminal.json`` and ``run-evidence.json`` already recorded a
+        success, and the caller recomputed ``outcome`` from them with the fixed
+        verifier.  Every guard failure raises ``StoreConflict`` (or ``ValueError``
+        for a malformed request) and changes nothing.  No run file is modified,
+        moved or rewritten; the old outcome and the file digests are preserved
+        in a ``run_reverified`` event, which also makes the transition at-most-once.
+
+        ``terminal_sha256`` and ``run_evidence_sha256`` are the digests of the exact
+        bytes the caller verified; both files are re-read inside the transaction and
+        any difference refuses, so the recorded digests are the verified bytes.  The
+        outcome's ``result_path`` must be the canonical primary scenario result.
+        """
+        for name, value in (
+            ("reverify reason", reason),
+            ("job_id", job_id),
+            ("operator reference", operator_reference),
+            ("terminal sha256", terminal_sha256),
+            ("run evidence sha256", run_evidence_sha256),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        if not isinstance(outcome, RunOutcome):
+            raise TypeError("outcome must be RunOutcome")
+        attempt = self.get_attempt(attempt_id)
+        if attempt.state != AttemptState.RUN_FAILED:
+            raise StoreConflict("attempt is not RUN_FAILED")
+        if attempt.run_job_id != job_id:
+            raise StoreConflict("attempt run job does not match the requested job")
+        old_outcome_json = attempt.run_outcome or ""
+        try:
+            old_outcome = RunOutcome.from_json(old_outcome_json)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise StoreConflict("attempt run outcome is missing or malformed") from exc
+        if old_outcome.status != "run_evidence_mismatch" or old_outcome.job_id != job_id:
+            raise StoreConflict("attempt run outcome is not a run_evidence_mismatch for this job")
+        if (
+            outcome.attempt_id != attempt_id
+            or outcome.job_id != job_id
+            or outcome.status != "succeeded"
+            or outcome.exit_code != 0
+            or not outcome.result_path
+        ):
+            raise StoreConflict("recomputed run outcome is not a verified success for this job")
+        run_dir = self.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id / "run"
+        terminal_path = run_dir / "terminal.json"
+        evidence_path = run_dir / "run-evidence.json"
+        try:
+            plan = RunPlan.from_json(self.evidence(attempt_id, "run_plan"))
+        except (StoreConflict, TypeError, ValueError) as exc:
+            raise StoreConflict("attempt run plan is missing or malformed") from exc
+        canonical_result = (
+            run_dir
+            / "scenarios"
+            / plan.primary_scenario_id
+            / "evaluator-stage"
+            / "out"
+            / "result.json"
+        )
+        if outcome.result_path != str(canonical_result):
+            raise StoreConflict(
+                "recomputed run outcome result_path is not the canonical primary result"
+            )
+        try:
+            updated = reverify_run(attempt, outcome, now_utc())
+        except (IllegalTransition, ValueError) as exc:
+            raise StoreConflict(str(exc)) from exc
+        payload = updated.to_json()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            job_row = conn.execute(
+                "SELECT state,payload_json,payload_sha256 FROM jobs WHERE job_id=? AND attempt_id=?",
+                (job_id, attempt_id),
+            ).fetchone()
+            if job_row is None:
+                raise StoreConflict("job is not recorded for this attempt")
+            if _digest(str(job_row["payload_json"])) != str(job_row["payload_sha256"]):
+                raise StoreConflict("job payload digest mismatch")
+            if str(job_row["state"]) not in self._REVERIFY_JOB_STATES:
+                raise StoreConflict("job is not in a terminal state")
+            latest = conn.execute(
+                "SELECT job_id FROM jobs WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1",
+                (attempt_id,),
+            ).fetchone()
+            if latest is None or str(latest["job_id"]) != job_id:
+                raise StoreConflict("job is not the latest job of the attempt")
+            if conn.execute(
+                "SELECT 1 FROM events WHERE attempt_id=? AND kind='run_reverified' LIMIT 1",
+                (attempt_id,),
+            ).fetchone():
+                raise StoreConflict("attempt run outcome was already reverified")
+            terminal_bytes = self._regular_run_file(terminal_path)
+            evidence_bytes = self._regular_run_file(evidence_path)
+            if (
+                sha256_bytes(terminal_bytes) != terminal_sha256
+                or sha256_bytes(evidence_bytes) != run_evidence_sha256
+            ):
+                raise StoreConflict("run files changed after verification")
+            try:
+                terminal = json.loads(terminal_bytes.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise StoreConflict("terminal.json is not valid JSON") from exc
+            if (
+                not isinstance(terminal, dict)
+                or terminal.get("status") != "succeeded"
+                or terminal.get("job_id") != job_id
+            ):
+                raise StoreConflict("terminal.json is not a succeeded terminal for this job")
+            if terminal.get("run_evidence_sha256") != run_evidence_sha256:
+                raise StoreConflict("terminal.json does not bind the run-evidence.json digest")
+            changed = conn.execute(
+                "UPDATE attempts SET state=?,run_outcome=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=? AND state=? AND run_job_id=? AND run_outcome=?",
+                (
+                    updated.state.value,
+                    updated.run_outcome,
+                    updated.updated_at,
+                    payload,
+                    _digest(payload),
+                    attempt_id,
+                    AttemptState.RUN_FAILED.value,
+                    job_id,
+                    old_outcome_json,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise StoreConflict("attempt changed before run reverification")
+            self._event(
+                conn,
+                attempt.hypothesis_id,
+                attempt_id,
+                "run_reverified",
+                {
+                    "job_id": job_id,
+                    "reason": reason,
+                    "operator_reference": operator_reference,
+                    "old_outcome": json.loads(old_outcome_json),
+                    "old_outcome_sha256": _digest(old_outcome_json),
+                    "new_outcome_sha256": _digest(updated.run_outcome or ""),
+                    "terminal_sha256": terminal_sha256,
+                    "run_evidence_sha256": run_evidence_sha256,
+                },
+                "operator",
+            )
+            conn.commit()
+        return updated
+
+    @staticmethod
+    def _regular_run_file(path: Path) -> bytes:
+        """Read one canonical regular run file without following a symlink."""
+        try:
+            if path.is_symlink() or not path.is_file() or path.resolve() != path:
+                raise StoreConflict(f"{path.name} is missing or not a regular file")
+            return path.read_bytes()
+        except OSError as exc:
+            raise StoreConflict(f"{path.name} is unreadable: {exc}") from exc

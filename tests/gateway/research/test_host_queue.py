@@ -431,9 +431,10 @@ def test_running_cancel_reports_already_completed_outcome_honestly(
                 "primary_scenario_id": "s000",
                 "scenarios": {
                     "s000": {
-                        "status": "succeeded",
                         "spec_id": plan.scenarios[0].spec_id,
                         "spec_sha256": plan.scenarios[0].evaluation_spec_sha256,
+                        "targets_exit": 0,
+                        "evaluator_exit": 0,
                         "result_path": str(result_path),
                         "result_sha256": result_digest,
                     }

@@ -161,6 +161,28 @@ def finish_run(attempt: Attempt, outcome: RunOutcome, updated_at: str) -> Attemp
     )
 
 
+def reverify_run(attempt: Attempt, outcome: RunOutcome, updated_at: str) -> Attempt:
+    """Move a run_evidence_mismatch RUN_FAILED attempt to RUN_SUCCEEDED, nothing else."""
+    if attempt.state != AttemptState.RUN_FAILED:
+        raise IllegalTransition(attempt.state.value, AttemptState.RUN_SUCCEEDED.value)
+    if outcome.attempt_id != attempt.attempt_id or outcome.job_id != attempt.run_job_id:
+        raise ValueError("run outcome does not match attempt job")
+    try:
+        stored = RunOutcome.from_json(attempt.run_outcome or "")
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ValueError("stored run outcome is missing or malformed") from exc
+    if stored.status != "run_evidence_mismatch" or stored.job_id != outcome.job_id:
+        raise ValueError("stored run outcome is not a run_evidence_mismatch for this job")
+    if outcome.status != "succeeded" or outcome.exit_code != 0 or not outcome.result_path:
+        raise ValueError("recomputed run outcome is not a verified success")
+    return replace(
+        attempt,
+        state=AttemptState.RUN_SUCCEEDED,
+        run_outcome=outcome.to_json(),
+        updated_at=updated_at,
+    )
+
+
 def close_attempt(
     attempt: Attempt, decision: AttemptDecision, reason: str, updated_at: str
 ) -> Attempt:

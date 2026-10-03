@@ -24,11 +24,11 @@ The top-level help enumerates subcommands. Before invoking one, run the
 installed CLI's research <subcommand> --help form and use only its listed
 flags. The frozen appendix is not an exhaustive CLI
 allowlist. Review collection through the existing review-collect operation
-is authorized; consult its live help before using the exact invocation below.
+is authorized; consult its live help before using the invocation below.
 Live help defines syntax only and grants no additional permission. Owner actions
 remain limited to the operations authorized by this contract (including
-review-collect); policy, ledger, runtime-registration, and
-run-release-unstarted mutations remain operator-only.
+review-collect); policy, ledger, runtime-registration,
+run-release-unstarted, and run-reverify mutations remain operator-only.
 Do not invent flags, providers, routes, or command names. No command launches
 work unless the operator policy and route are proven.
 
