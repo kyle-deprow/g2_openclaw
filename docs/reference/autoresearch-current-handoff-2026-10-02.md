@@ -251,6 +251,94 @@ Open follow-ups, none blocking:
 - The pnpm `openclaw` wrapper is still 2026.7.1-2, so deploys need
   `OPENCLAW_BIN=/home/dev/.local/bin/openclaw` and the venv on PATH.
 
+
+## Continuation after user directive "no cap; keep going until a full e2e run" (2026-10-03)
+
+- **Cap raised.** The cap went 15→60 via `campaign-policy-set`, citing the user
+  quote. The per-hypothesis limit of three attempts is unchanged. Astra froze
+  H0007: H0006 economics plus primitive shares×price accounting and computed
+  entry sizing.
+- **H0007-A001.**
+  - Corrections: a pre-host Opus review drove three native corrections.
+  - Host runs: three passed.
+  - Driver fix `ef1b89e`: review bundle bound 512 MiB, plus pre-freeze checks.
+  - Sol FAIL: the proof exceeded the FROZEN 128 MiB retention/diff cap. The
+    operator notes had wrongly said 256 MiB.
+- **H0007-A002.** A port of A001 with identity-only changes; its host run
+  passed. Sol FAIL: the mandatory next-fold-entry boundary case was never
+  exercised by the fixture.
+- **Exhaustive audit before A003.** An Opus frozen-spec audit found 19 gaps
+  (`/home/dev/autoresearch-openai-20261002.Tdkdgb/H0007-A003-compliance-audit.md`).
+  H0007-A003 ran them as Batch A, Batch B and correction 2, each followed by an
+  Opus re-audit. The first host run crashed on provenance keys; the second
+  passed.
+- **A003 packaging.** Batch C packaging was audited twice before submission;
+  the operator aborted the owner's submit turn so the audit could run first.
+  The final commit `c1cbb4c` has a 53.8 MB bundle.
+- **Sol PASS** for H0007-A003, with no findings.
+- **Historical run launch failure.** The historical job
+  `job-22859ba1ce774b3fa5f0ee32dd53ee89` failed at launch with nothing
+  executed. `jobs._validate_targets` rejected the pinned production panel path,
+  a latent shared-driver bug, and the failure happened after the claim, so the
+  attempt went to terminal RUN_FAILED.
+  - The operator paused the campaign and aborted the runner callback.
+  - The RUN_FAILED wake turn could not be aborted (unauthorized). To prevent an
+    irreversible close, the operator stopped the owner service and briefly made
+    `state.sqlite3` non-writable (chmod u-w; no data changed). Astra's close was
+    refused, and the permission was restored.
+  - A003 remains RUN_FAILED and is not closed.
+  - In progress: a driver fix (accept the pinned panel/receipt at launch;
+    validate before claim) and a narrowly guarded `run-release-unstarted`
+    operator transition (unstarted `launch_failed` → REVIEW_PASSED, preserving
+    evidence), then a relaunch of the reviewed commit.
+- **Launch fix and release (`027916d`).** Launch validation now matches the
+  worker and runs before the claim. The operator ran `run-release-unstarted`
+  once for H0007-A003 and relaunched.
+- **Relaunch timed out.** The relaunch hit the FROZEN 300 s stage bound at
+  `validate-c000`. Measured on the real pinned inputs: validate-inputs 642 s and
+  6.3 GB per spec; an empty-target evaluate 470 s and 5.9 GB. Every H0007
+  attempt was therefore infeasible.
+  - The driver bounds were raised to an 8 h run and 16 GB per stage, and
+    `research run` now derives its timeout from the plan (`3fbc3cb`).
+  - Astra recorded H0007 ABANDONED (execution infeasibility, no economic
+    result).
+  - She froze H0008: identical science, with compute bounds of 1500 s per
+    scenario and 5400 s for the analysis. A text bound fix was needed first
+    (`63c671e`).
+- **H0008-A001.** A port of the A003 code, with identity changes only.
+  - Contained host PASS, then an Opus compliance audit, then Batch C packaging
+    and its audit; the one must-fix was the manifest classes.
+  - Operator-verified HELD submit.
+  - Native Sol **PASS**.
+- **Historical run.** The job `job-4f43dce6d26e4b2aa79836b472859972` ran all
+  16 stages with exit 0 and wrote `terminal.json` `succeeded`. This is the first
+  real successful run.
+- **Host verifier defect.** The host verifier still recorded
+  `run_evidence_mismatch`: it required a per-scenario `status` that the worker
+  never writes. Astra paused.
+  - The fix is `c92c566`: verify on no status (or "succeeded") with both exits
+    int 0, plus an operator-only `run-reverify`. That command recomputes the
+    outcome from the immutable run files, at most once, and binds both file
+    digests and the canonical primary result.
+  - The operator ran `run-reverify` once (event 4583). The attempt is now
+    RUN_SUCCEEDED, and the run files are byte-identical. The store was backed up
+    first to `store-backup-before-reverify-20261003/`.
+- **Economic result.** Paired mean −26.18 bps vs the baseline, CI lower
+  −63.3 bps (95% CI [−63.3, +10.2]), block-sign p=0.871, over 107 paired
+  events. Only 2 of 4 folds were positive, below the 3 required. NAV returns at
+  2× and 3× costs were negative, and the base mean net lot return was below the
+  dip comparator.
+- **Astra's decision (owner turn from the operator decision brief):**
+  - event 4584: `attempt-close H0008-A001 FINISH`;
+  - event 4585: `hypothesis-decide H0008 FINISHED`, REJECT_FOR_THIS_DESIGN,
+    DEVELOPMENT_VALIDATION only, no alpha claim.
+- **Outcome.** The campaign's first full end-to-end loop is complete: code →
+  native Sol review → real historical run → owner economic decision.
+- **Current state.**
+  - The campaign remains PAUSED and `research-owner.service` is stopped.
+  - No further attempts or hypotheses are admitted; resuming is a fresh user
+    decision.
+
 ## Guardrails (unchanged, plus the 10-02 directive)
 
 OpenAI models only for the research loop. Use no Anthropic, Claude, ACP, or Opus
