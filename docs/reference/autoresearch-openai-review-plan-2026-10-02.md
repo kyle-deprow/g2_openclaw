@@ -222,7 +222,7 @@ OpenClaw session rows, owner thread rotation, rollouts above 8 MiB, missing
 `--bundle-dir` in docs, and an encrypted spawn `message`. The fix binds on the
 host-recorded nonce task name, thread row, spawn edge, child rollout terminal
 marker and the `announce:codex-native:<owner_thread>:<child_thread>:<status>`
-callback run; streams rollouts (512 MiB parent, 64 MiB child); and derives the
+callback run; streams rollouts (512 MiB parent, 256 MiB child); and derives the
 review CLI database paths from the managed root containing `--root`. A failed
 or aborted reviewer child is a terminal REVIEW_FAILED for the attempt. Opus
 re-review: READY; serial suite 978 passed, 1 skipped; live read-only

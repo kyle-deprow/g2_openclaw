@@ -106,16 +106,20 @@ documented limitations:
 - The spawn prompt digest cannot be host-verified because the host stores the
   spawn message as ciphertext.
 
-### B. Deploy while paused and idle (root)
+### B. Deploy while paused and idle — DONE (2026-10-03 00:29Z)
 
-4. Confirm the owner is inactive and the campaign is PAUSED, then run
-   `bash scripts/push-openclaw-config.sh`, `systemctl --user restart openclaw-gateway.service`,
-   `openclaw config validate`, and `openclaw gateway health`.
-5. Verify the live result: the `acpx` plugin and `claude` agent are gone (or
-   sanitized as the merge intends), the `reviewer` role resolves to `gpt-5.6-sol`/xhigh
-   read-only, `research-orchestrator` still resolves to `openai/gpt-6-astra`, and the
-   Sol model is in the native allowlist. Check the Codex weekly allowance before any
-   launch; it was 94% used on 09-25. No silent model substitution.
+Deployed with
+`PATH=/home/dev/repos/g2_openclaw/.venv/bin:$PATH OPENCLAW_BIN=/home/dev/.local/bin/openclaw bash scripts/push-openclaw-config.sh`.
+- `OPENCLAW_BIN` is needed because the pnpm wrapper probed first is still 2026.7.1-2.
+- The venv must be on PATH for the research-owner command-contract probe.
+- The FastEmbed `bge-base` model cache under `~/.cache/fastembed` had vanished,
+  so the MemPalace healthcheck failed. It was repopulated with the same pinned
+  model (BAAI/bge-base-en-v1.5, 768-dim).
+
+After the push: gateway restarted, `config validate` valid, health OK. The live
+config has plugins `codex, openai, memory-core`, agents `main, research-orchestrator`,
+no acp/acpx/claude/anthropic, Astra unchanged, and the `reviewer` role is
+gpt-5.6-sol/xhigh/read-only with `max_depth=0`. A direct Sol probe answered.
 
 ### C. Complete A003 (canonical owner; operator only where the plan says so)
 
@@ -143,6 +147,50 @@ documented limitations:
    needs a new user decision.
 10. Integrate accepted work, push both repos, and retire inactive checkouts
     recoverably.
+
+### Progress on C (2026-10-03)
+
+- Host run 1 failed at targets-s000 with EROFS. A shared-driver rewrite-order
+  bug sent `--out` to read-only `/work` when the evidence directory is nested in
+  the worktree. Fixed in `6904a6b` (Sonnet implemented, Opus READY).
+- Host run 2: all 13 positive contained stages and the analysis report
+  succeeded. The never-executed negative tail then crashed with
+  `NameError: analysis_env`, 13 references, an A003 harness defect.
+- Both runs are preserved byte-exact with sha256 manifests under
+  `data/.attempt-evidence/H0006-A003-contained-blocked-20261003-{rewrite-order,negatives-nameerror}`.
+- Correction 3 was dispatched to Astra as run `recovery-20261003-a003-prehost-fix-3`.
+  Brief: `/home/dev/autoresearch-openai-20261002.Tdkdgb/A003-prehost-fix-3.md`.
+  It asks for a fix plus a regression test that exercises the tail against the
+  real preserved positive evidence.
+
+- Correction 3 landed: execution `287b5ee`, proof `95c8ff1`. Opus pre-host review
+  READY, no Must-Fix. Its Should-Fixes are test quality only: the tail regression
+  covers the negatives but not the reassembly, the test injects `analysis_env`,
+  and the unit suite needs the git-ignored preserved evidence. The parent
+  reproduced 190 unit tests passing.
+- **Host run 3 PASSED** (2026-10-03 01:15–01:18Z): 13 positive stages and 14
+  negatives (27 commands), 7 reports, 6 scenarios, 481 files none over 8 MiB,
+  baseline and SPY 90 lots, `SYNTHETIC_ONLY`. The destination
+  `data/.attempt-evidence/H0006-A003-contained` is preserved as-is.
+- Packaging and submission were dispatched to Astra as run
+  `recovery-20261003-a003-package-submit`. Brief:
+  `/home/dev/autoresearch-openai-20261002.Tdkdgb/A003-package-submit.md`. One Luna
+  packager, then one `implementation-submit` by Astra; no review reservation.
+
+- The packager committed proof `a522a72` (513 files, 85 MB, proof-only changes
+  over `287b5ee`). It recorded a typed blocker because the committed submission
+  JSONs named `287b5ee`, where the records are not tracked. The operator dry-ran
+  the validator: with the JSONs naming `a522a72` and kept outside the commit, all
+  13 stages verify. Astra then submitted from
+  `workspace-research-orchestrator/campaigns/conditional-reversal-20260911/H0006/A003-submission/`.
+  **A003 is IMPLEMENTED at `a522a72`** (event 4395).
+- A dry `review-bundle` build of A003 came to 171 MB, over the 128 MiB aggregate
+  cap. Commit `88c1477` raised the bundle cap and the reviewer child-rollout bound
+  to 256 MiB (Sonnet implemented, Opus READY); the real bundle then built in 6 s.
+  Opus's pre-existing Should-Fixes remain as follow-ups:
+  - the aggregate check runs only after the bundle dir is frozen;
+  - `_git` buffers its whole output before checking the bound;
+  - there is no accept-side boundary test.
 
 ## Guardrails (unchanged, plus the 10-02 directive)
 
