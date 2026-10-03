@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import sqlite3
 import subprocess
 import sys
 from collections.abc import Callable
@@ -28,7 +29,7 @@ from gateway.research.contracts import (
     RunPlan,
     RunScenario,
 )
-from gateway.research.jobs import JobError, JobRecord
+from gateway.research.jobs import JobError, JobRecord, TargetValidationError
 from gateway.research.store import ResearchStore, StoreConflict
 from typer.testing import CliRunner
 
@@ -44,6 +45,7 @@ def _ready(
     hypothesis: Any,
     *,
     run_plan_factory: Callable[[Attempt, ImplementationRecord], RunPlan] | None = None,
+    targets_argv: tuple[str, ...] | None = None,
 ) -> Attempt:
     if store.get_hypothesis(hypothesis.hypothesis_id).state.value == "DRAFT":
         store.freeze(hypothesis.hypothesis_id)
@@ -52,7 +54,7 @@ def _ready(
     implementation_record = ImplementationRecord(
         attempt.attempt_id,
         commit,
-        (sys.executable, "-m", "fixture_target"),
+        targets_argv or (sys.executable, "-m", "fixture_target"),
         "/tmp/evidence.json",
         "reported-coder",
         "high",
@@ -642,3 +644,634 @@ def test_three_attempt_retry_and_second_hypothesis_queue_lifecycle(
     assert queued.state == AttemptState.RUN_QUEUED
     assert len(store.attempts_for(hypothesis.hypothesis_id)) == 3
     assert len(store.hypotheses()) == 2
+
+
+OPERATOR = "operator-ticket-1"
+JOB = "job-queue-test"
+
+
+def _dispatch_ready(
+    store: ResearchStore,
+    source: Path,
+    hypothesis: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    targets_argv: tuple[str, ...] | None = None,
+) -> Attempt:
+    attempt = _ready(store, source, hypothesis, targets_argv=targets_argv)
+    _install_dispatch_admission(store, attempt, monkeypatch)
+    _queue(store, attempt.attempt_id)
+    _insert_verified(store, attempt.attempt_id, "host_execution")
+    _insert_verified(store, attempt.attempt_id, "native_execution")
+    configure_real_readiness(store, store.root.parent, monkeypatch)
+    return attempt
+
+
+def _events(store: ResearchStore, attempt_id: str, kind: str) -> list[Any]:
+    return [e for e in store.events() if e.attempt_id == attempt_id and e.kind == kind]
+
+
+def _dispatch(store: ResearchStore) -> str | None:
+    store.acquire_owner_lock()
+    try:
+        return research_cli._dispatch_queued_job(store)
+    finally:
+        store.release_owner_lock()
+
+
+def _run_dir(store: ResearchStore, attempt: Attempt) -> Path:
+    return (
+        store.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt.attempt_id / "run"
+    )
+
+
+def test_dispatch_target_validation_failure_releases_before_claim(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt = _dispatch_ready(store, source, hypothesis, monkeypatch)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise TargetValidationError("target path is outside the worktree/run directory: /x/p")
+
+    monkeypatch.setattr(research_cli, "validate_launch", refuse)
+    monkeypatch.setattr(research_cli, "launch", lambda *_a, **_k: pytest.fail("spawn"))
+    result = _dispatch(store)
+
+    assert result is not None and result.startswith("launch_validation_failed:")
+    after = store.get_attempt(attempt.attempt_id)
+    assert after.state is AttemptState.REVIEW_PASSED
+    assert after.run_job_id is None and after.run_outcome is None
+    row = store.job_for(attempt.attempt_id)
+    assert row is not None and row["state"] == "ADMISSION_REFUSED"
+    assert _events(store, attempt.attempt_id, "job_launch_reserved") == []
+    released = _events(store, attempt.attempt_id, "admission_dispatch_released")
+    assert len(released) == 1 and "launch_validation_failed" in released[0].detail
+    assert not (_run_dir(store, attempt) / "terminal.json").exists()
+    assert _queue(store, attempt.attempt_id, job_id="job-requeue").state is AttemptState.RUN_QUEUED
+
+
+@pytest.mark.parametrize("error", [JobError("worktree is dirty"), RuntimeError("unexpected")])
+def test_dispatch_non_target_validation_failure_keeps_terminal_reject(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    store, source, hypothesis = campaign
+    attempt = _dispatch_ready(store, source, hypothesis, monkeypatch)
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(research_cli, "validate_launch", refuse)
+    monkeypatch.setattr(research_cli, "launch", lambda *_a, **_k: pytest.fail("spawn"))
+    result = _dispatch(store)
+
+    assert result is not None and result.startswith("launch_validation_failed:")
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUN_FAILED
+    row = store.job_for(attempt.attempt_id)
+    assert row is not None and row["state"] == "EXITED"
+    assert _events(store, attempt.attempt_id, "job_launch_reserved") == []
+
+
+def test_dispatch_real_validator_releases_outside_path(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    outside = str(source.parent / "elsewhere.parquet")
+    attempt = _dispatch_ready(
+        store,
+        source,
+        hypothesis,
+        monkeypatch,
+        targets_argv=(sys.executable, "-m", "fixture_target", "--panel", outside),
+    )
+    monkeypatch.setattr(research_cli, "launch", lambda *_a, **_k: pytest.fail("spawn"))
+    result = _dispatch(store)
+    assert result is not None
+    assert result.startswith("launch_validation_failed:target path is outside")
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.REVIEW_PASSED
+
+
+def test_dispatch_real_validator_passes_pinned_panel_to_claim_and_launch(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    argv = (
+        sys.executable,
+        "-m",
+        "fixture_target",
+        "--panel",
+        hypothesis.panel_path,
+        "--receipt",
+        hypothesis.receipt_path,
+    )
+    attempt = _dispatch_ready(store, source, hypothesis, monkeypatch, targets_argv=argv)
+    seen: list[tuple[str, ...]] = []
+
+    def fake_launch(attempt_dir: Path, _worktree: Path, targets: Any, *_a: Any, **kw: Any) -> Any:
+        seen.append(tuple(targets))
+        return JobRecord(str(kw["job_id"]), attempt.attempt_id, os.getpid(), 1, str(attempt_dir))
+
+    monkeypatch.setattr(research_cli, "launch", fake_launch)
+    assert _dispatch(store) == JOB
+    assert seen == [argv]
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUNNING
+
+
+def _launch_failed(
+    store: ResearchStore, source: Path, hypothesis: Any, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Attempt, Path]:
+    """Reproduce the live A003 shape: claimed, then launch raised before any spawn."""
+    attempt = _dispatch_ready(store, source, hypothesis, monkeypatch)
+
+    def fail_after_claim(*_args: object, **_kwargs: object) -> JobRecord:
+        raise JobError("target path is outside the worktree/run directory: /x/panel.parquet")
+
+    monkeypatch.setattr(research_cli, "launch", fail_after_claim)
+    assert _dispatch(store) == "launch_failed"
+    current = store.get_attempt(attempt.attempt_id)
+    assert current.state is AttemptState.RUN_FAILED
+    row = store.job_for(attempt.attempt_id)
+    assert row is not None and row["state"] == "EXITED"
+    run_dir = _run_dir(store, attempt)
+    assert sorted(path.name for path in run_dir.iterdir()) == ["lifecycle.lock", "terminal.json"]
+    # The real host sequence (live events 4509 -> 4510 -> 4511).
+    kinds = [
+        e.kind
+        for e in store.events()
+        if e.attempt_id == attempt.attempt_id and e.kind.startswith(("job_", "run_"))
+    ]
+    assert kinds[-3:] == ["job_launch_reserved", "run_finished", "job_launched"]
+    return current, run_dir
+
+
+def _release(store: ResearchStore, attempt: Attempt, job_id: str = JOB) -> Attempt:
+    return store.release_unstarted_launch(attempt.attempt_id, job_id, "validator fixed", OPERATOR)
+
+
+def test_dispatch_launch_exception_after_claim_still_records_launch_failed(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, _run_dir_path = _launch_failed(store, source, hypothesis, monkeypatch)
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUN_FAILED
+
+
+def test_release_unstarted_launch_happy_path(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    terminal_sha = hashlib.sha256((run_dir / "terminal.json").read_bytes()).hexdigest()
+    before = store.get_attempt(attempt.attempt_id)
+
+    released = _release(store, attempt)
+
+    assert released.state is AttemptState.REVIEW_PASSED
+    assert released.run_job_id is None and released.run_outcome is None
+    assert store.get_attempt(attempt.attempt_id) == released
+    assert released.review_verdict == "PASS"
+    assert released.commit == before.commit
+    assert released.review_commit == before.review_commit
+    assert released.implementation_sha256 == before.implementation_sha256
+    store.evidence(attempt.attempt_id, "review_host_evidence")
+    row = store.job_for(attempt.attempt_id)
+    assert row is not None and row["state"] == "LAUNCH_RELEASED"
+    assert json.loads(row["payload_json"])["state"] == "LAUNCH_RELEASED"
+    preserved = run_dir.with_name(f"run.launch-released-{JOB}")
+    (event,) = _events(store, attempt.attempt_id, "run_launch_released")
+    assert event.actor == "operator"
+    assert json.loads(event.detail) == {
+        "job_id": JOB,
+        "reason": "validator fixed",
+        "operator_reference": OPERATOR,
+        "terminal_sha256": terminal_sha,
+        "terminal_error": "target path is outside the worktree/run directory: /x/panel.parquet",
+        "preserved_run_dir": str(preserved),
+    }
+    assert not run_dir.exists()
+    assert sorted(path.name for path in preserved.iterdir()) == ["lifecycle.lock", "terminal.json"]
+    assert hashlib.sha256((preserved / "terminal.json").read_bytes()).hexdigest() == terminal_sha
+
+
+def test_release_fsyncs_the_attempt_directory(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, _run_dir_path = _launch_failed(store, source, hypothesis, monkeypatch)
+    synced_dirs: list[int] = []
+    real_fsync = os.fsync
+
+    def recording_fsync(fd: int) -> None:
+        if os.path.isdir(f"/proc/self/fd/{fd}"):
+            synced_dirs.append(fd)
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", recording_fsync)
+    _release(store, attempt)
+    assert synced_dirs
+
+
+def test_second_dispatch_after_release_uses_fresh_run_dir(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    _release(store, attempt)
+    admission_before = store.evidence(attempt.attempt_id, "admission_decision")
+    requeued = _queue(store, attempt.attempt_id, job_id="job-after-release")
+    assert requeued.state is AttemptState.RUN_QUEUED and requeued.run_job_id == "job-after-release"
+    latest = store.job_for(attempt.attempt_id)
+    assert latest is not None
+    assert latest["job_id"] == "job-after-release" and latest["state"] == "QUEUED"
+    assert not run_dir.exists()
+    fresh_dirs: list[bool] = []
+
+    def fake_launch(attempt_dir: Path, *_a: object, **kwargs: object) -> JobRecord:
+        fresh_dirs.append(not (attempt_dir / "run").exists())
+        return JobRecord(str(kwargs["job_id"]), attempt.attempt_id, os.getpid(), 1, str(run_dir))
+
+    monkeypatch.setattr(research_cli, "launch", fake_launch)
+    assert _dispatch(store) == "job-after-release"
+    assert fresh_dirs == [True]
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUNNING
+    assert store.evidence(attempt.attempt_id, "admission_decision") == admission_before
+    assert _events(store, attempt.attempt_id, "run_launch_released")
+
+
+def test_only_one_release_per_attempt(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, _run_dir_path = _launch_failed(store, source, hypothesis, monkeypatch)
+    _release(store, attempt)
+    _queue(store, attempt.attempt_id, job_id="job-second-try")
+    assert _dispatch(store) == "launch_failed"
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUN_FAILED
+    with pytest.raises(StoreConflict, match="already had a launch release"):
+        _release(store, attempt, "job-second-try")
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUN_FAILED
+    assert len(_events(store, attempt.attempt_id, "run_launch_released")) == 1
+
+
+def _assert_unreleased(store: ResearchStore, attempt: Attempt, run_dir: Path) -> None:
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUN_FAILED
+    row = store.job_for(attempt.attempt_id)
+    assert row is not None and row["state"] == "EXITED"
+    assert run_dir.is_dir()
+    assert not run_dir.with_name(f"run.launch-released-{JOB}").exists()
+    assert _events(store, attempt.attempt_id, "run_launch_released") == []
+
+
+def test_release_unstarted_launch_requires_operator_reference_and_reason(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    with pytest.raises(ValueError, match="operator reference"):
+        store.release_unstarted_launch(attempt.attempt_id, JOB, "why", "")
+    with pytest.raises(ValueError, match="reason"):
+        store.release_unstarted_launch(attempt.attempt_id, JOB, "", OPERATOR)
+    _assert_unreleased(store, attempt, run_dir)
+
+
+def test_release_unstarted_launch_refuses_wrong_job_id(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    with pytest.raises(StoreConflict, match="does not match"):
+        _release(store, attempt, "job-other")
+    _assert_unreleased(store, attempt, run_dir)
+
+
+def test_release_unstarted_launch_refuses_non_launch_failed_status(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    outcome = json.loads(attempt.run_outcome or "")
+    outcome["status"] = "timed_out"
+    store.set_state(
+        replace(attempt, run_outcome=json.dumps(outcome, sort_keys=True)), event="test_tamper"
+    )
+    with pytest.raises(StoreConflict, match="not a launch failure"):
+        _release(store, attempt)
+    _assert_unreleased(store, attempt, run_dir)
+
+
+def test_release_unstarted_launch_refuses_when_worker_pid_recorded(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    row = store.job_for(attempt.attempt_id)
+    assert row is not None
+    with store._connect() as conn:
+        store._set_job_state(conn, JOB, "EXITED")
+        payload = {**json.loads(row["payload_json"]), "worker_pid": 4242}
+        text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        conn.execute(
+            "UPDATE jobs SET payload_json=?,payload_sha256=? WHERE job_id=?",
+            (text, hashlib.sha256(text.encode()).hexdigest(), JOB),
+        )
+        conn.commit()
+    with pytest.raises(StoreConflict, match="worker identity"):
+        _release(store, attempt)
+    _assert_unreleased(store, attempt, run_dir)
+
+
+def test_release_unstarted_launch_refuses_when_job_not_exited(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    with store._connect() as conn:
+        store._set_job_state(conn, JOB, "LAUNCHED")
+        conn.commit()
+    with pytest.raises(StoreConflict, match="not EXITED"):
+        _release(store, attempt)
+    with store._connect() as conn:
+        store._set_job_state(conn, JOB, "EXITED")
+        conn.commit()
+    _assert_unreleased(store, attempt, run_dir)
+
+
+def _rewrite_events(
+    store: ResearchStore, attempt: Attempt, kinds: tuple[str, ...], reorder: bool = False
+) -> None:
+    marks = ",".join("?" * len(kinds))
+    with store._connect() as conn:
+        rows = conn.execute(
+            f"SELECT seq,kind,detail FROM events WHERE attempt_id=? AND kind IN ({marks}) "
+            "ORDER BY seq",
+            (attempt.attempt_id, *kinds),
+        ).fetchall()
+        conn.execute(
+            f"DELETE FROM events WHERE attempt_id=? AND kind IN ({marks})",
+            (attempt.attempt_id, *kinds),
+        )
+        for row in reversed(rows) if reorder else ():
+            store._event(
+                conn,
+                attempt.hypothesis_id,
+                attempt.attempt_id,
+                row["kind"],
+                row["detail"],
+                "driver",
+            )
+        conn.commit()
+
+
+def test_release_unstarted_launch_refuses_job_launched_before_run_finished(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    _rewrite_events(store, attempt, ("run_finished", "job_launched"), reorder=True)
+    with pytest.raises(StoreConflict, match="not exactly reserved"):
+        _release(store, attempt)
+    _assert_unreleased(store, attempt, run_dir)
+
+
+@pytest.mark.parametrize("kind", ["job_saved", "job_launched", "run_started", "job_cancelled"])
+def test_release_unstarted_launch_refuses_extra_worker_or_run_events(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    with store._connect() as conn:
+        store._event(
+            conn, attempt.hypothesis_id, attempt.attempt_id, kind, {"job_id": JOB}, "driver"
+        )
+        conn.commit()
+    with pytest.raises(StoreConflict, match="not exactly reserved"):
+        _release(store, attempt)
+    _assert_unreleased(store, attempt, run_dir)
+
+
+def test_release_unstarted_launch_refuses_early_job_saved_event(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    with store._connect() as conn:
+        conn.execute(
+            "UPDATE events SET kind='job_saved' WHERE attempt_id=? AND kind='run_queued'",
+            (attempt.attempt_id,),
+        )
+        conn.commit()
+    with pytest.raises(StoreConflict, match="precedes its launch reservation"):
+        _release(store, attempt)
+    _assert_unreleased(store, attempt, run_dir)
+
+
+def test_release_unstarted_launch_refuses_missing_reservation_event(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    _rewrite_events(store, attempt, ("job_launch_reserved",))
+    with pytest.raises(StoreConflict, match="reservation event"):
+        _release(store, attempt)
+    _assert_unreleased(store, attempt, run_dir)
+
+
+def test_release_unstarted_launch_refuses_prior_release_event(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    with store._connect() as conn:
+        store._event(
+            conn,
+            attempt.hypothesis_id,
+            attempt.attempt_id,
+            "run_launch_released",
+            {"job_id": "job-earlier"},
+            "operator",
+        )
+        conn.commit()
+    with pytest.raises(StoreConflict, match="already had a launch release"):
+        _release(store, attempt)
+    assert run_dir.is_dir()
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    ["scenarios/s000/targets-stage/targets.json", "logs/worker.log", "job.json"],
+)
+def test_release_unstarted_launch_refuses_execution_artifacts(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch, artifact: str
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    path = run_dir / artifact
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x", encoding="utf-8")
+    with pytest.raises(StoreConflict, match="execution artifacts"):
+        _release(store, attempt)
+    _assert_unreleased(store, attempt, run_dir)
+
+
+def test_release_unstarted_launch_refuses_spawn_then_register_failure(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Popen succeeded, then update_job raised: the host writes the same launch_failed shape."""
+    store, source, hypothesis = campaign
+    attempt = _dispatch_ready(store, source, hypothesis, monkeypatch)
+    run_dir = _run_dir(store, attempt)
+
+    def spawn_then_return(attempt_dir: Path, *_a: object, **kwargs: object) -> JobRecord:
+        (run_dir / "logs").mkdir(parents=True)
+        (run_dir / "logs" / "worker.log").write_text("worker started\n", encoding="utf-8")
+        (run_dir / "job.json").write_text("{}", encoding="utf-8")
+        return JobRecord(str(kwargs["job_id"]), attempt.attempt_id, os.getpid(), 1, str(run_dir))
+
+    monkeypatch.setattr(research_cli, "launch", spawn_then_return)
+    real_update = store.update_job
+    calls = 0
+
+    def flaky_update(job: object, attempt_id: str, **kwargs: Any) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        real_update(job, attempt_id, **kwargs)
+
+    monkeypatch.setattr(store, "update_job", flaky_update)
+    assert _dispatch(store) == "launch_failed"
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUN_FAILED
+    with pytest.raises(StoreConflict, match="execution artifacts"):
+        _release(store, attempt)
+    _assert_unreleased(store, attempt, run_dir)
+
+
+def test_release_unstarted_launch_refuses_missing_or_foreign_terminal(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    terminal = run_dir / "terminal.json"
+    original = terminal.read_text(encoding="utf-8")
+    terminal.write_text(original.replace('"launch_failed"', '"timed_out"'), encoding="utf-8")
+    with pytest.raises(StoreConflict, match=r"terminal\.json"):
+        _release(store, attempt)
+    terminal.unlink()
+    with pytest.raises(StoreConflict, match=r"terminal\.json"):
+        _release(store, attempt)
+    _assert_unreleased(store, attempt, run_dir)
+
+
+def test_release_unstarted_launch_refuses_wrong_attempt_state(
+    campaign: tuple[ResearchStore, Path, Any],
+) -> None:
+    store, source, hypothesis = campaign
+    attempt = _ready(store, source, hypothesis)
+    _queue(store, attempt.attempt_id)
+    with pytest.raises(StoreConflict, match="not RUN_FAILED"):
+        _release(store, attempt)
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUN_QUEUED
+
+
+def test_release_rolls_back_when_the_rename_fails(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    real_rename = os.rename
+
+    def failing_rename(src: Any, dst: Any, **kwargs: Any) -> None:
+        if str(dst).endswith(f"run.launch-released-{JOB}"):
+            raise OSError("simulated rename failure")
+        real_rename(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "rename", failing_rename)
+    with pytest.raises(StoreConflict, match="could not preserve"):
+        _release(store, attempt)
+    monkeypatch.undo()
+    _assert_unreleased(store, attempt, run_dir)
+    assert sorted(path.name for path in run_dir.iterdir()) == ["lifecycle.lock", "terminal.json"]
+
+
+class _FailingCommit(sqlite3.Connection):
+    def commit(self) -> None:
+        raise sqlite3.OperationalError("simulated commit failure")
+
+
+def test_release_restores_the_directory_when_the_commit_fails(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+
+    def failing_connect() -> sqlite3.Connection:
+        conn = sqlite3.connect(store.root / "state.sqlite3", timeout=30, factory=_FailingCommit)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_connect", failing_connect)
+        with pytest.raises(sqlite3.OperationalError, match="simulated commit failure"):
+            _release(store, attempt)
+    _assert_unreleased(store, attempt, run_dir)
+    assert sorted(path.name for path in run_dir.iterdir()) == ["lifecycle.lock", "terminal.json"]
+    # A clean retry succeeds.
+    assert _release(store, attempt).state is AttemptState.REVIEW_PASSED
+
+
+def test_release_retry_completes_after_crash_between_rename_and_commit(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    preserved = run_dir.with_name(f"run.launch-released-{JOB}")
+    os.rename(run_dir, preserved)
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUN_FAILED
+
+    released = _release(store, attempt)
+
+    assert released.state is AttemptState.REVIEW_PASSED
+    assert preserved.is_dir() and not run_dir.exists()
+    (event,) = _events(store, attempt.attempt_id, "run_launch_released")
+    assert json.loads(event.detail)["preserved_run_dir"] == str(preserved)
+
+
+def test_release_retry_refuses_recovered_directory_with_execution_artifacts(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    preserved = run_dir.with_name(f"run.launch-released-{JOB}")
+    os.rename(run_dir, preserved)
+    (preserved / "job.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(StoreConflict, match="execution artifacts"):
+        _release(store, attempt)
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUN_FAILED
+
+
+def test_release_unstarted_launch_cli(
+    campaign: tuple[ResearchStore, Path, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, source, hypothesis = campaign
+    attempt, run_dir = _launch_failed(store, source, hypothesis, monkeypatch)
+    base = ["research", "run-release-unstarted", attempt.attempt_id, "--root", str(store.root)]
+    missing_ref = CliRunner().invoke(app, [*base, "--job-id", JOB, "--reason", "r"])
+    assert missing_ref.exit_code != 0
+    assert "operator-reference" in missing_ref.output
+    refused = CliRunner().invoke(
+        app,
+        [*base, "--job-id", "job-other", "--reason", "nope", "--operator-reference", OPERATOR],
+    )
+    assert refused.exit_code == 1
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.RUN_FAILED
+    result = CliRunner().invoke(
+        app,
+        [*base, "--job-id", JOB, "--reason", "validator fixed", "--operator-reference", OPERATOR],
+    )
+    assert result.exit_code == 0, result.output
+    assert f"released {JOB} state=REVIEW_PASSED" in result.output
+    assert store.get_attempt(attempt.attempt_id).state is AttemptState.REVIEW_PASSED
+    assert run_dir.with_name(f"run.launch-released-{JOB}").is_dir()
+    (event,) = _events(store, attempt.attempt_id, "run_launch_released")
+    assert event.actor == "operator"
+    assert json.loads(event.detail)["operator_reference"] == OPERATOR

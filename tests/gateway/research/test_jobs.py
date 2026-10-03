@@ -21,12 +21,14 @@ from gateway.research.contracts import AnalysisPlan, ImplementationRecord, RunPl
 from gateway.research.jobs import (
     JobError,
     JobRecord,
+    TargetValidationError,
     _validate_targets,
     attach,
     cancel,
     cleanup_stage,
     launch,
     preflight,
+    validate_launch,
 )
 
 
@@ -80,7 +82,9 @@ def _launch(
     timeout: float = 5.0,
     target_out: Path | None = None,
     before_launch: Callable[[], None] | None = None,
-) -> tuple[JobRecord, Path]:
+    extra_target_args: Callable[[Path, Path], tuple[str, ...]] | None = None,
+    entrypoint: Callable[..., Any] = launch,
+) -> tuple[Any, Path]:
     worktree, target, _evaluator, commit, eval_spec, _digest = _fixture(
         tmp_path, sleep=sleep, mutate=mutate
     )
@@ -156,7 +160,13 @@ def _launch(
     artifact_digests = {
         key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in artifact_paths.items()
     }
-    targets_argv = (str(pins.shared_python), str(target), "--out", str(out))
+    targets_argv = (
+        str(pins.shared_python),
+        str(target),
+        "--out",
+        str(out),
+        *(extra_target_args(panel, receipt) if extra_target_args is not None else ()),
+    )
     implementation = ImplementationRecord(
         attempt_dir.name,
         commit,
@@ -185,7 +195,7 @@ def _launch(
     )
     if before_launch is not None:
         before_launch()
-    job = launch(
+    job = entrypoint(
         attempt_dir,
         worktree,
         targets_argv,
@@ -334,6 +344,134 @@ def test_targets_reject_secret_name_and_wrong_interpreter(tmp_path: Path) -> Non
             tmp_path,
             tmp_path / "run",
         )
+
+
+def test_validate_targets_accepts_only_the_pinned_panel_and_receipt(tmp_path: Path) -> None:
+    interpreter = tmp_path / "python"
+    interpreter.write_text("x", encoding="utf-8")
+    interpreter.chmod(0o755)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    run_dir = tmp_path / "run"
+    panel = tmp_path / "inputs" / "panel.parquet"
+    receipt = tmp_path / "inputs" / "receipt.json"
+    other = tmp_path / "inputs" / "other.parquet"
+    argv = (str(interpreter), "-m", "strategy", "--panel", str(panel), "--receipt", str(receipt))
+    with pytest.raises(JobError, match="outside the worktree/run directory"):
+        _validate_targets(argv, interpreter, worktree, run_dir)
+    _validate_targets(argv, interpreter, worktree, run_dir, panel=panel, receipt=receipt)
+    with pytest.raises(JobError, match="outside the worktree/run directory"):
+        _validate_targets(
+            (*argv, str(other)), interpreter, worktree, run_dir, panel=panel, receipt=receipt
+        )
+    with pytest.raises(JobError, match="outside the worktree/run directory"):
+        _validate_targets(
+            (str(interpreter), "-m", "strategy", "--panel", str(receipt)),
+            interpreter,
+            worktree,
+            run_dir,
+            panel=panel,
+            receipt=None,
+        )
+    with pytest.raises(JobError, match="secret"):
+        _validate_targets(
+            (str(interpreter), "-m", "strategy", "--panel", str(panel), "api_token"),
+            interpreter,
+            worktree,
+            run_dir,
+            panel=panel,
+            receipt=receipt,
+        )
+
+
+def _pinned_inputs(panel: Path, receipt: Path) -> tuple[str, ...]:
+    return ("--panel", str(panel), "--receipt", str(receipt))
+
+
+def test_validate_launch_accepts_pinned_inputs_without_mutating(tmp_path: Path) -> None:
+    root = tmp_path / "validate-only"
+    _launch(
+        root,
+        extra_target_args=_pinned_inputs,
+        entrypoint=validate_launch,
+    )
+    attempt_dir = root / "H0001-A001"
+    # The fixture pre-creates only run/logs; validation must add nothing else.
+    assert sorted(path.name for path in (attempt_dir / "run").iterdir()) == ["logs"]
+    assert list((attempt_dir / "run" / "logs").iterdir()) == []
+
+
+def test_validate_launch_rejects_other_outside_paths(tmp_path: Path) -> None:
+    root = tmp_path / "validate-outside"
+    outside = tmp_path / "elsewhere.parquet"
+    with pytest.raises(JobError, match="outside the worktree/run directory"):
+        _launch(
+            root,
+            extra_target_args=lambda panel, receipt: (
+                *_pinned_inputs(panel, receipt),
+                str(outside),
+            ),
+            entrypoint=validate_launch,
+        )
+
+
+def test_only_target_shape_errors_are_typed_target_validation_errors(tmp_path: Path) -> None:
+    with pytest.raises(TargetValidationError):
+        _launch(
+            tmp_path / "typed",
+            extra_target_args=lambda _panel, _receipt: (str(tmp_path / "elsewhere.parquet"),),
+            entrypoint=validate_launch,
+        )
+
+    def dirty() -> None:
+        target = tmp_path / "typed-dirty" / "worktree" / "target.py"
+        target.write_text(target.read_text(encoding="utf-8") + "# dirty\n", encoding="utf-8")
+
+    with pytest.raises(JobError, match="dirty") as raised:
+        _launch(tmp_path / "typed-dirty", before_launch=dirty, entrypoint=validate_launch)
+    assert not isinstance(raised.value, TargetValidationError)
+
+
+@pytest.mark.parametrize("entrypoint", [validate_launch, launch], ids=["validate", "launch"])
+def test_launch_refuses_a_preexisting_terminal_record(
+    tmp_path: Path, entrypoint: Callable[..., Any]
+) -> None:
+    root = tmp_path / "terminal"
+
+    def seed() -> None:
+        (root / "H0001-A001" / "run" / "terminal.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(JobError, match="terminal record"):
+        _launch(root, before_launch=seed, entrypoint=entrypoint)
+    assert sorted(path.name for path in (root / "H0001-A001" / "run").iterdir()) == [
+        "logs",
+        "terminal.json",
+    ]
+
+
+def test_launch_accepts_pinned_panel_and_receipt_through_to_worker_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_popen = subprocess.Popen
+    spawned: list[Any] = []
+
+    class FakeProcess:
+        pid = os.getpid()
+
+    def fake_popen(*args: Any, **kwargs: Any) -> Any:
+        argv = args[0] if args else kwargs.get("args")
+        if isinstance(argv, (tuple, list)) and argv and argv[0] == "git":
+            return real_popen(*args, **kwargs)
+        spawned.append(argv)
+        return FakeProcess()
+
+    job, _worktree = _launch(
+        tmp_path / "pinned-launch",
+        extra_target_args=_pinned_inputs,
+        before_launch=lambda: monkeypatch.setattr(subprocess, "Popen", fake_popen),
+    )
+    assert len(spawned) == 1
+    assert job.worker_pid == os.getpid()
 
 
 def test_contained_worker_timeout_is_terminal(tmp_path: Path) -> None:

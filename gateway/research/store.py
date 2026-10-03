@@ -13,6 +13,7 @@ import os
 import sqlite3
 import stat
 import tempfile
+from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2146,7 +2147,10 @@ class ResearchStore:
                 "SELECT state,payload_json FROM jobs WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1",
                 (attempt_id,),
             ).fetchone()
-            if existing is not None and str(existing["state"]) != "ADMISSION_REFUSED":
+            if existing is not None and str(existing["state"]) not in {
+                "ADMISSION_REFUSED",
+                "LAUNCH_RELEASED",
+            }:
                 raise StoreConflict("attempt already has a queued or running job")
             conn.execute(
                 "UPDATE attempts SET state=?,run_job_id=?,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=? AND state=?",
@@ -2214,6 +2218,238 @@ class ResearchStore:
             )
             conn.commit()
         return updated
+
+    _LAUNCH_RELEASE_ALLOWED_FILES = frozenset({"terminal.json", "lifecycle.lock"})
+
+    def release_unstarted_launch(
+        self, attempt_id: str, job_id: str, reason: str, operator_reference: str
+    ) -> Attempt:
+        """Return a launch that failed before any worker spawned to REVIEW_PASSED.
+
+        Operator-only and deliberately narrow: it reverses only the host-side
+        ``launch_failed`` terminal of a claimed job.  Every guard failure raises
+        ``StoreConflict`` and changes nothing.  The guards are:
+
+        * attempt RUN_FAILED for this job with a ``launch_failed`` outcome, job
+          EXITED and the attempt's latest job, and no earlier release;
+        * the attempt's job/run events after this job's ``job_launch_reserved``
+          are exactly ``run_finished(launch_failed)`` then ``job_launched`` (the
+          real host sequence); anything else, such as a ``job_saved`` or an
+          early ``job_launched``, means a worker may have been involved;
+        * the run directory holds only the host ``terminal.json`` (status
+          ``launch_failed``, this job) and ``lifecycle.lock``.
+
+        The absence of ``worker_pid`` in the job payload is checked but proves
+        nothing on its own: the host launch_failed path rewrites the original
+        queued payload, so a worker that spawned and then failed to register is
+        indistinguishable by payload.  The run-directory artifact guard
+        (``job.json``, ``logs/``, ``scenarios/``) is what detects that case.
+
+        The old run directory is renamed, never deleted, and the rename is
+        fsynced before the DB commit; a retry after a crash between rename and
+        commit completes the release idempotently.
+        """
+        from .contracts import RunOutcome
+
+        for name, value in (
+            ("launch release reason", reason),
+            ("job_id", job_id),
+            ("operator reference", operator_reference),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        attempt = self.get_attempt(attempt_id)
+        if attempt.state != AttemptState.RUN_FAILED:
+            raise StoreConflict("attempt is not RUN_FAILED")
+        if attempt.run_job_id != job_id:
+            raise StoreConflict("attempt run job does not match the requested job")
+        try:
+            outcome = RunOutcome.from_json(attempt.run_outcome or "")
+        except (ValueError, TypeError, KeyError) as exc:
+            raise StoreConflict("attempt run outcome is missing or malformed") from exc
+        if outcome.status != "launch_failed" or outcome.job_id != job_id:
+            raise StoreConflict("attempt run outcome is not a launch failure for this job")
+        run_dir = self.root / "hypotheses" / attempt.hypothesis_id / "attempts" / attempt_id / "run"
+        released_dir = run_dir.with_name(f"run.launch-released-{job_id}")
+        updated = replace(
+            attempt,
+            state=AttemptState.REVIEW_PASSED,
+            run_job_id=None,
+            run_outcome=None,
+            updated_at=now_utc(),
+        )
+        payload = updated.to_json()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            job_row = conn.execute(
+                "SELECT state,payload_json,payload_sha256 FROM jobs WHERE job_id=? AND attempt_id=?",
+                (job_id, attempt_id),
+            ).fetchone()
+            if job_row is None:
+                raise StoreConflict("job is not recorded for this attempt")
+            if _digest(str(job_row["payload_json"])) != str(job_row["payload_sha256"]):
+                raise StoreConflict("job payload digest mismatch")
+            if str(job_row["state"]) != "EXITED":
+                raise StoreConflict("job is not EXITED")
+            job_payload = json.loads(str(job_row["payload_json"]))
+            if not isinstance(job_payload, dict) or "worker_pid" in job_payload:
+                raise StoreConflict("job recorded a worker identity; it may have started")
+            if Path(str(job_payload.get("run_dir"))).resolve() != run_dir.resolve():
+                raise StoreConflict("job run directory is not the canonical attempt directory")
+            latest = conn.execute(
+                "SELECT job_id FROM jobs WHERE attempt_id=? ORDER BY rowid DESC LIMIT 1",
+                (attempt_id,),
+            ).fetchone()
+            if latest is None or str(latest["job_id"]) != job_id:
+                raise StoreConflict("job is not the latest job of the attempt")
+            self._require_unstarted_launch_events(conn, attempt_id, job_id)
+            if run_dir.exists() or run_dir.is_symlink():
+                if released_dir.exists() or released_dir.is_symlink():
+                    raise StoreConflict("launch-released run directory already exists")
+                evidence_dir, rename_needed = run_dir, True
+            elif released_dir.is_dir() and not released_dir.is_symlink():
+                # Crash recovery: a previous release renamed the directory but its
+                # DB commit never landed.  The preserved copy is verified the same way.
+                evidence_dir, rename_needed = released_dir, False
+            else:
+                raise StoreConflict("run directory is missing")
+            terminal_sha, terminal_error = self._unstarted_launch_artifacts(evidence_dir, job_id)
+            changed = conn.execute(
+                "UPDATE attempts SET state=?,run_job_id=NULL,run_outcome=NULL,updated_at=?,payload_json=?,payload_sha256=? WHERE attempt_id=? AND state=? AND run_job_id=?",
+                (
+                    updated.state.value,
+                    updated.updated_at,
+                    payload,
+                    _digest(payload),
+                    attempt_id,
+                    AttemptState.RUN_FAILED.value,
+                    job_id,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise StoreConflict("attempt changed before launch release")
+            self._set_job_state(conn, job_id, "LAUNCH_RELEASED")
+            self._event(
+                conn,
+                attempt.hypothesis_id,
+                attempt_id,
+                "run_launch_released",
+                {
+                    "job_id": job_id,
+                    "reason": reason,
+                    "operator_reference": operator_reference,
+                    "terminal_sha256": terminal_sha,
+                    "terminal_error": terminal_error,
+                    "preserved_run_dir": str(released_dir),
+                },
+                "operator",
+            )
+            if rename_needed:
+                try:
+                    os.rename(run_dir, released_dir)
+                    self._fsync_directory(run_dir.parent)
+                except OSError as exc:
+                    with suppress(OSError):
+                        if released_dir.exists() and not run_dir.exists():
+                            os.rename(released_dir, run_dir)
+                    raise StoreConflict(
+                        f"could not preserve the unstarted run directory: {exc}"
+                    ) from exc
+            try:
+                conn.commit()
+            except BaseException:
+                if rename_needed:
+                    with suppress(OSError):
+                        os.rename(released_dir, run_dir)
+                        self._fsync_directory(run_dir.parent)
+                raise
+        return updated
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _require_unstarted_launch_events(
+        conn: sqlite3.Connection, attempt_id: str, job_id: str
+    ) -> None:
+        """Require the exact host launch_failed event sequence for this job."""
+        rows = conn.execute(
+            "SELECT seq,kind,detail FROM events WHERE attempt_id=? ORDER BY seq", (attempt_id,)
+        ).fetchall()
+
+        def detail(row: sqlite3.Row) -> dict[str, object]:
+            try:
+                value = json.loads(str(row["detail"]))
+            except ValueError:
+                return {}
+            return value if isinstance(value, dict) else {}
+
+        if any(row["kind"] == "run_launch_released" for row in rows):
+            raise StoreConflict("this attempt already had a launch release")
+        reserved = [
+            row
+            for row in rows
+            if row["kind"] == "job_launch_reserved" and detail(row).get("job_id") == job_id
+        ]
+        if len(reserved) != 1:
+            raise StoreConflict("launch reservation event for this job is missing or duplicated")
+        reserved_seq = int(reserved[0]["seq"])
+        for row in rows:
+            if (
+                int(row["seq"]) < reserved_seq
+                and row["kind"] in {"job_saved", "job_launched"}
+                and detail(row).get("job_id") == job_id
+            ):
+                raise StoreConflict("a worker event for this job precedes its launch reservation")
+        lifecycle = [
+            row
+            for row in rows
+            if int(row["seq"]) > reserved_seq and str(row["kind"]).startswith(("job_", "run_"))
+        ]
+        sequence_ok = (
+            len(lifecycle) == 2
+            and lifecycle[0]["kind"] == "run_finished"
+            and detail(lifecycle[0]).get("status") == "launch_failed"
+            and lifecycle[1]["kind"] == "job_launched"
+            and detail(lifecycle[1]).get("job_id") == job_id
+        )
+        if not sequence_ok:
+            raise StoreConflict(
+                "job events are not exactly reserved, run_finished(launch_failed), job_launched"
+            )
+
+    def _unstarted_launch_artifacts(self, run_dir: Path, job_id: str) -> tuple[str, str | None]:
+        """Prove the directory holds only the host launch_failed terminal."""
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            raise StoreConflict("run directory is missing")
+        names = {entry.name for entry in run_dir.iterdir()}
+        if not names <= self._LAUNCH_RELEASE_ALLOWED_FILES:
+            raise StoreConflict("run directory contains execution artifacts")
+        for name in names:
+            candidate = run_dir / name
+            if candidate.is_symlink() or not candidate.is_file():
+                raise StoreConflict("run directory contains execution artifacts")
+        terminal = run_dir / "terminal.json"
+        if "terminal.json" not in names:
+            raise StoreConflict("launch_failed terminal.json is missing")
+        data = terminal.read_bytes()
+        try:
+            record = json.loads(data)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise StoreConflict("terminal.json is malformed") from exc
+        if (
+            not isinstance(record, dict)
+            or record.get("status") != "launch_failed"
+            or record.get("job_id") != job_id
+        ):
+            raise StoreConflict("terminal.json is not a launch_failed record for this job")
+        error = record.get("error")
+        return sha256_bytes(data), error if isinstance(error, str) else None
 
     def claim_queued_job(self, attempt_id: str, job_id: str) -> Attempt:
         """Atomically claim a queued request for one host launch."""

@@ -66,8 +66,8 @@ review-cancel operations are authorized; consult each live help before using
 them.
 Live help defines syntax only and grants no additional permission. Owner actions
 remain limited to the operations authorized by this contract (including
-review-collect); operator-only policy, ledger, and runtime-registration
-mutations remain operator-only.
+review-collect); policy, ledger, runtime-registration, and
+run-release-unstarted mutations remain operator-only.
 
 Read existing research status/control surfaces and durable receipts. Do not
 invent command names, flags, routes, state fields, or acknowledgements. Admission

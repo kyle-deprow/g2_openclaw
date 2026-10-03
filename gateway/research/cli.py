@@ -18,6 +18,7 @@ from contextlib import suppress
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -38,7 +39,7 @@ from .admission import (
     ValidationReceipt,
     admit_hypothesis,
 )
-from .containment import runtime_pins_from_record
+from .containment import RuntimePins, runtime_pins_from_record
 from .contracts import (
     Attempt,
     AttemptDecision,
@@ -53,12 +54,14 @@ from .hypothesis import HypothesisDocument
 from .jobs import (
     JobError,
     JobRecord,
+    TargetValidationError,
     attach,
     cleanup_stage,
     launch,
     lifecycle_lock,
     new_job_id,
     preflight,
+    validate_launch,
 )
 from .jobs import cancel as cancel_job
 from .provenance import validate_provenance_evidence
@@ -1251,6 +1254,45 @@ def _admission_execution_ready(store: ResearchStore, attempt_id: str) -> str | N
     return None
 
 
+def _launch_arguments(
+    payload: Mapping[str, Any], plan: RunPlan, pins: RuntimePins
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Build the exact positional and keyword arguments shared by validate/launch."""
+    artifact_paths = {key: Path(value) for key, value in dict(payload["artifact_paths"]).items()}
+    artifact_digests = {key: str(value) for key, value in dict(payload["artifact_digests"]).items()}
+    raw_spec_paths = payload.get("evaluation_spec_paths")
+    raw_spec_digests = payload.get("evaluation_spec_digests")
+    positional: tuple[Any, ...] = (
+        Path(str(payload["run_dir"])).parent,
+        Path(str(payload["worktree"])),
+        tuple(str(item) for item in payload["targets_argv"]),
+        float(payload["timeout_seconds"]),
+        int(payload["max_rss_mb"]),
+    )
+    keywords: dict[str, Any] = {
+        "shared_python": Path(str(payload["shared_python"])),
+        "expected_commit": str(payload["expected_commit"]),
+        "artifact_paths": artifact_paths,
+        "artifact_digests": artifact_digests,
+        "evaluator_source": Path(str(payload["evaluator_source"])),
+        "evaluator_source_sha256": str(payload["evaluator_source_sha256"]),
+        "configured_pins": pins,
+        "dividends_path": Path(str(payload["dividends_path"])),
+        "run_plan": plan,
+        "evaluation_spec_paths": (
+            {key: Path(str(value)) for key, value in dict(raw_spec_paths).items()}
+            if isinstance(raw_spec_paths, dict)
+            else None
+        ),
+        "evaluation_spec_digests": (
+            {key: str(value) for key, value in dict(raw_spec_digests).items()}
+            if isinstance(raw_spec_digests, dict)
+            else None
+        ),
+    }
+    return positional, keywords
+
+
 def _dispatch_queued_job(store: ResearchStore) -> str | None:
     """Claim and launch one queue item under the already-held owner authority."""
     if not store.owner_lock_held():
@@ -1296,6 +1338,31 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
                 # expected; its terminal artifact remains authoritative.
                 return None
             return status
+        finally:
+            store.release_run_lock()
+
+    def release_unlaunched(reason: str) -> str | None:
+        """Return a still-queued, never-claimed run to REVIEW_PASSED under the short lock."""
+        try:
+            store.acquire_run_lock()
+        except OwnerLockHeld:
+            return None
+        try:
+            current = store.get_attempt(attempt_id)
+            canonical_row = store.job_for(attempt_id)
+            if (
+                canonical_row is None
+                or str(canonical_row["job_id"]) != job_id
+                or str(canonical_row["state"]) != "QUEUED"
+                or current.state != AttemptState.RUN_QUEUED
+                or current.run_job_id != job_id
+            ):
+                return None
+            try:
+                store.release_queued_run(attempt_id, job_id, reason)
+            except StoreConflict:
+                return None
+            return reason
         finally:
             store.release_run_lock()
 
@@ -1423,6 +1490,16 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
             preflight(Path(str(payload["worktree"])), attempt.commit)
         except JobError:
             return reject("source_mutated")
+        # Pure launch validation runs before the claim.  Only a target argv
+        # shape/containment refusal is an unstarted-launch release back to
+        # REVIEW_PASSED; every other failure keeps the terminal reject() path.
+        try:
+            launch_args, launch_kwargs = _launch_arguments(payload, plan, pins)
+            validate_launch(*launch_args, **launch_kwargs)
+        except TargetValidationError as exc:
+            return release_unlaunched(f"launch_validation_failed:{exc}")
+        except Exception as exc:
+            return reject(f"launch_validation_failed:{exc}")
         store.acquire_run_lock()
         claimed = False
         try:
@@ -1441,45 +1518,7 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
                 return None
             store.claim_queued_job(attempt_id, job_id)
             claimed = True
-            artifact_paths = {
-                key: Path(value) for key, value in dict(payload["artifact_paths"]).items()
-            }
-            artifact_digests = {
-                key: str(value) for key, value in dict(payload["artifact_digests"]).items()
-            }
-            job = launch(
-                Path(str(payload["run_dir"])).parent,
-                Path(str(payload["worktree"])),
-                tuple(str(item) for item in payload["targets_argv"]),
-                float(payload["timeout_seconds"]),
-                int(payload["max_rss_mb"]),
-                shared_python=Path(str(payload["shared_python"])),
-                expected_commit=str(payload["expected_commit"]),
-                artifact_paths=artifact_paths,
-                artifact_digests=artifact_digests,
-                evaluator_source=Path(str(payload["evaluator_source"])),
-                evaluator_source_sha256=str(payload["evaluator_source_sha256"]),
-                configured_pins=pins,
-                dividends_path=Path(str(payload["dividends_path"])),
-                job_id=job_id,
-                run_plan=plan,
-                evaluation_spec_paths=(
-                    {
-                        key: Path(str(value))
-                        for key, value in dict(payload["evaluation_spec_paths"]).items()
-                    }
-                    if isinstance(payload.get("evaluation_spec_paths"), dict)
-                    else None
-                ),
-                evaluation_spec_digests=(
-                    {
-                        key: str(value)
-                        for key, value in dict(payload["evaluation_spec_digests"]).items()
-                    }
-                    if isinstance(payload.get("evaluation_spec_digests"), dict)
-                    else None
-                ),
-            )
+            job = launch(*launch_args, job_id=job_id, **launch_kwargs)
             updated_payload = {**payload, **json.loads(job.to_json()), "state": "LAUNCHED"}
             store.update_job(updated_payload, attempt_id)
         except (StoreConflict, OwnerLockHeld):
@@ -1601,6 +1640,33 @@ def run_command(
         current = store.get_attempt(attempt_id)
         state = "queued" if current.state == AttemptState.RUN_QUEUED else "running"
         typer.echo(f"{state} {job_id}")
+    except Exception as exc:
+        _fail(exc)
+    finally:
+        if store is not None:
+            store.release_run_lock()
+
+
+@app.command("run-release-unstarted")
+def run_release_unstarted(
+    attempt_id: str,
+    root: Path = typer.Option(..., "--root"),
+    job_id: str = typer.Option(..., "--job-id"),
+    reason: str = typer.Option(..., "--reason"),
+    operator_reference: str = typer.Option(..., "--operator-reference"),
+) -> None:
+    """Operator-only: release a launch_failed job that never spawned to REVIEW_PASSED."""
+    store: ResearchStore | None = None
+    try:
+        store = ResearchStore(_root(root))
+        store.acquire_run_lock()
+        try:
+            released = store.release_unstarted_launch(
+                attempt_id, job_id, reason, operator_reference
+            )
+        finally:
+            store.release_run_lock()
+        typer.echo(f"released {job_id} state={released.state.value}")
     except Exception as exc:
         _fail(exc)
     finally:

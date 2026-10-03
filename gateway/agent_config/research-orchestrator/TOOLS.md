@@ -27,8 +27,8 @@ allowlist. Review collection through the existing review-collect operation
 is authorized; consult its live help before using the exact invocation below.
 Live help defines syntax only and grants no additional permission. Owner actions
 remain limited to the operations authorized by this contract (including
-review-collect); operator-only policy, ledger, and runtime-registration
-mutations remain operator-only.
+review-collect); policy, ledger, runtime-registration, and
+run-release-unstarted mutations remain operator-only.
 Do not invent flags, providers, routes, or command names. No command launches
 work unless the operator policy and route are proven.
 

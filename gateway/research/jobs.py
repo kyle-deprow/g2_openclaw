@@ -23,6 +23,7 @@ from .containment import (
     ContainmentError,
     RuntimePins,
     stop_scope,
+    validate_targets_argv,
     verify_configured_runtime_pins,
 )
 from .contracts import RunPlan
@@ -30,6 +31,10 @@ from .contracts import RunPlan
 
 class JobError(RuntimeError):
     """A job cannot be launched or safely controlled."""
+
+
+class TargetValidationError(JobError):
+    """A scenario targets argv failed shape or containment validation before launch."""
 
 
 _DOTTED_MODULE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
@@ -117,34 +122,48 @@ def preflight(worktree: Path, expected_commit: str | None = None) -> None:
 
 def _validate_token(token: str) -> None:
     if _SECRET_HINT.search(token):
-        raise JobError("target arguments may not contain secret values or names")
+        raise TargetValidationError("target arguments may not contain secret values or names")
 
 
 def _validate_targets(
-    argv: Sequence[str], shared_python: Path, worktree: Path, run_dir: Path
+    argv: Sequence[str],
+    shared_python: Path,
+    worktree: Path,
+    run_dir: Path,
+    *,
+    panel: Path | None = None,
+    receipt: Path | None = None,
 ) -> None:
+    """Validate one scenario argv exactly as the contained worker will.
+
+    The pinned panel and receipt are the only absolute paths allowed outside the
+    worktree and run directory, matching ``containment.validate_targets_argv``.
+    """
     if not argv or Path(argv[0]).resolve() != shared_python.resolve():
-        raise JobError("targets argv[0] must equal the trusted shared interpreter")
+        raise TargetValidationError("targets argv[0] must equal the trusted shared interpreter")
     if (
         len(argv) < 2
         or (argv[1] == "-m" and len(argv) < 3)
         or (argv[1] != "-m" and not Path(argv[1]).is_absolute())
     ):
-        raise JobError("targets must use -m module or an absolute in-worktree program")
+        raise TargetValidationError("targets must use -m module or an absolute in-worktree program")
     if argv[1] == "-m" and _DOTTED_MODULE.fullmatch(argv[2]) is None:
-        raise JobError("targets -m value must be a dotted module name")
+        raise TargetValidationError("targets -m value must be a dotted module name")
     if argv[1] != "-m" and not Path(argv[1]).is_file():
-        raise JobError("target program file is missing")
+        raise TargetValidationError("target program file is missing")
     for token in argv:
         _validate_token(token)
-    for token in argv[2:] if len(argv) >= 2 and argv[1] == "-m" else argv[1:]:
-        path = Path(token)
-        if path.is_absolute() and not (
-            path.resolve() == run_dir.resolve()
-            or run_dir.resolve() in path.resolve().parents
-            or worktree.resolve() in path.resolve().parents
-        ):
-            raise JobError(f"target path is outside the worktree/run directory: {token}")
+    try:
+        validate_targets_argv(
+            argv,
+            shared_python=shared_python,
+            worktree=worktree,
+            run_dir=run_dir,
+            panel=panel,
+            receipt=receipt,
+        )
+    except ContainmentError as exc:
+        raise TargetValidationError(str(exc)) from exc
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -289,7 +308,7 @@ def cleanup_stage(job_record: JobRecord) -> bool:
     return True
 
 
-def launch(
+def validate_launch(
     attempt_dir: Path,
     worktree: Path,
     targets_argv: Sequence[str],
@@ -304,12 +323,11 @@ def launch(
     evaluator_source_sha256: str,
     configured_pins: RuntimePins,
     dividends_path: Path,
-    job_id: str | None = None,
     run_plan: RunPlan | None = None,
     evaluation_spec_paths: dict[str, Path] | None = None,
     evaluation_spec_digests: dict[str, str] | None = None,
-) -> JobRecord:
-    """Validate a clean worktree and launch exactly one detached worker."""
+) -> None:
+    """Run every pure launch check; never create files, directories or processes."""
     worktree = worktree.resolve()
     attempt_dir = attempt_dir.resolve()
     preflight(worktree, expected_commit)
@@ -331,7 +349,8 @@ def launch(
     ):
         raise JobError("shared interpreter is missing or not executable")
     run_dir = attempt_dir / "run"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    if os.path.lexists(run_dir / "terminal.json"):
+        raise JobError("run directory already holds a terminal record")
     pins = configured_pins
     try:
         verify_configured_runtime_pins(pins)
@@ -379,12 +398,68 @@ def launch(
         raise JobError("primary scenario argv does not match launch argv")
     for scenario in run_plan.scenarios:
         target_stage = run_dir / "scenarios" / scenario.scenario_id / "targets-stage"
-        _validate_targets(scenario.targets_argv, shared_python, worktree, target_stage)
+        _validate_targets(
+            scenario.targets_argv,
+            shared_python,
+            worktree,
+            target_stage,
+            panel=artifact_paths["panel"],
+            receipt=artifact_paths["receipt"],
+        )
         spec_path = evaluation_spec_paths.get(scenario.spec_id)
         if spec_path is None or not spec_path.is_file() or spec_path.is_symlink():
             raise JobError(f"missing evaluation spec {scenario.spec_id}")
         if evaluation_spec_digests.get(scenario.spec_id) != _sha(spec_path):
             raise JobError(f"evaluation spec digest mismatch: {scenario.spec_id}")
+
+
+def launch(
+    attempt_dir: Path,
+    worktree: Path,
+    targets_argv: Sequence[str],
+    timeout_seconds: int | float,
+    max_rss_mb: int,
+    *,
+    shared_python: Path,
+    expected_commit: str,
+    artifact_paths: dict[str, Path],
+    artifact_digests: dict[str, str],
+    evaluator_source: Path,
+    evaluator_source_sha256: str,
+    configured_pins: RuntimePins,
+    dividends_path: Path,
+    job_id: str | None = None,
+    run_plan: RunPlan | None = None,
+    evaluation_spec_paths: dict[str, Path] | None = None,
+    evaluation_spec_digests: dict[str, str] | None = None,
+) -> JobRecord:
+    """Validate a clean worktree and launch exactly one detached worker."""
+    validate_launch(
+        attempt_dir,
+        worktree,
+        targets_argv,
+        timeout_seconds,
+        max_rss_mb,
+        shared_python=shared_python,
+        expected_commit=expected_commit,
+        artifact_paths=artifact_paths,
+        artifact_digests=artifact_digests,
+        evaluator_source=evaluator_source,
+        evaluator_source_sha256=evaluator_source_sha256,
+        configured_pins=configured_pins,
+        dividends_path=dividends_path,
+        run_plan=run_plan,
+        evaluation_spec_paths=evaluation_spec_paths,
+        evaluation_spec_digests=evaluation_spec_digests,
+    )
+    if run_plan is None or evaluation_spec_paths is None or evaluation_spec_digests is None:
+        raise JobError("immutable run plan is required for launch")
+    worktree = worktree.resolve()
+    attempt_dir = attempt_dir.resolve()
+    shared_python = shared_python.absolute()
+    run_dir = attempt_dir / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    pins = configured_pins
     job_id = job_id or new_job_id()
     attempt_id = attempt_dir.name
     config: dict[str, object] = {
