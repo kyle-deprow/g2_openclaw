@@ -729,6 +729,57 @@ def stop_scope(unit: str, signal_name: str = "SIGTERM") -> bool:
         time.sleep(0.05)
 
 
+_CGROUP_ROOT: Final[Path] = Path("/sys/fs/cgroup")
+_MIB: Final[int] = 1024 * 1024
+
+
+@dataclass(slots=True)
+class StagePeak:
+    """Peak memory of one contained stage, from two independent observations.
+
+    ``systemd-run --scope`` removes the scope cgroup the moment the stage exits, so
+    ``memory.peak`` (the same accounting ``MemoryMax`` enforces, page cache included)
+    can only be read while the stage runs; ``sample_cgroup`` keeps the last value.
+    ``record_rusage`` adds ``ru_maxrss`` of the reaped stage tree (``os.wait4``), which
+    covers every waited-for descendant and survives scope removal.  The reported peak
+    is the larger of the two.
+
+    ``memory.peak`` counts reclaimable page cache (for example the panel the stage reads),
+    not just anonymous memory, so it is a conservative upper bound on the working set.
+    """
+
+    cgroup_bytes: int = 0
+    rusage_bytes: int = 0
+
+    def sample_cgroup(self, pid: int, scope_unit: str) -> None:
+        """Read ``memory.peak`` of the stage's own scope; ignore any other cgroup.
+
+        Right after launch the process is still in the caller's cgroup (whose peak is
+        unrelated), so the cgroup path must name this exact scope.
+        """
+        try:
+            lines = Path(f"/proc/{pid}/cgroup").read_text(encoding="utf-8").splitlines()
+            membership = next(line[3:] for line in lines if line.startswith("0::"))
+            if not membership.endswith(f"/{scope_unit.removesuffix('.scope')}.scope"):
+                return
+            value = int((_CGROUP_ROOT / membership.lstrip("/") / "memory.peak").read_text())
+        except (OSError, ValueError, StopIteration):
+            return
+        self.cgroup_bytes = max(self.cgroup_bytes, value)
+
+    def record_rusage(self, ru_maxrss_kib: int) -> None:
+        self.rusage_bytes = max(self.rusage_bytes, int(ru_maxrss_kib) * 1024)
+
+    @property
+    def peak_bytes(self) -> int:
+        return max(self.cgroup_bytes, self.rusage_bytes)
+
+    @property
+    def peak_mb(self) -> int:
+        """Peak in whole MiB, rounded up (the unit of ``MemoryMax=<N>M``)."""
+        return -(-self.peak_bytes // _MIB)
+
+
 def target_file_ok(path: Path, max_bytes: int = _MAX_TARGET_BYTES) -> bool:
     try:
         stat_value = path.lstat()

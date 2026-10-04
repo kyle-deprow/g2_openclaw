@@ -33,7 +33,13 @@ from gateway.research.store import ResearchStore
 from gateway.research.wake import compose_wake
 from typer.testing import CliRunner, Result
 
-from tests.gateway.research.conftest import provenance_evidence, review, run_plan, verified_review
+from tests.gateway.research.conftest import (
+    freeze_with_probe,
+    provenance_evidence,
+    review,
+    run_plan,
+    verified_review,
+)
 from tests.gateway.research.test_admission import _admit, _document, _payload
 from tests.gateway.research.test_readiness import configure_real_readiness
 
@@ -147,7 +153,7 @@ def _ready(
     *,
     scenarios: tuple[RunScenario, ...] | None = None,
 ) -> Attempt:
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     record = ImplementationRecord(
@@ -176,7 +182,7 @@ def test_implementation_submit_validates_provenance_before_persisting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     record = ImplementationRecord(
@@ -439,7 +445,7 @@ def test_cli_run_derived_timeout_ignores_unreferenced_specs_in_the_spec_set(
     tmp_path: Path,
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     store.decide_hypothesis(hypothesis.hypothesis_id, HypothesisDecision.ABANDONED, "superseded")
     # Create a hypothesis whose spec set holds an extra spec that no scenario references.
     extra = tmp_path / "eval-spec-unreferenced.json"
@@ -512,11 +518,28 @@ def test_cli_run_explicit_flags_override_derived_limits(
         "--timeout-seconds",
         "1234",
         "--max-rss-mb",
-        "777",
+        "2048",
         "--wait-seconds",
         "0",
     )
-    assert queued == [(1234.0, 777)]
+    assert queued == [(1234.0, 2048)]
+    # With a recorded probe an explicit flag may not undercut the frozen compute bound (1024).
+    refused = runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            attempt.attempt_id,
+            "--root",
+            str(store.root),
+            "--max-rss-mb",
+            "777",
+            "--wait-seconds",
+            "0",
+        ],
+    )
+    assert refused.exit_code == 1 and "below the minimum 1024" in refused.output
+    assert queued == [(1234.0, 2048)]
 
 
 def test_cli_run_refuses_when_derived_timeout_exceeds_the_limit(
@@ -575,6 +598,9 @@ class _FakeHypothesisStore:
 
     def get_hypothesis(self, _hypothesis_id: str) -> Any:
         return SimpleNamespace(spec_json=self._spec_json)
+
+    def compute_probe(self, _hypothesis_id: str) -> None:
+        return None  # a hypothesis frozen before the compute probe existed
 
 
 def test_run_max_rss_uses_frozen_hypothesis_compute(tmp_path: Path) -> None:

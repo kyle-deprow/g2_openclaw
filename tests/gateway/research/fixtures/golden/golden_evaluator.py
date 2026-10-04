@@ -66,7 +66,9 @@ def _evaluate(args: argparse.Namespace) -> int:
         return 1
     out.mkdir(parents=True)
     cost_bps = int(spec["cost_bps"])
-    sessions = len(targets["positions"])
+    # The strategy fixture writes "positions"; the compute probe's empty targets file uses
+    # the real evaluator's {"targets": []} shape.
+    sessions = len(targets.get("positions", targets.get("targets", [])))
     result = {
         "evaluator_version": "research-evaluator-v2",
         "spec_sha256": _semantic_sha256(args.spec),

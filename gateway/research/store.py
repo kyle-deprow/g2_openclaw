@@ -25,9 +25,12 @@ from .containment import ContainmentError, runtime_pins
 from .contracts import (
     MAX_RUN_TIMEOUT_SECONDS,
     MAX_STAGE_RSS_MB,
+    MIN_ANALYSIS_SECONDS,
+    RUN_OVERHEAD_SECONDS,
     Attempt,
     AttemptDecision,
     AttemptState,
+    ComputeProbe,
     EvaluationSpecEntry,
     EvaluationSpecSet,
     Event,
@@ -38,7 +41,9 @@ from .contracts import (
     ReviewEvidence,
     RunOutcome,
     RunPlan,
+    compute_requirements,
 )
+from .hypothesis import ComputeLimits, HypothesisDocument
 from .machine import (
     IllegalTransition,
     decide_hypothesis,
@@ -811,15 +816,26 @@ class ResearchStore:
         return spec
 
     def _update_hypothesis(
-        self, spec: HypothesisSpec, event: str, actor: str = "astra"
+        self,
+        spec: HypothesisSpec,
+        event: str,
+        *,
+        expected: HypothesisState,
+        actor: str = "astra",
     ) -> HypothesisSpec:
+        """Write ``spec``'s new state only if the row is still in ``expected`` state."""
         payload = spec.to_json()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                "UPDATE hypotheses SET state=?,payload_json=?,payload_sha256=? WHERE hypothesis_id=?",
-                (spec.state.value, payload, _digest(payload), spec.hypothesis_id),
+            updated = conn.execute(
+                "UPDATE hypotheses SET state=?,payload_json=?,payload_sha256=? "
+                "WHERE hypothesis_id=? AND state=?",
+                (spec.state.value, payload, _digest(payload), spec.hypothesis_id, expected.value),
             )
+            if updated.rowcount != 1:
+                raise StoreConflict(
+                    f"{spec.hypothesis_id} is no longer {expected.value}; refusing {event}"
+                )
             self._event(conn, spec.hypothesis_id, None, event, {"state": spec.state.value}, actor)
             conn.commit()
         self._projection(
@@ -827,33 +843,218 @@ class ResearchStore:
         )
         return spec
 
-    def freeze(self, hypothesis_id: str) -> HypothesisSpec:
-        current = self.get_hypothesis(hypothesis_id)
-        if current.state == HypothesisState.DRAFT:
-            self._validate_owned_spec_set(current, self.evaluation_spec_set(hypothesis_id))
-        return self._update_hypothesis(freeze(current), "hypothesis_frozen")
+    def probe_bindings(self, hypothesis_id: str) -> tuple[dict[str, str], dict[str, str]]:
+        """Return the (pin, input) digests a compute probe must be bound to.
 
-    def decide_hypothesis(
-        self, hypothesis_id: str, decision: HypothesisDecision, reason: str
-    ) -> HypothesisSpec:
-        spec = decide_hypothesis(
-            self.get_hypothesis(hypothesis_id), decision, self.attempts_for(hypothesis_id)
-        )
+        Pins come from the immutable driver configuration and inputs from the immutable
+        hypothesis row and its evaluation spec set, so no file is read here.
+        """
+        hypothesis = self.get_hypothesis(hypothesis_id)
+        config = self.config()
+        spec_set = self.evaluation_spec_set(hypothesis_id)
+        pins = {
+            "evaluator_sha256": str(config["evaluator_sha256"]),
+            "pyvenv_sha256": str(config["pyvenv_sha256"]),
+            "shared_python_sha256": str(config["shared_python_sha256"]),
+            "snapshot_sha256": str(config["snapshot_sha256"]),
+            "universe_sha256": str(config["universe_sha256"]),
+        }
+        inputs = {
+            "dividends_sha256": hypothesis.dividends_sha256,
+            "evaluation_spec_set_sha256": _digest(spec_set.to_json()),
+            "panel_sha256": hypothesis.panel_sha256,
+            "receipt_sha256": hypothesis.receipt_sha256,
+        }
+        return pins, inputs
+
+    def compute_probe(self, hypothesis_id: str) -> ComputeProbe | None:
+        """Return the recorded compute probe, or ``None`` when none was recorded."""
+        try:
+            payload = self.hypothesis_evidence(hypothesis_id, "compute_probe")
+        except ValueError:
+            return None
+        probe = ComputeProbe.from_json(payload)
+        if probe.hypothesis_id != hypothesis_id:
+            raise StoreConflict("compute probe evidence is bound to another hypothesis")
+        return probe
+
+    def _check_probe_binding(self, hypothesis_id: str, probe: ComputeProbe) -> None:
+        pins, inputs = self.probe_bindings(hypothesis_id)
+        if probe.hypothesis_id != hypothesis_id:
+            raise StoreConflict("compute probe is bound to another hypothesis")
+        if probe.pins != pins:
+            raise StoreConflict("compute probe runtime pins do not match the driver configuration")
+        if probe.inputs != inputs:
+            raise StoreConflict("compute probe inputs do not match the hypothesis inputs")
+        spec_ids = [entry.spec_id for entry in self.evaluation_spec_set(hypothesis_id).specs]
+        validated = [stage.spec_id for stage in probe.stages if stage.stage.startswith("validate-")]
+        evaluated = [stage.spec_id for stage in probe.stages if stage.stage.startswith("evaluate-")]
+        if validated != spec_ids or evaluated != spec_ids[:1]:
+            raise StoreConflict(
+                "compute probe stages do not cover exactly the hypothesis evaluation spec set"
+            )
+
+    def record_compute_probe(self, probe: ComputeProbe) -> None:
+        """Record the one immutable compute probe of a DRAFT hypothesis."""
+        hypothesis_id = probe.hypothesis_id
+        if self.get_hypothesis(hypothesis_id).state != HypothesisState.DRAFT:
+            raise StoreConflict("compute probe may only be recorded while the hypothesis is DRAFT")
+        self._check_probe_binding(hypothesis_id, probe)
+        payload = probe.to_json()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            payload = spec.to_json()
+            row = conn.execute(
+                "SELECT state FROM hypotheses WHERE hypothesis_id=?", (hypothesis_id,)
+            ).fetchone()
+            if row is None or str(row["state"]) != HypothesisState.DRAFT.value:
+                raise StoreConflict(
+                    "compute probe may only be recorded while the hypothesis is DRAFT"
+                )
+            if (
+                conn.execute(
+                    "SELECT 1 FROM hypothesis_evidence WHERE hypothesis_id=? AND kind='compute_probe'",
+                    (hypothesis_id,),
+                ).fetchone()
+                is not None
+            ):
+                raise StoreConflict(f"compute probe already recorded for {hypothesis_id}")
             conn.execute(
-                "UPDATE hypotheses SET state=?,payload_json=?,payload_sha256=? WHERE hypothesis_id=?",
-                (spec.state.value, payload, _digest(payload), hypothesis_id),
+                "INSERT INTO hypothesis_evidence VALUES(?,?,?,?)",
+                (hypothesis_id, "compute_probe", payload, _digest(payload)),
             )
             self._event(
                 conn,
                 hypothesis_id,
                 None,
-                "hypothesis_decided",
-                {"decision": decision.value, "reason": reason},
+                "compute_probe_recorded",
+                {"probe_id": probe.probe_id, **compute_requirements(probe).as_dict()},
                 "astra",
             )
+            conn.commit()
+        self._projection(self.root / "hypotheses" / hypothesis_id / "compute_probe.json", payload)
+
+    def _require_compute_probe(self, hypothesis: HypothesisSpec) -> None:
+        """Freeze gate: bounds must be feasible for the measured probe."""
+        hypothesis_id = hypothesis.hypothesis_id
+        abandon = (
+            f"abandon the DRAFT with `gateway-cli research hypothesis-decide {hypothesis_id} "
+            "--root ROOT --decision ABANDONED --reason ...`"
+        )
+        probe = self.compute_probe(hypothesis_id)
+        if probe is None:
+            raise StoreConflict(
+                f"freeze requires a compute probe: run `gateway-cli research compute-probe "
+                f"{hypothesis_id} --root ROOT` first (it can take tens of minutes to hours)"
+            )
+        self._check_probe_binding(hypothesis_id, probe)
+        try:
+            document = HypothesisDocument.from_json(hypothesis.spec_json)
+        except ValueError as exc:
+            raise StoreConflict(
+                f"hypothesis spec cannot supply compute.max_rss_mb ({exc}); a DRAFT spec cannot "
+                f"be repaired, so {abandon}"
+            ) from exc
+        required = compute_requirements(probe)
+        if not required.rss_feasible:
+            raise StoreConflict(
+                f"infeasible within driver bounds: measured peak {required.max_peak_rss_mb} MB in "
+                f"{required.max_peak_rss_stage} needs compute.max_rss_mb >= "
+                f"{required.min_rss_mb}, above the {MAX_STAGE_RSS_MB} MB limit; {abandon}"
+            )
+        if not required.timeout_feasible:
+            raise StoreConflict(
+                f"infeasible within driver bounds: measured wall {required.max_wall_seconds:g}s in "
+                f"{required.max_wall_stage} needs scenario_timeout_seconds >= "
+                f"{required.min_scenario_timeout_seconds}, but even the smallest run plan "
+                f"(3 stages x that + {MIN_ANALYSIS_SECONDS:g}s analysis + {RUN_OVERHEAD_SECONDS:g}s "
+                f"overhead) would exceed the {MAX_RUN_TIMEOUT_SECONDS}s run limit; {abandon}"
+            )
+        if document.compute.max_rss_mb < required.min_rss_mb:
+            raise StoreConflict(
+                f"compute.max_rss_mb={document.compute.max_rss_mb} is below the required minimum "
+                f"{required.min_rss_mb} (ceil(1.25 x measured peak {required.max_peak_rss_mb} MB "
+                f"in {required.max_peak_rss_stage})); set compute.max_rss_mb >= "
+                f"{required.min_rss_mb} (limit {MAX_STAGE_RSS_MB}) with hypothesis-set-compute "
+                "before freezing"
+            )
+
+    def set_draft_compute(
+        self, hypothesis_id: str, max_wall_seconds: float, max_rss_mb: int
+    ) -> HypothesisSpec:
+        """Replace only the ``compute`` block of a DRAFT hypothesis spec.
+
+        This exists so the bounds can be taken from the measured compute probe after the
+        hypothesis is created; every other spec field stays byte-identical, and a frozen
+        hypothesis remains immutable.
+        """
+        current = self.get_hypothesis(hypothesis_id)
+        if current.state != HypothesisState.DRAFT:
+            raise StoreConflict("compute bounds may only be changed while the hypothesis is DRAFT")
+        limits = ComputeLimits(max_wall_seconds=max_wall_seconds, max_rss_mb=max_rss_mb)
+        raw = json.loads(current.spec_json)
+        if not isinstance(raw, dict):
+            raise ValueError("hypothesis spec must be a JSON object")
+        raw["compute"] = {
+            "max_rss_mb": limits.max_rss_mb,
+            "max_wall_seconds": limits.max_wall_seconds,
+        }
+        spec_json = to_json(raw)
+        HypothesisDocument.from_json(spec_json)
+        updated = replace(current, spec_json=spec_json, spec_sha256=_digest(spec_json))
+        payload = updated.to_json()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state FROM hypotheses WHERE hypothesis_id=?", (hypothesis_id,)
+            ).fetchone()
+            if row is None or str(row["state"]) != HypothesisState.DRAFT.value:
+                raise StoreConflict(
+                    "compute bounds may only be changed while the hypothesis is DRAFT"
+                )
+            conn.execute(
+                "UPDATE hypotheses SET spec_json=?,spec_sha256=?,payload_json=?,payload_sha256=? WHERE hypothesis_id=?",
+                (spec_json, updated.spec_sha256, payload, _digest(payload), hypothesis_id),
+            )
+            self._event(
+                conn,
+                hypothesis_id,
+                None,
+                "hypothesis_compute_set",
+                {"max_rss_mb": limits.max_rss_mb, "max_wall_seconds": limits.max_wall_seconds},
+                "astra",
+            )
+            conn.commit()
+        self._projection(self.root / "hypotheses" / hypothesis_id / "spec.json", spec_json)
+        return updated
+
+    def freeze(self, hypothesis_id: str) -> HypothesisSpec:
+        current = self.get_hypothesis(hypothesis_id)
+        if current.state == HypothesisState.DRAFT:
+            self._validate_owned_spec_set(current, self.evaluation_spec_set(hypothesis_id))
+            self._require_compute_probe(current)
+        return self._update_hypothesis(freeze(current), "hypothesis_frozen", expected=current.state)
+
+    def decide_hypothesis(
+        self, hypothesis_id: str, decision: HypothesisDecision, reason: str
+    ) -> HypothesisSpec:
+        before = self.get_hypothesis(hypothesis_id)
+        spec = decide_hypothesis(before, decision, self.attempts_for(hypothesis_id))
+        detail: dict[str, object] = {"decision": decision.value, "reason": reason}
+        if before.state == HypothesisState.DRAFT:
+            detail["from_state"] = HypothesisState.DRAFT.value
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute(
+                "SELECT state FROM hypotheses WHERE hypothesis_id=?", (hypothesis_id,)
+            ).fetchone()
+            if current is None or str(current["state"]) != before.state.value:
+                raise StoreConflict(f"{hypothesis_id} changed state while being decided")
+            payload = spec.to_json()
+            conn.execute(
+                "UPDATE hypotheses SET state=?,payload_json=?,payload_sha256=? WHERE hypothesis_id=?",
+                (spec.state.value, payload, _digest(payload), hypothesis_id),
+            )
+            self._event(conn, hypothesis_id, None, "hypothesis_decided", detail, "astra")
             conn.commit()
         return spec
 
@@ -978,6 +1179,16 @@ class ResearchStore:
             for scenario in run_plan.scenarios
         ):
             raise StoreConflict("run plan scenario spec does not match evidence")
+        probe = self.compute_probe(attempt.hypothesis_id)
+        if probe is not None:
+            required = compute_requirements(probe)
+            if run_plan.scenario_timeout_seconds < required.min_scenario_timeout_seconds:
+                raise StoreConflict(
+                    f"scenario_timeout_seconds={run_plan.scenario_timeout_seconds:g} is below the "
+                    f"required minimum {required.min_scenario_timeout_seconds} (ceil(1.5 x "
+                    f"measured stage wall {required.max_wall_seconds:g}s in "
+                    f"{required.max_wall_stage}))"
+                )
 
         replay = False
         with self._connect() as conn:

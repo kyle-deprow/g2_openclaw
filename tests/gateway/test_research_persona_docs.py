@@ -89,7 +89,7 @@ def test_bootstrap_contract_stays_under_word_budget() -> None:
     words = re.findall(r"\S+", text)
 
     # Assert
-    assert len(words) <= 1_200
+    assert len(words) <= 1_350
 
 
 def test_runtime_skill_stays_under_line_budget() -> None:

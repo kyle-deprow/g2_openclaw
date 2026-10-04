@@ -23,6 +23,7 @@ from gateway.research.machine import IllegalTransition
 from gateway.research.store import OwnerLockHeld, ResearchStore, StoreConflict
 
 from tests.gateway.research.conftest import (
+    freeze_with_probe,
     implementation,
     provenance_evidence,
     review,
@@ -44,7 +45,7 @@ def _implemented_attempt(
     admission: AdmissionDecision | None = None,
 ) -> tuple[ResearchStore, Path, HypothesisSpec, Attempt, ImplementationRecord]:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source, admission=admission)
     record = implementation(attempt.attempt_id, "a" * 40)
     attempt = store.submit_implementation(
@@ -427,7 +428,7 @@ def test_store_evidence_is_idempotent_and_repairs_projection(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     record = implementation(attempt.attempt_id, "a" * 40)
     # The fixture's actual commit is the implementation identity.
@@ -489,7 +490,7 @@ def test_submit_persists_and_replays_containment_provenance(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     record = implementation(attempt.attempt_id, "a" * 40)
     plan = run_plan(store, attempt, record)
@@ -531,7 +532,7 @@ def test_submit_requires_plan_and_rejects_primary_or_unbound_spec_binding(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     record = implementation(attempt.attempt_id, commit)
@@ -580,7 +581,7 @@ def test_frozen_hypothesis_and_closed_attempt_are_sqlite_immutable(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, _source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     with pytest.raises(sqlite3.DatabaseError), store._connect() as conn:
         conn.execute("UPDATE hypotheses SET spec_json='changed' WHERE hypothesis_id='H0001'")
     with pytest.raises(sqlite3.DatabaseError), store._connect() as conn:
@@ -597,7 +598,7 @@ def test_owner_lock_and_closed_attempt_trigger(
     store.acquire_owner_lock()
     with pytest.raises(OwnerLockHeld):
         second.acquire_owner_lock()
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(
@@ -622,7 +623,7 @@ def test_review_is_idempotent_repairs_projection_and_is_insert_only(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(
@@ -866,7 +867,7 @@ def test_reconcile_repairs_missing_projection_without_launching(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     record = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(
@@ -919,7 +920,7 @@ def test_run_reservation_is_atomic_before_worker_launch(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     record = implementation(attempt.attempt_id, "a" * 40)
     plan = run_plan(store, attempt, record)
@@ -954,7 +955,7 @@ def test_frozen_payload_authority_cannot_be_rewritten(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, _source, hypothesis = campaign
-    frozen = store.freeze(hypothesis.hypothesis_id)
+    frozen = freeze_with_probe(store, hypothesis.hypothesis_id)
     with store._connect() as conn:
         payload = json.loads(
             conn.execute(
@@ -977,7 +978,7 @@ def test_pause_close_commits_attempt_and_campaign_together(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     record = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(
@@ -1012,7 +1013,7 @@ def test_hypothesis_create_requires_decided_previous_and_reconcile_repairs(
             Path(hypothesis.evaluation_spec_path),
             "a" * 40,
         )
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     store.decide_hypothesis(
         hypothesis.hypothesis_id,
         __import__(

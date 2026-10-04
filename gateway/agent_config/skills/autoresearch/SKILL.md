@@ -69,6 +69,21 @@ remain limited to the operations authorized by this contract (including
 review-collect); policy, ledger, runtime-registration,
 run-release-unstarted, and run-reverify mutations remain operator-only.
 
+Freeze sequence: create → `compute-probe HYPOTHESIS_ID --root ROOT` (owner or
+operator; DRAFT only; recorded once; it needs the non-blocking run lock, so it
+is refused while a dispatch or run command holds that lock, and it can take
+tens of minutes to hours) → `hypothesis-set-compute` with `--max-rss-mb` at
+least the probe's `min_rss_mb` → `hypothesis-freeze`. The probe measures
+`validate-inputs` per spec and an empty-target `evaluate` under the worker's
+containment and prints `min_rss_mb` and `min_scenario_timeout_seconds`. Freeze
+refuses without a probe or with a smaller `compute.max_rss_mb`; implementation
+submit refuses a run plan whose `scenario_timeout_seconds` is below
+`min_scenario_timeout_seconds`; `run --max-rss-mb` may not undercut either
+bound. A failed or timed-out probe records nothing; fix the cause and retry. A
+DRAFT whose requirements are infeasible within driver bounds (or whose spec
+cannot be repaired) is abandoned with `hypothesis-decide HYPOTHESIS_ID
+--decision ABANDONED --reason ...`; only ABANDONED is allowed from DRAFT.
+
 Read existing research status/control surfaces and durable receipts. Do not
 invent command names, flags, routes, state fields, or acknowledgements. Admission
 consumes immutable hypothesis/spec/panel/receipt/evaluator digests, trusted

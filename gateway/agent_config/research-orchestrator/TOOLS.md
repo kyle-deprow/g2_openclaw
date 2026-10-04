@@ -32,6 +32,9 @@ run-release-unstarted, and run-reverify mutations remain operator-only.
 Do not invent flags, providers, routes, or command names. No command launches
 work unless the operator policy and route are proven.
 
+Freeze sequence (`compute-probe` first, then `hypothesis-set-compute`, then freeze): see the
+autoresearch skill.
+
 Reserve with `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY
 --owner-key OWNER_KEY --openclaw-database
 /home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`.

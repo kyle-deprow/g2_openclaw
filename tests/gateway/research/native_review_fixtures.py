@@ -37,7 +37,7 @@ from typing import Any
 from gateway.research.review_evidence import ReviewReservation, reconcile_review, reserve_review
 from gateway.research.store import ResearchStore, canonical_wake_key
 
-from tests.gateway.research.conftest import provenance_evidence, run_plan
+from tests.gateway.research.conftest import freeze_with_probe, provenance_evidence, run_plan
 
 OWNER_SESSION = "agent:research-orchestrator:autoresearch:test"
 OWNER_RUN_ID = "owner-run-1"
@@ -290,7 +290,7 @@ def _setup(
     store, source, hypothesis = campaign
     evidence = tmp_path / "tests.json"
     evidence.write_text('{"pytest":"pass"}\n', encoding="utf-8")
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     from gateway.research.contracts import ImplementationRecord

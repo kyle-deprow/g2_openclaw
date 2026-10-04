@@ -184,6 +184,13 @@ not automatically mounted analysis inputs: do not invent mounts or arguments
 or leak host paths. Frozen future specs, RunPlans, synthetic fixtures, and
 reviewed analysis must agree with this container contract.
 
+Freeze sequence: create → `compute-probe HYPOTHESIS_ID --root ROOT` (if none is
+recorded; it measures real cost and can take tens of minutes to hours) →
+`hypothesis-set-compute` with `--max-rss-mb` at least its `min_rss_mb` →
+`hypothesis-freeze`. A DRAFT that cannot be frozen (infeasible probe) is
+abandoned with `hypothesis-decide HYPOTHESIS_ID --root ROOT --decision ABANDONED
+--reason "..."`.
+
 For a fresh hypothesis, author and freeze one immutable `EvaluationSpecSet`
 manifest before review. Its regular, digest-bound evaluator files must share
 the primary panel, universe, dates, horizon, and operator-policy bounds; only

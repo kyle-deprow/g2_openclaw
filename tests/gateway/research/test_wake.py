@@ -23,6 +23,7 @@ from gateway.research.wake import (
 )
 
 from tests.gateway.research.conftest import (
+    freeze_with_probe,
     implementation,
     provenance_evidence,
     review,
@@ -69,7 +70,7 @@ def test_wake_composes_each_state_and_failed_owner_turn_is_recorded(
     poll_owner_turn(store, sender, required=True)
     assert store.wake_rows()[-1]["turn_status"] == "error"
     assert any(event.kind == "owner_turn_failed" for event in store.events())
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     assert compose_wake(store).state == "FROZEN"  # type: ignore[union-attr]
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     opened_wake = compose_wake(store)
@@ -322,7 +323,7 @@ def test_wake_compose_terminal_states_requests_close_decision(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(
@@ -354,7 +355,7 @@ def test_wake_after_finished_attempt_requests_hypothesis_decision(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(
@@ -379,7 +380,7 @@ def test_wake_after_retry_requests_next_attempt(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(
@@ -402,7 +403,7 @@ def test_wake_after_pause_remains_quiet(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(attempt.attempt_id, "a" * 40)
     store.submit_implementation(
@@ -426,7 +427,7 @@ def test_wake_preserves_draft_fresh_frozen_and_decided_paths(
     draft = compose_wake(store)
     assert draft is not None
     assert draft.state == "DRAFT"
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     fresh = compose_wake(store)
     assert fresh is not None
     assert fresh.state == "FROZEN"
@@ -443,7 +444,7 @@ def test_wake_identity_changes_across_retry_and_finish_without_rewriting_unknown
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     initial = compose_wake(store)
     assert initial is not None
 
@@ -498,7 +499,7 @@ def test_wake_uses_highest_numbered_closed_attempt_decision(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     first = store.open_attempt(hypothesis.hypothesis_id, source)
     impl = implementation(first.attempt_id, "a" * 40)
     store.submit_implementation(

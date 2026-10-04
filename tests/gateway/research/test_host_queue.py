@@ -34,7 +34,12 @@ from gateway.research.jobs import JobError, JobRecord, TargetValidationError
 from gateway.research.store import ResearchStore, StoreConflict, validate_queue_limits
 from typer.testing import CliRunner
 
-from tests.gateway.research.conftest import provenance_evidence, review, verified_review
+from tests.gateway.research.conftest import (
+    freeze_with_probe,
+    provenance_evidence,
+    review,
+    verified_review,
+)
 from tests.gateway.research.conftest import run_plan as fixture_run_plan
 from tests.gateway.research.test_admission import _admit, _document, _payload
 from tests.gateway.research.test_readiness import configure_real_readiness
@@ -49,7 +54,7 @@ def _ready(
     targets_argv: tuple[str, ...] | None = None,
 ) -> Attempt:
     if store.get_hypothesis(hypothesis.hypothesis_id).state.value == "DRAFT":
-        store.freeze(hypothesis.hypothesis_id)
+        freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=source, text=True).strip()
     implementation_record = ImplementationRecord(
@@ -598,7 +603,7 @@ def test_three_attempt_retry_and_second_hypothesis_queue_lifecycle(
         store.close_attempt(attempt.attempt_id, decision, f"attempt {number}")
     store.decide_hypothesis(hypothesis.hypothesis_id, HypothesisDecision.FINISHED, "three attempts")
     spec_file = store.root / "second-spec.json"
-    spec_file.write_text('{"second":true}', encoding="utf-8")
+    spec_file.write_text(json.dumps(_payload()), encoding="utf-8")
     second_eval = Path(hypothesis.evaluation_spec_path)
     second_set = store.root / "second-evaluation-spec-set.json"
     second_set.write_text(

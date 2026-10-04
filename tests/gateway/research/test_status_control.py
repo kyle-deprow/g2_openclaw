@@ -23,7 +23,8 @@ from gateway.research.jobs import cancel as cancel_job
 from gateway.research.status import ResearchStatus, build_status_frame, read_status
 from gateway.research.store import ResearchStore
 
-from tests.gateway.research.conftest import provenance_evidence, run_plan
+from tests.gateway.research.conftest import freeze_with_probe, provenance_evidence, run_plan
+from tests.gateway.research.test_admission import _payload
 
 
 def _db(root: Path) -> sqlite3.Connection:
@@ -281,7 +282,7 @@ def _attempt_fixture(root: Path, *, review: bool = True) -> tuple[ResearchStore,
     receipt = root / "receipt.json"
     eval_spec = root / "evaluation.json"
     dividends = root / "dividends.json"
-    spec_file.write_text('{"objective":"test"}', encoding="utf-8")
+    spec_file.write_text(json.dumps(_payload()), encoding="utf-8")
     panel.write_text("panel", encoding="utf-8")
     receipt.write_text("receipt", encoding="utf-8")
     eval_spec.write_text("evaluation", encoding="utf-8")
@@ -311,7 +312,7 @@ def _attempt_fixture(root: Path, *, review: bool = True) -> tuple[ResearchStore,
         dividends,
         evaluation_spec_set=spec_set,
     )
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, root / "worktree")
     implementation = ImplementationRecord(
         attempt_id=attempt.attempt_id,

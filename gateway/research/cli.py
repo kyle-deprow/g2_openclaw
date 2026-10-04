@@ -39,17 +39,22 @@ from .admission import (
     ValidationReceipt,
     admit_hypothesis,
 )
+from .compute_probe import run_compute_probe
 from .containment import RuntimePins, runtime_pins_from_record
 from .contracts import (
     MAX_RUN_TIMEOUT_SECONDS,
     MAX_STAGE_RSS_MB,
+    RUN_OVERHEAD_SECONDS,
     Attempt,
     AttemptDecision,
     AttemptState,
     HypothesisDecision,
+    HypothesisSpec,
+    HypothesisState,
     ImplementationRecord,
     RunOutcome,
     RunPlan,
+    compute_requirements,
 )
 from .host_records import HostRecordError, managed_native_databases
 from .hypothesis import HypothesisDocument
@@ -265,6 +270,47 @@ def hypothesis_create(
 def hypothesis_freeze(hypothesis_id: str, root: Path = typer.Option(..., "--root")) -> None:
     try:
         typer.echo(ResearchStore(_root(root)).freeze(hypothesis_id).state.value)
+    except Exception as exc:
+        _fail(exc)
+
+
+@app.command("compute-probe")
+def compute_probe_command(hypothesis_id: str, root: Path = typer.Option(..., "--root")) -> None:
+    """Measure validate-inputs and an empty-target evaluate under real containment."""
+    store: ResearchStore | None = None
+    try:
+        store = ResearchStore(_root(root))
+        probe = run_compute_probe(store, hypothesis_id)
+        typer.echo(
+            json.dumps(
+                {
+                    "probe_id": probe.probe_id,
+                    "stages": [stage.to_json_value() for stage in probe.stages],
+                    "requirements": compute_requirements(probe).as_dict(),
+                },
+                sort_keys=True,
+            )
+        )
+    except Exception as exc:
+        _fail(exc)
+    finally:
+        if store is not None:
+            store.release_run_lock()
+
+
+@app.command("hypothesis-set-compute")
+def hypothesis_set_compute(
+    hypothesis_id: str,
+    root: Path = typer.Option(..., "--root"),
+    max_rss_mb: int = typer.Option(..., "--max-rss-mb"),
+    max_wall_seconds: float = typer.Option(..., "--max-wall-seconds"),
+) -> None:
+    """Set compute.max_rss_mb / compute.max_wall_seconds of a DRAFT hypothesis."""
+    try:
+        spec = ResearchStore(_root(root)).set_draft_compute(
+            hypothesis_id, max_wall_seconds, max_rss_mb
+        )
+        typer.echo(spec.spec_sha256)
     except Exception as exc:
         _fail(exc)
 
@@ -1616,7 +1662,7 @@ def _reconcile_jobs(store: ResearchStore) -> None:
                 _mark_job_state(store, attempt.attempt_id, state)
 
 
-_RUN_OVERHEAD_SECONDS = 300.0
+_RUN_OVERHEAD_SECONDS = RUN_OVERHEAD_SECONDS
 
 
 def _resolve_run_timeout(plan: RunPlan, requested: float | None) -> float:
@@ -1640,6 +1686,25 @@ def _resolve_run_max_rss(store: ResearchStore, hypothesis_id: str, requested: in
     unreadable frozen spec is refused rather than silently given a default.
     """
     if requested is not None:
+        probe = store.compute_probe(hypothesis_id)
+        if probe is not None:
+            # An explicit flag may not undercut the measured/frozen bound.
+            try:
+                frozen_rss = HypothesisDocument.from_json(
+                    store.get_hypothesis(hypothesis_id).spec_json
+                ).compute.max_rss_mb
+            except ValueError as exc:
+                raise JobError(
+                    f"frozen hypothesis {hypothesis_id} spec cannot supply "
+                    f"compute.max_rss_mb ({exc})"
+                ) from exc
+            minimum = max(compute_requirements(probe).min_rss_mb, frozen_rss)
+            if requested < minimum:
+                raise JobError(
+                    f"--max-rss-mb {requested} is below the minimum {minimum} "
+                    f"(measured compute probe requires {compute_requirements(probe).min_rss_mb}; "
+                    f"frozen compute.max_rss_mb is {frozen_rss})"
+                )
         return requested
     try:
         document = HypothesisDocument.from_json(store.get_hypothesis(hypothesis_id).spec_json)
@@ -1941,6 +2006,25 @@ def _status_refusal(store: ResearchStore, hypothesis_id: str) -> dict[str, objec
     return {"reason": reason, "detail": detail}
 
 
+def _status_compute_probe(store: ResearchStore, hypothesis: HypothesisSpec) -> dict[str, object]:
+    """Additive status field for a DRAFT hypothesis: probe recorded? and its requirements."""
+    if hypothesis.state != HypothesisState.DRAFT:
+        return {}
+    try:
+        probe = store.compute_probe(hypothesis.hypothesis_id)
+    except (StoreConflict, ValueError) as exc:
+        return {"compute_probe": {"recorded": False, "unavailable_reason": str(exc)}}
+    if probe is None:
+        return {"compute_probe": {"recorded": False}}
+    return {
+        "compute_probe": {
+            "recorded": True,
+            "probe_id": probe.probe_id,
+            "requirements": compute_requirements(probe).as_dict(),
+        }
+    }
+
+
 @app.command("status")
 def status(
     root: Path = typer.Option(..., "--root"), as_json: bool = typer.Option(False, "--json")
@@ -1974,6 +2058,7 @@ def status(
                     "hypothesis_id": h.hypothesis_id,
                     "state": h.state.value,
                     "admission_refusal": _status_refusal(store, h.hypothesis_id),
+                    **_status_compute_probe(store, h),
                     "attempts": [
                         {
                             "attempt_id": a.attempt_id,

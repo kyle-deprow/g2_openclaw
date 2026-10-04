@@ -37,6 +37,7 @@ from gateway.research.wake import compose_wake
 from typer.testing import CliRunner
 
 from tests.gateway.research.conftest import (
+    freeze_with_probe,
     implementation,
     provenance_evidence,
     review,
@@ -196,7 +197,7 @@ def test_policy_cli_status_round_trip_keeps_decision_and_latest_refusal(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     store.insert_admission_decision(
         attempt.attempt_id,
@@ -646,7 +647,7 @@ def test_attempt_open_cli_wires_capability_and_earnings_refusals(
     expected: str | None,
 ) -> None:
     store, source, stored_hypothesis = campaign
-    store.freeze(stored_hypothesis.hypothesis_id)
+    freeze_with_probe(store, stored_hypothesis.hypothesis_id)
     spec = _wired_spec(
         replace(stored_hypothesis, state=HypothesisState.FROZEN),
         tmp_path,
@@ -690,7 +691,7 @@ def test_dispatch_policy_race_releases_pending_attempt_without_readiness_or_budg
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     admitted = _admit(
         _document(_payload()),
         evaluation_spec_set_sha256=_stored_spec_set_digest(store, hypothesis.hypothesis_id),
@@ -746,7 +747,7 @@ def test_attempt_cap_pause_cancel_and_status_remain_safe(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     for number in (1, 2):
         attempt = store.open_attempt(hypothesis.hypothesis_id, source)
         record = implementation(attempt.attempt_id, "a" * 40)
@@ -849,7 +850,7 @@ def test_admission_decision_is_insert_only_and_replay_bound(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, source, _hypothesis = campaign
-    store.freeze("H0001")
+    freeze_with_probe(store, "H0001")
     attempt = store.open_attempt("H0001", source)
     payload = _payload()
     decision = _admit(
@@ -872,7 +873,7 @@ def test_wired_policy_unset_pauses_status_and_suppresses_wake(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, _source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     payload = _payload()
     decision = _admit(_document(payload), policy=CampaignPolicy(False))
     assert decision.reason is AdmissionReason.CAMPAIGN_POLICY_UNSET
@@ -894,7 +895,7 @@ def test_nonpausing_refusal_reason_is_visible_in_owner_wake(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, _source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     decision = _admit(_document(_payload()), capability=ExecutionCapability(frozenset({"reddit"})))
     assert decision.reason is AdmissionReason.INPUT_CAPABILITY_UNSUPPORTED
     store.record_admission_refusal(hypothesis.hypothesis_id, decision)
@@ -934,7 +935,7 @@ def test_unset_policy_refusal_pauses_campaign_and_is_status_ready(
     campaign: tuple[ResearchStore, Path, HypothesisSpec],
 ) -> None:
     store, _source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     decision = _admit(_document(_payload()), policy=CampaignPolicy(False))
 
     _record_admission_refusal(store, hypothesis.hypothesis_id, decision)

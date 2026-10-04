@@ -89,10 +89,23 @@ def _write_readonly(path: Path, text: str) -> Path:
     return path
 
 
-def _build_golden(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, failing_second_spec: bool
-) -> Golden:
-    """Configure, freeze, implement, review and admit a two-scenario attempt."""
+@dataclass(frozen=True)
+class GoldenDraft:
+    """A configured store with one DRAFT golden hypothesis (not yet probed or frozen)."""
+
+    store: ResearchStore
+    source: Path
+    hypothesis: HypothesisSpec
+    venv: Path
+    panel: Path
+    receipt: Path
+    specs: tuple[Path, ...]
+
+
+def golden_draft(
+    tmp_path: Path, *, failing_second_spec: bool = False, failing_first_spec: bool = False
+) -> GoldenDraft:
+    """Configure real runtime pins and create (without freezing) the golden hypothesis."""
     inputs = tmp_path / "inputs"
     # Real runtime pins: shared venv python, pinned evaluator console script, snapshot.
     snapshot = tmp_path / "snapshot"
@@ -120,7 +133,10 @@ def _build_golden(
     spec = inputs / "spec.json"
     spec.write_text(json.dumps(_payload()), encoding="utf-8")
     specs = (
-        _write_readonly(inputs / "eval-c000.json", '{"cost_bps":1}'),
+        _write_readonly(
+            inputs / "eval-c000.json",
+            '{"cost_bps":1,"golden_fail":true}' if failing_first_spec else '{"cost_bps":1}',
+        ),
         _write_readonly(
             inputs / "eval-c001.json",
             '{"cost_bps":3,"golden_fail":true}' if failing_second_spec else '{"cost_bps":3}',
@@ -163,7 +179,26 @@ def _build_golden(
         dividends=dividends,
         evaluation_spec_set=spec_set,
     )
-    store.freeze(hypothesis.hypothesis_id)
+    return GoldenDraft(store, source, hypothesis, venv, panel, receipt, specs)
+
+
+def freeze_golden(draft: GoldenDraft) -> None:
+    """Record a REAL compute probe (real containment) via the CLI, then freeze."""
+    result = _call(draft.store.root, "compute-probe", draft.hypothesis.hypothesis_id)
+    probe = json.loads(result.output)
+    assert probe["requirements"]["min_rss_mb"] <= 1024, probe
+    assert probe["requirements"]["min_scenario_timeout_seconds"] <= SCENARIO_TIMEOUT_SECONDS, probe
+    draft.store.freeze(draft.hypothesis.hypothesis_id)
+
+
+def _build_golden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, failing_second_spec: bool
+) -> Golden:
+    """Configure, freeze, implement, review and admit a two-scenario attempt."""
+    draft = golden_draft(tmp_path, failing_second_spec=failing_second_spec)
+    store, source, hypothesis, venv = draft.store, draft.source, draft.hypothesis, draft.venv
+    panel, receipt = draft.panel, draft.receipt
+    freeze_golden(draft)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
     run_dir = (
         store.root

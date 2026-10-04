@@ -10,6 +10,7 @@ explicit unavailable result when the database cannot be trusted.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -22,6 +23,8 @@ from pathlib import Path
 from typing import Literal
 
 from websockets.exceptions import ConnectionClosed
+
+from .contracts import ComputeProbe, compute_requirements
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +72,8 @@ class ResearchStatus:
     updated_at: str | None
     available: bool = True
     unavailable_reason: str | None = None
+    # Additive: only set while the newest hypothesis is a DRAFT.
+    compute_probe: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         """Return the snake-case representation used by Python callers."""
@@ -268,6 +273,32 @@ def _systemd_state(unit: str) -> str:
     return "unknown"
 
 
+def _draft_compute_probe(conn: sqlite3.Connection, hypothesis_id: str) -> dict[str, object]:
+    """Whether a DRAFT hypothesis has a compute probe, and the bounds it requires."""
+    try:
+        row = conn.execute(
+            "SELECT payload_json,payload_sha256 FROM hypothesis_evidence "
+            "WHERE hypothesis_id=? AND kind='compute_probe'",
+            (hypothesis_id,),
+        ).fetchone()
+    except sqlite3.DatabaseError:
+        return {"recorded": False}
+    if row is None:
+        return {"recorded": False}
+    payload = str(row["payload_json"])
+    if hashlib.sha256(payload.encode()).hexdigest() != str(row["payload_sha256"]):
+        return {"recorded": False, "unavailable_reason": "compute probe payload digest mismatch"}
+    try:
+        probe = ComputeProbe.from_json(payload)
+    except (ValueError, TypeError):
+        return {"recorded": False, "unavailable_reason": "compute probe record is unreadable"}
+    return {
+        "recorded": True,
+        "probeId": probe.probe_id,
+        "requirements": compute_requirements(probe).as_dict(),
+    }
+
+
 def _read_status_from_connection(
     conn: sqlite3.Connection,
     root: Path,
@@ -297,6 +328,9 @@ def _read_status_from_connection(
             "SELECT seq,at,hypothesis_id,attempt_id,kind,detail,actor FROM events ORDER BY seq"
         ).fetchall()
         latest = events[-1] if events else None
+        compute_probe = None
+        if hypothesis is not None and str(hypothesis["state"]) == "DRAFT":
+            compute_probe = _draft_compute_probe(conn, str(hypothesis["hypothesis_id"]))
         status = ResearchStatus(
             hypothesis_id=str(hypothesis["hypothesis_id"]) if hypothesis is not None else None,
             hypothesis_state=str(hypothesis["state"]) if hypothesis is not None else None,
@@ -316,6 +350,7 @@ def _read_status_from_connection(
                 if attempt is not None
                 else (str(latest["at"]) if latest is not None else None)
             ),
+            compute_probe=compute_probe,
         )
     finally:
         conn.rollback()
@@ -372,6 +407,7 @@ def build_status_frame(status: ResearchStatus) -> dict[str, object]:
         "updatedAt": status.updated_at,
         "available": status.available,
         "unavailableReason": status.unavailable_reason,
+        **({"computeProbe": status.compute_probe} if status.compute_probe is not None else {}),
     }
 
 

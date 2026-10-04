@@ -11,12 +11,15 @@ from pathlib import Path
 
 import pytest
 from gateway.research.contracts import (
+    COMPUTE_PROBE_CONTRACT,
     AnalysisPlan,
     Attempt,
+    ComputeProbe,
     EvaluationSpecEntry,
     EvaluationSpecSet,
     HypothesisSpec,
     ImplementationRecord,
+    ProbeStage,
     ReviewEvidence,
     RunPlan,
     RunScenario,
@@ -244,3 +247,45 @@ def verified_review(store: ResearchStore, record: ReviewEvidence) -> Attempt:
         store.get_attempt(record.attempt_id), "review", record.to_json()
     )
     return result
+
+
+def record_probe(
+    store: ResearchStore,
+    hypothesis_id: str,
+    *,
+    peak_rss_mb: int = 1,
+    wall_seconds: float = 0.5,
+) -> ComputeProbe:
+    """Record a synthetic (not measured) compute probe bound to the real store digests.
+
+    Unit tests that only need a freezable hypothesis use this; the real measurement is
+    covered by ``test_compute_probe.py`` and the golden run.  The record goes through the
+    same ``record_compute_probe`` validation as a measured one.
+    """
+    pins, inputs = store.probe_bindings(hypothesis_id)
+    spec_set = store.evaluation_spec_set(hypothesis_id)
+    stages = (
+        *(
+            ProbeStage(f"validate-{entry.spec_id}", entry.spec_id, 0, wall_seconds, peak_rss_mb)
+            for entry in spec_set.specs
+        ),
+        ProbeStage("evaluate-s000", spec_set.specs[0].spec_id, 0, wall_seconds, peak_rss_mb),
+    )
+    probe = ComputeProbe(
+        COMPUTE_PROBE_CONTRACT,
+        "P000000000001",
+        hypothesis_id,
+        pins,
+        inputs,
+        stages,
+        "2026-01-01T00:00:00Z",
+    )
+    store.record_compute_probe(probe)
+    return probe
+
+
+def freeze_with_probe(store: ResearchStore, hypothesis_id: str) -> HypothesisSpec:
+    """Freeze a DRAFT hypothesis, recording a synthetic probe first when none exists."""
+    if store.compute_probe(hypothesis_id) is None:
+        record_probe(store, hypothesis_id)
+    return store.freeze(hypothesis_id)

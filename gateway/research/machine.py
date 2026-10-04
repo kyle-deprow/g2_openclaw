@@ -212,6 +212,15 @@ def decide_hypothesis(
 ) -> HypothesisSpec:
     if not isinstance(decision, HypothesisDecision):
         raise ValueError("decision must be a HypothesisDecision")
+    attempts = tuple(attempts)
+    if hypothesis.state == HypothesisState.DRAFT:
+        # A DRAFT that cannot be frozen (e.g. an infeasible compute probe) must not block the
+        # campaign forever; its only exit is an explicit abandon, and it has no attempts.
+        if decision != HypothesisDecision.ABANDONED:
+            raise IllegalTransition(hypothesis.state.value, "DECIDED:" + decision.value)
+        if attempts:
+            raise IllegalTransition("DRAFT_WITH_ATTEMPTS", HypothesisState.DECIDED.value)
+        return replace(hypothesis, state=HypothesisState.DECIDED)
     if hypothesis.state != HypothesisState.FROZEN:
         raise IllegalTransition(hypothesis.state.value, HypothesisState.DECIDED.value)
     if any(attempt.state != AttemptState.CLOSED for attempt in attempts):

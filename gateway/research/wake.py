@@ -13,9 +13,9 @@ from typing import Protocol
 
 from gateway.openclaw_client import OpenClawClient, OpenClawTransportError
 
-from .contracts import AttemptDecision, AttemptState, HypothesisState
+from .contracts import AttemptDecision, AttemptState, HypothesisState, compute_requirements
 from .host_records import HostRecordError, managed_native_databases
-from .store import ResearchStore, canonical_wake_key
+from .store import ResearchStore, StoreConflict, canonical_wake_key
 
 
 class WakeRejected(RuntimeError):
@@ -100,6 +100,35 @@ def _managed_native_review_paths() -> tuple[str, str] | None:
     return str(stores.openclaw_database), str(stores.codex_state_database)
 
 
+_FREEZE_SEQUENCE = (
+    "run `gateway-cli research compute-probe {hid} --root ROOT` (it measures real validate-inputs "
+    "and evaluate cost and can take tens of minutes to hours; it is recorded once), copy its "
+    "`min_rss_mb` into the spec with `hypothesis-set-compute {hid} --root ROOT --max-rss-mb N "
+    "--max-wall-seconds S`, then `hypothesis-freeze {hid} --root ROOT`. A DRAFT that cannot be "
+    "frozen (infeasible probe) is abandoned with `hypothesis-decide {hid} --root ROOT --decision "
+    "ABANDONED --reason ...`."
+)
+
+
+def _draft_wake_text(store: ResearchStore, hypothesis_id: str) -> str:
+    try:
+        probe = store.compute_probe(hypothesis_id)
+    except (StoreConflict, ValueError):
+        probe = None
+    if probe is None:
+        return f"Astra: DRAFT hypothesis {hypothesis_id} has no compute probe; {_FREEZE_SEQUENCE.format(hid=hypothesis_id)}"
+    required = compute_requirements(probe)
+    return (
+        f"Astra: DRAFT hypothesis {hypothesis_id} has a recorded compute probe "
+        f"(min_rss_mb={required.min_rss_mb}, min_scenario_timeout_seconds="
+        f"{required.min_scenario_timeout_seconds}); set `compute.max_rss_mb` >= min_rss_mb with "
+        f"`gateway-cli research hypothesis-set-compute {hypothesis_id} --root ROOT --max-rss-mb N "
+        f"--max-wall-seconds S`, then `hypothesis-freeze {hypothesis_id} --root ROOT`. If the "
+        f"requirements are infeasible, abandon with `hypothesis-decide {hypothesis_id} --root ROOT "
+        f"--decision ABANDONED --reason ...`."
+    )
+
+
 def compose_wake(store: ResearchStore) -> WakePlan | None:
     status, resume_seq = store.campaign()
     if status == "PAUSED":
@@ -112,7 +141,7 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
                 "H0001",
                 None,
                 "NO_HYPOTHESIS",
-                "Astra: create and freeze one hypothesis with `gateway-cli research hypothesis-create --root ROOT ...`.",
+                f"Astra: create one hypothesis with `gateway-cli research hypothesis-create --root ROOT ...`, then {_FREEZE_SEQUENCE.format(hid='H0001')}",
                 _key("H0001", None, "NO_HYPOTHESIS", resume_seq),
                 resume_seq,
             )
@@ -123,7 +152,7 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
                 next_id,
                 None,
                 "ALL_DECIDED",
-                f"Astra: author and freeze the next hypothesis {next_id}; all existing hypotheses are DECIDED.",
+                f"Astra: author the next hypothesis {next_id} (all existing hypotheses are DECIDED), then {_FREEZE_SEQUENCE.format(hid=next_id)}",
                 _key(next_id, None, "ALL_DECIDED", resume_seq),
                 resume_seq,
             )
@@ -134,7 +163,7 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
             draft.hypothesis_id,
             None,
             draft.state.value,
-            f"Astra: freeze hypothesis {draft.hypothesis_id} with `gateway-cli research hypothesis-freeze {draft.hypothesis_id} --root ROOT`.",
+            _draft_wake_text(store, draft.hypothesis_id),
             _key(draft.hypothesis_id, None, draft.state.value, resume_seq),
             resume_seq,
         )

@@ -30,6 +30,7 @@ from gateway.research.status import ResearchStatus
 from gateway.research.store import ResearchStore, StoreConflict
 from gateway.research.wake import OpenClawWakeSender, compose_wake, deliver, poll_owner_turn
 
+from tests.gateway.research.conftest import freeze_with_probe
 from tests.gateway.research.native_review_fixtures import OWNER_SESSION, prepare_review
 from tests.gateway.research.test_admission import _admit, _document, _payload
 
@@ -294,7 +295,7 @@ def test_budget_guard_allows_admitted_attempt_at_cap_one(
     campaign: tuple[ResearchStore, Path, Any],
 ) -> None:
     store, source, hypothesis = campaign
-    store.freeze(hypothesis.hypothesis_id)
+    freeze_with_probe(store, hypothesis.hypothesis_id)
     spec_set_digest = hashlib.sha256(
         store.evaluation_spec_set(hypothesis.hypothesis_id).to_json().encode()
     ).hexdigest()

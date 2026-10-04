@@ -23,6 +23,7 @@ from typing import Any
 from .containment import (
     ContainmentError,
     RuntimePins,
+    StagePeak,
     StagePlan,
     host_bus_environment,
     stage_plan,
@@ -166,7 +167,34 @@ def _worker_term(_signum: int, _frame: object) -> None:
     raise SystemExit(143)
 
 
-def _stage(plan: StagePlan, cwd: Path, out: Path, deadline: float) -> tuple[int, bool]:
+def _wait_measured(
+    process: subprocess.Popen[Any], scope_unit: str, deadline: float, peak: StagePeak
+) -> None:
+    """Wait for the stage like ``Popen.wait`` while recording its peak memory.
+
+    Raises ``subprocess.TimeoutExpired`` at the deadline.  The child is reaped with
+    ``os.wait4`` so its tree's ``ru_maxrss`` is captured; ``returncode`` is set here
+    because ``Popen`` can no longer reap an already-waited child.
+    """
+    while True:
+        peak.sample_cgroup(process.pid, scope_unit)
+        waited, status, usage = os.wait4(process.pid, os.WNOHANG)
+        if waited == process.pid:
+            peak.record_rusage(usage.ru_maxrss)
+            process.returncode = os.waitstatus_to_exitcode(status)
+            return
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired(process.args, 0)
+        time.sleep(0.02)
+
+
+def _stage(
+    plan: StagePlan,
+    cwd: Path,
+    out: Path,
+    deadline: float,
+    peak: StagePeak | None = None,
+) -> tuple[int, bool]:
     global _ACTIVE_SCOPE, _ACTIVE_STAGE
     scope_unit = plan.scope_unit
     argv = plan.argv
@@ -209,7 +237,11 @@ def _stage(plan: StagePlan, cwd: Path, out: Path, deadline: float) -> tuple[int,
             )
             remaining = deadline - time.monotonic()
             try:
-                process.wait(timeout=max(0.01, remaining))
+                if peak is None:
+                    process.wait(timeout=max(0.01, remaining))
+                else:
+                    wait_until = time.monotonic() + max(0.01, remaining)
+                    _wait_measured(process, scope_unit, wait_until, peak)
             except subprocess.TimeoutExpired:
                 _stop(process, scope_unit)
                 return (
@@ -233,6 +265,54 @@ def _stage(plan: StagePlan, cwd: Path, out: Path, deadline: float) -> tuple[int,
                 with contextlib.suppress(FileNotFoundError):
                     active_path.unlink()
         return process.returncode or 0, False
+
+
+def validate_inputs_command(pins: RuntimePins) -> tuple[str, ...]:
+    """The one in-sandbox ``validate-inputs`` command (shared with the compute probe)."""
+    return (
+        str(pins.shared_python),
+        "-P",
+        "-s",
+        str(pins.evaluator),
+        "research",
+        "validate-inputs",
+        "--panel",
+        "/inputs/panel.parquet",
+        "--receipt",
+        "/inputs/receipt.json",
+        "--spec",
+        "/inputs/spec.json",
+        "--dividends",
+        "/inputs/dividends.json",
+        "--universe",
+        "/universe.json",
+    )
+
+
+def evaluate_command(pins: RuntimePins) -> tuple[str, ...]:
+    """The one in-sandbox ``evaluate`` command (shared with the compute probe)."""
+    return (
+        str(pins.shared_python),
+        "-P",
+        "-s",
+        str(pins.evaluator),
+        "research",
+        "evaluate",
+        "--panel",
+        "/inputs/panel.parquet",
+        "--receipt",
+        "/inputs/receipt.json",
+        "--spec",
+        "/inputs/spec.json",
+        "--targets",
+        "/targets.json",
+        "--dividends",
+        "/inputs/dividends.json",
+        "--out",
+        "/stage/out",
+        "--require-source-root",
+        "/snapshot/src",
+    )
 
 
 def _digest_matches(path: Path, expected: str | None) -> bool:
@@ -453,24 +533,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             raise ContainmentError("run plan stage timeouts exceed the job timeout")
         semantic_by_spec: dict[str, str] = {}
         for spec_id, spec_path in sorted(spec_paths.items()):
-            validation_command = (
-                str(pins.shared_python),
-                "-P",
-                "-s",
-                str(pins.evaluator),
-                "research",
-                "validate-inputs",
-                "--panel",
-                "/inputs/panel.parquet",
-                "--receipt",
-                "/inputs/receipt.json",
-                "--spec",
-                "/inputs/spec.json",
-                "--dividends",
-                "/inputs/dividends.json",
-                "--universe",
-                "/universe.json",
-            )
+            validation_command = validate_inputs_command(pins)
             stage_name = f"validate-{spec_id}"
             validation_plan = stage_plan(
                 pins,
@@ -627,28 +690,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             _require_empty_directory(evaluator_dir, "scenario evaluator stage")
             evaluator_provenance_dir = evaluator_dir / "provenance"
             _owned_directory(evaluator_provenance_dir, "evaluator provenance")
-            evaluator_command = (
-                str(pins.shared_python),
-                "-P",
-                "-s",
-                str(pins.evaluator),
-                "research",
-                "evaluate",
-                "--panel",
-                "/inputs/panel.parquet",
-                "--receipt",
-                "/inputs/receipt.json",
-                "--spec",
-                "/inputs/spec.json",
-                "--targets",
-                "/targets.json",
-                "--dividends",
-                "/inputs/dividends.json",
-                "--out",
-                "/stage/out",
-                "--require-source-root",
-                "/snapshot/src",
-            )
+            evaluator_command = evaluate_command(pins)
             evaluator_plan = stage_plan(
                 pins,
                 str(job["job_id"]),

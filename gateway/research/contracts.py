@@ -79,6 +79,12 @@ _MAX_SCENARIOS = 16
 # Single source of truth for run limits; store, worker, jobs, cli and hypothesis import these.
 MAX_RUN_TIMEOUT_SECONDS = 28800
 MAX_STAGE_RSS_MB = 16384
+# Fixed driver overhead added to a plan's stage budget to derive the run timeout.
+RUN_OVERHEAD_SECONDS = 300.0
+# RunPlan accepts any positive analysis timeout; 1 s is the smallest sensible one.
+MIN_ANALYSIS_SECONDS = 1.0
+# The smallest valid run plan runs one validate, one targets and one evaluate stage.
+MIN_PLAN_SCENARIO_STAGES = 3
 _MAX_RUN_SECONDS = float(MAX_RUN_TIMEOUT_SECONDS)
 _MAX_ANALYSIS_ARGS = 32
 _MAX_ANALYSIS_ARTIFACTS = 16
@@ -199,6 +205,209 @@ class EvaluationSpecSet:
             raise ValueError("specs must be an array")
         data["specs"] = tuple(EvaluationSpecEntry.from_json_value(item) for item in entries)
         return cls(**data)  # type: ignore[arg-type]
+
+
+COMPUTE_PROBE_CONTRACT = "research-compute-probe-v1"
+_PROBE_ID = re.compile(r"^P[0-9a-f]{12}$")
+_PROBE_STAGE = re.compile(r"^(?:validate-c\d{3}|evaluate-s\d{3})$")
+_PROBE_PIN_KEYS = {
+    "evaluator_sha256",
+    "pyvenv_sha256",
+    "shared_python_sha256",
+    "snapshot_sha256",
+    "universe_sha256",
+}
+_PROBE_INPUT_KEYS = {
+    "dividends_sha256",
+    "evaluation_spec_set_sha256",
+    "panel_sha256",
+    "receipt_sha256",
+}
+# Headroom the probe requires over the measured values (see ``compute_requirements``).
+PROBE_RSS_HEADROOM_NUMERATOR = 5
+PROBE_RSS_HEADROOM_DENOMINATOR = 4
+PROBE_WALL_HEADROOM = 1.5
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeStage:
+    """One measured, contained probe stage (validate-inputs or empty-target evaluate)."""
+
+    stage: str
+    spec_id: str
+    exit: int
+    wall_seconds: float
+    peak_rss_mb: int
+
+    def __post_init__(self) -> None:
+        if _PROBE_STAGE.fullmatch(self.stage) is None:
+            raise ValueError("probe stage must be validate-cNNN or evaluate-sNNN")
+        _check_id(self.spec_id, _SPEC_ID, "spec_id")
+        if self.stage.startswith("validate-") and self.stage != f"validate-{self.spec_id}":
+            raise ValueError("validate stage name must match its spec_id")
+        if isinstance(self.exit, bool) or not isinstance(self.exit, int) or self.exit != 0:
+            raise ValueError("recorded probe stages must have exit 0")
+        if (
+            isinstance(self.wall_seconds, bool)
+            or not isinstance(self.wall_seconds, (int, float))
+            or not math.isfinite(float(self.wall_seconds))
+            or float(self.wall_seconds) <= 0
+        ):
+            raise ValueError("probe wall_seconds must be a positive finite number")
+        if (
+            isinstance(self.peak_rss_mb, bool)
+            or not isinstance(self.peak_rss_mb, int)
+            or self.peak_rss_mb < 1
+        ):
+            raise ValueError("probe peak_rss_mb must be a positive integer")
+
+    def to_json_value(self) -> dict[str, object]:
+        return {
+            "exit": self.exit,
+            "peak_rss_mb": self.peak_rss_mb,
+            "spec_id": self.spec_id,
+            "stage": self.stage,
+            "wall_seconds": self.wall_seconds,
+        }
+
+    @classmethod
+    def from_json_value(cls, value: object) -> Self:
+        raw = _json_dict(value, "probe stage")
+        data = require_keys_exact(
+            raw, {"stage", "spec_id", "exit", "wall_seconds", "peak_rss_mb"}, "probe stage"
+        )
+        return cls(**data)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeProbe:
+    """Immutable measured cost of validate-inputs and an empty-target evaluate."""
+
+    contract: str
+    probe_id: str
+    hypothesis_id: str
+    pins: dict[str, str]
+    inputs: dict[str, str]
+    stages: tuple[ProbeStage, ...]
+    measured_at: str
+
+    def __post_init__(self) -> None:
+        if self.contract != COMPUTE_PROBE_CONTRACT:
+            raise ValueError("unsupported compute probe contract")
+        _check_id(self.probe_id, _PROBE_ID, "probe_id")
+        _check_id(self.hypothesis_id, _H, "hypothesis_id")
+        for name, mapping, keys in (
+            ("pins", self.pins, _PROBE_PIN_KEYS),
+            ("inputs", self.inputs, _PROBE_INPUT_KEYS),
+        ):
+            data = require_keys_exact(mapping, keys, name)
+            for key, digest in data.items():
+                require_sha256(digest, f"{name}.{key}")
+        if not isinstance(self.stages, tuple) or len(self.stages) < 2:
+            raise ValueError("probe stages must contain validate stages and one evaluate stage")
+        if any(not isinstance(item, ProbeStage) for item in self.stages):
+            raise ValueError("probe stages must contain ProbeStage values")
+        names = [item.stage for item in self.stages]
+        if len(set(names)) != len(names):
+            raise ValueError("probe stage names must be unique")
+        evaluates = [item for item in self.stages if item.stage.startswith("evaluate-")]
+        if len(evaluates) != 1 or not self.stages[-1].stage.startswith("evaluate-"):
+            raise ValueError("probe must end with exactly one evaluate stage")
+        require_utc_iso(self.measured_at, "measured_at")
+
+    def to_json(self) -> str:
+        return to_json(
+            {
+                "contract": self.contract,
+                "hypothesis_id": self.hypothesis_id,
+                "inputs": dict(self.inputs),
+                "measured_at": self.measured_at,
+                "pins": dict(self.pins),
+                "probe_id": self.probe_id,
+                "stages": [item.to_json_value() for item in self.stages],
+            }
+        )
+
+    @classmethod
+    def from_json(cls, value: str) -> Self:
+        raw = _json_dict(json.loads(value), "compute probe")
+        data = require_keys_exact(
+            raw,
+            {
+                "contract",
+                "probe_id",
+                "hypothesis_id",
+                "pins",
+                "inputs",
+                "stages",
+                "measured_at",
+            },
+            "compute probe",
+        )
+        stages = data["stages"]
+        if not isinstance(stages, list):
+            raise ValueError("stages must be an array")
+        data["stages"] = tuple(ProbeStage.from_json_value(item) for item in stages)
+        for key in ("pins", "inputs"):
+            data[key] = dict(_json_dict(data[key], key))
+        return cls(**data)  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class ComputeRequirements:
+    """Minimum frozen bounds a measured probe allows, with the stages that set them."""
+
+    min_rss_mb: int
+    min_scenario_timeout_seconds: int
+    max_peak_rss_mb: int
+    max_peak_rss_stage: str
+    max_wall_seconds: float
+    max_wall_stage: str
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+    @property
+    def rss_feasible(self) -> bool:
+        """Whether some legal ``compute.max_rss_mb`` can satisfy ``min_rss_mb``."""
+        return self.min_rss_mb <= MAX_STAGE_RSS_MB
+
+    @property
+    def timeout_feasible(self) -> bool:
+        """Whether the smallest legal run plan can use ``min_scenario_timeout_seconds``.
+
+        Its budget is ``3 * t`` for the validate, targets and evaluate stages plus the analysis
+        stage, and the derived run timeout adds the fixed driver overhead; that must fit in
+        ``MAX_RUN_TIMEOUT_SECONDS`` or no submitted plan could ever be run.
+        """
+        return (
+            MIN_PLAN_SCENARIO_STAGES * self.min_scenario_timeout_seconds
+            + MIN_ANALYSIS_SECONDS
+            + RUN_OVERHEAD_SECONDS
+            <= MAX_RUN_TIMEOUT_SECONDS
+        )
+
+
+def compute_requirements(probe: ComputeProbe) -> ComputeRequirements:
+    """Minimum frozen bounds a measured probe allows.
+
+    ``min_rss_mb`` is ``ceil(1.25 * max peak_rss_mb)`` (integer arithmetic, no float
+    rounding).  ``min_scenario_timeout_seconds`` is ``ceil(1.5 * max stage wall)``.
+    The freeze gate enforces the first, the submit gate the second.
+    """
+    peak_stage = max(probe.stages, key=lambda item: item.peak_rss_mb)
+    wall_stage = max(probe.stages, key=lambda item: item.wall_seconds)
+    min_rss = -(
+        -peak_stage.peak_rss_mb * PROBE_RSS_HEADROOM_NUMERATOR // PROBE_RSS_HEADROOM_DENOMINATOR
+    )
+    return ComputeRequirements(
+        min_rss_mb=min_rss,
+        min_scenario_timeout_seconds=math.ceil(PROBE_WALL_HEADROOM * wall_stage.wall_seconds),
+        max_peak_rss_mb=peak_stage.peak_rss_mb,
+        max_peak_rss_stage=peak_stage.stage,
+        max_wall_seconds=wall_stage.wall_seconds,
+        max_wall_stage=wall_stage.stage,
+    )
 
 
 @dataclass(frozen=True, slots=True)
