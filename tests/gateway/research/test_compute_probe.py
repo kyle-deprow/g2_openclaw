@@ -986,3 +986,56 @@ def test_freeze_gate_allows_the_timeout_boundary_and_refuses_one_second_more(
     assert "needs scenario_timeout_seconds >= 9500" in message
     assert f"hypothesis-decide {_hid(bad)}" in message and "ABANDONED" in message
     assert bad.store.get_hypothesis(_hid(bad)).state == HypothesisState.DRAFT
+
+
+def _raising_stage(error: Exception, sleep_until: float | None = None):  # type: ignore[no-untyped-def]
+    def fake(*_args: object) -> tuple[int, bool]:
+        if sleep_until is not None:
+            while time.monotonic() < sleep_until:
+                time.sleep(0.001)
+        raise error
+
+    return fake
+
+
+def test_run_stage_reports_deadline_when_stop_fails_after_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    deadline = time.monotonic() + 0.01
+    error = containment.ContainmentError("stage scope termination could not be verified")
+    monkeypatch.setattr(
+        compute_probe_module, "run_contained_stage", _raising_stage(error, deadline)
+    )
+
+    with pytest.raises(compute_probe_module.ComputeProbeError) as raised:
+        compute_probe_module._run_stage(
+            object(),  # type: ignore[arg-type]
+            tmp_path,
+            "validate-c000",
+            "c000",
+            deadline,
+            "hint",
+        )
+
+    message = str(raised.value)
+    assert "overall probe deadline" in message
+    assert "stage scope termination could not be verified" in message
+
+
+def test_run_stage_reraises_containment_errors_before_the_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error = containment.ContainmentError("bubblewrap/systemd-run is unavailable")
+    monkeypatch.setattr(compute_probe_module, "run_contained_stage", _raising_stage(error))
+
+    with pytest.raises(containment.ContainmentError) as raised:
+        compute_probe_module._run_stage(
+            object(),  # type: ignore[arg-type]
+            tmp_path,
+            "validate-c000",
+            "c000",
+            time.monotonic() + 3600,
+            "hint",
+        )
+
+    assert raised.value is error

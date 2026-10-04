@@ -70,16 +70,23 @@ def _run_stage(
 ) -> ProbeStage:
     peak = StagePeak()
     tick = time.monotonic()
-    exit_code, timed_out = run_contained_stage(
-        plan, probe_dir, probe_dir / "logs" / f"{stage}.out", deadline, peak
-    )
-    wall = time.monotonic() - tick
     err = probe_dir / "logs" / f"{stage}.err"
-    if timed_out:
-        raise ComputeProbeError(
-            f"{stage} hit the {MAX_RUN_TIMEOUT_SECONDS}s overall probe deadline; "
-            f"inspect {err}; {hint}"
+    deadline_message = (
+        f"{stage} hit the {MAX_RUN_TIMEOUT_SECONDS}s overall probe deadline; inspect {err}; {hint}"
+    )
+    try:
+        exit_code, timed_out = run_contained_stage(
+            plan, probe_dir, probe_dir / "logs" / f"{stage}.out", deadline, peak
         )
+    except ContainmentError as exc:
+        # Stopping a stage at the deadline can race its scope start-up; keep the
+        # timeout as the reported cause instead of the secondary stop failure.
+        if time.monotonic() >= deadline:
+            raise ComputeProbeError(f"{deadline_message}; {exc}") from exc
+        raise
+    wall = time.monotonic() - tick
+    if timed_out:
+        raise ComputeProbeError(deadline_message)
     if exit_code != 0:
         raise ComputeProbeError(f"{stage} exited {exit_code}; inspect {err}; {hint}")
     if peak.peak_bytes <= 0:
