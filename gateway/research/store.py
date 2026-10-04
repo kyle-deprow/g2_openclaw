@@ -13,8 +13,9 @@ import os
 import sqlite3
 import stat
 import tempfile
+from collections.abc import Callable, Sequence
 from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -27,6 +28,7 @@ from .contracts import (
     MAX_RUN_TIMEOUT_SECONDS,
     MAX_STAGE_RSS_MB,
     MIN_ANALYSIS_SECONDS,
+    MIN_PLAN_SCENARIO_STAGES,
     RUN_OVERHEAD_SECONDS,
     Attempt,
     AttemptDecision,
@@ -170,6 +172,39 @@ OPERATOR_NOTE_KINDS = tuple(kind.value for kind in OperatorNoteKind)
 
 def _digest(text: str) -> str:
     return sha256_bytes(text.encode())
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionCheck:
+    """One named, read-only implementation-submission check (see ``submission_checks``)."""
+
+    name: str
+    run: Callable[[], str]
+
+
+def _require_identical_submission(
+    old: Sequence[object],
+    existing_plan: Sequence[object] | None,
+    existing_provenance: Sequence[object] | None,
+    record_payload: str,
+    run_plan_payload: str,
+    containment_provenance: str,
+) -> None:
+    """Refuse a replay whose payloads differ from the stored implementation evidence."""
+    if _digest(str(old[0])) != str(old[1]) or str(old[0]) != record_payload:
+        raise StoreConflict("implementation payload differs from stored payload")
+    if (
+        existing_plan is None
+        or _digest(str(existing_plan[0])) != str(existing_plan[1])
+        or str(existing_plan[0]) != run_plan_payload
+    ):
+        raise StoreConflict("run plan payload differs from stored payload")
+    if (
+        existing_provenance is None
+        or _digest(str(existing_provenance[0])) != str(existing_provenance[1])
+        or str(existing_provenance[0]) != containment_provenance
+    ):
+        raise StoreConflict("containment provenance payload differs from stored payload")
 
 
 def _require_powered_design(spec_json: str) -> None:
@@ -1006,6 +1041,19 @@ class ResearchStore:
                 f"(3 stages x that + {MIN_ANALYSIS_SECONDS:g}s analysis + {RUN_OVERHEAD_SECONDS:g}s "
                 f"overhead) would exceed the {MAX_RUN_TIMEOUT_SECONDS}s run limit; {abandon}"
             )
+        smallest_budget = (
+            MIN_PLAN_SCENARIO_STAGES * required.min_scenario_timeout_seconds + MIN_ANALYSIS_SECONDS
+        )
+        if document.compute.max_wall_seconds < smallest_budget:
+            raise StoreConflict(
+                f"compute.max_wall_seconds={document.compute.max_wall_seconds:g} is below "
+                f"{smallest_budget:g}, the stage budget of the smallest run plan the probe allows "
+                f"({MIN_PLAN_SCENARIO_STAGES} stages x min_scenario_timeout_seconds "
+                f"{required.min_scenario_timeout_seconds} + {MIN_ANALYSIS_SECONDS:g}s analysis), "
+                f"so no plan could pass both the probe gate and the submission preflight; raise "
+                f"--max-wall-seconds (limit {MAX_RUN_TIMEOUT_SECONDS}) with hypothesis-set-compute "
+                f"before freezing, or {abandon}"
+            )
         if document.compute.max_rss_mb < required.min_rss_mb:
             raise StoreConflict(
                 f"compute.max_rss_mb={document.compute.max_rss_mb} is below the required minimum "
@@ -1178,6 +1226,131 @@ class ResearchStore:
             self._repair_evidence_projection(attempt, "admission_decision", admission_payload)
         return attempt
 
+    def submission_checks(
+        self, attempt: Attempt, record: ImplementationRecord, run_plan: RunPlan
+    ) -> list[SubmissionCheck]:
+        """Ordered, named, read-only checks that gate ``submit_implementation``.
+
+        ``submit_implementation`` runs these in order and stops at the first failure; the
+        ``submission-preflight`` command runs the very same callables and reports every
+        outcome, so the two cannot drift.  Each ``run`` returns a short PASS detail or raises
+        ``StoreConflict``.
+        """
+        attempt_id = attempt.attempt_id
+        hypothesis_id = attempt.hypothesis_id
+        loaded: list[EvaluationSpecSet] = []
+
+        def spec_set() -> EvaluationSpecSet:
+            if not loaded:
+                try:
+                    loaded.append(self.evaluation_spec_set(hypothesis_id))
+                except (StoreConflict, ValueError) as exc:
+                    raise StoreConflict("evaluation spec set evidence is required") from exc
+            return loaded[0]
+
+        def plan_binding() -> str:
+            if run_plan.attempt_id != attempt_id or run_plan.commit != record.commit:
+                raise StoreConflict("run plan does not match implementation")
+            if run_plan.implementation_sha256 != _digest(record.to_json()):
+                raise StoreConflict("run plan implementation digest does not match implementation")
+            return (
+                f"run plan binds {attempt_id} at {record.commit[:12]} and the implementation digest"
+            )
+
+        def owned_spec_set() -> str:
+            value = spec_set()
+            self._validate_owned_spec_set(self.get_hypothesis(hypothesis_id), value)
+            return f"{len(value.specs)} store-owned evaluation spec(s) verified"
+
+        def spec_set_digest() -> str:
+            expected = _digest(spec_set().to_json())
+            if run_plan.evaluation_spec_set_sha256 != expected:
+                raise StoreConflict("run plan evaluation spec set digest does not match evidence")
+            return f"evaluation_spec_set_sha256 {expected[:12]}"
+
+        def primary_argv() -> str:
+            primary = next(
+                scenario
+                for scenario in run_plan.scenarios
+                if scenario.scenario_id == run_plan.primary_scenario_id
+            )
+            if primary.targets_argv != record.targets_argv:
+                raise StoreConflict("primary scenario argv does not match implementation")
+            return f"primary scenario {primary.scenario_id} argv equals the implementation argv"
+
+        def scenario_specs() -> str:
+            entries = {entry.spec_id: entry.sha256 for entry in spec_set().specs}
+            if any(
+                scenario.spec_id not in entries
+                or scenario.evaluation_spec_sha256 != entries[scenario.spec_id]
+                for scenario in run_plan.scenarios
+            ):
+                raise StoreConflict("run plan scenario spec does not match evidence")
+            return f"{len(run_plan.scenarios)} scenario spec digest(s) equal the store entries"
+
+        def probe_gate() -> str:
+            probe = self.compute_probe(hypothesis_id)
+            if probe is None:
+                return "no compute probe recorded; gate not applicable"
+            required = compute_requirements(probe)
+            if run_plan.scenario_timeout_seconds < required.min_scenario_timeout_seconds:
+                raise StoreConflict(
+                    f"scenario_timeout_seconds={run_plan.scenario_timeout_seconds:g} is below the "
+                    f"required minimum {required.min_scenario_timeout_seconds} (ceil(1.5 x "
+                    f"measured stage wall {required.max_wall_seconds:g}s in "
+                    f"{required.max_wall_stage}))"
+                )
+            return (
+                f"scenario_timeout_seconds={run_plan.scenario_timeout_seconds:g} >= required "
+                f"{required.min_scenario_timeout_seconds} (ceil(1.5 x {required.max_wall_seconds:g}s "
+                f"in {required.max_wall_stage}))"
+            )
+
+        return [
+            SubmissionCheck("plan-binding", plan_binding),
+            SubmissionCheck("spec-set", owned_spec_set),
+            SubmissionCheck("spec-set-digest", spec_set_digest),
+            SubmissionCheck("primary-argv", primary_argv),
+            SubmissionCheck("scenario-specs", scenario_specs),
+            SubmissionCheck("compute-probe", probe_gate),
+        ]
+
+    def implementation_replay_state(
+        self,
+        attempt_id: str,
+        record: ImplementationRecord,
+        run_plan: RunPlan,
+        containment_provenance: str,
+    ) -> bool:
+        """Read-only twin of the transactional part of ``submit_implementation``.
+
+        Returns ``True`` for an exact replay of already stored evidence, ``False`` when the
+        attempt can accept a first submission, and raises exactly what the submit would.
+        """
+        attempt = self.get_attempt(attempt_id)
+        with self._connect() as conn:
+            rows = tuple(
+                conn.execute(
+                    "SELECT payload_json,payload_sha256 FROM attempt_evidence "
+                    "WHERE attempt_id=? AND kind=?",
+                    (attempt_id, kind),
+                ).fetchone()
+                for kind in ("implementation", "run_plan", "containment_provenance")
+            )
+        old, existing_plan, existing_provenance = rows
+        if old is None:
+            submit_implementation(attempt, record, now_utc())
+            return False
+        _require_identical_submission(
+            old,
+            existing_plan,
+            existing_provenance,
+            record.to_json(),
+            run_plan.to_json(),
+            containment_provenance,
+        )
+        return True
+
     def submit_implementation(
         self,
         attempt_id: str,
@@ -1189,43 +1362,10 @@ class ResearchStore:
         attempt = self.get_attempt(attempt_id)
         if run_plan is None:
             raise StoreConflict("immutable run plan evidence is required")
-        if run_plan.attempt_id != attempt_id or run_plan.commit != record.commit:
-            raise StoreConflict("run plan does not match implementation")
-        if run_plan.implementation_sha256 != _digest(record.to_json()):
-            raise StoreConflict("run plan implementation digest does not match implementation")
         record_payload = record.to_json()
         run_plan_payload = run_plan.to_json()
-        try:
-            spec_set = self.evaluation_spec_set(attempt.hypothesis_id)
-        except (StoreConflict, ValueError) as exc:
-            raise StoreConflict("evaluation spec set evidence is required") from exc
-        self._validate_owned_spec_set(self.get_hypothesis(attempt.hypothesis_id), spec_set)
-        if run_plan.evaluation_spec_set_sha256 != _digest(spec_set.to_json()):
-            raise StoreConflict("run plan evaluation spec set digest does not match evidence")
-        primary = next(
-            scenario
-            for scenario in run_plan.scenarios
-            if scenario.scenario_id == run_plan.primary_scenario_id
-        )
-        if primary.targets_argv != record.targets_argv:
-            raise StoreConflict("primary scenario argv does not match implementation")
-        entries = {entry.spec_id: entry.sha256 for entry in spec_set.specs}
-        if any(
-            scenario.spec_id not in entries
-            or scenario.evaluation_spec_sha256 != entries[scenario.spec_id]
-            for scenario in run_plan.scenarios
-        ):
-            raise StoreConflict("run plan scenario spec does not match evidence")
-        probe = self.compute_probe(attempt.hypothesis_id)
-        if probe is not None:
-            required = compute_requirements(probe)
-            if run_plan.scenario_timeout_seconds < required.min_scenario_timeout_seconds:
-                raise StoreConflict(
-                    f"scenario_timeout_seconds={run_plan.scenario_timeout_seconds:g} is below the "
-                    f"required minimum {required.min_scenario_timeout_seconds} (ceil(1.5 x "
-                    f"measured stage wall {required.max_wall_seconds:g}s in "
-                    f"{required.max_wall_stage}))"
-                )
+        for check in self.submission_checks(attempt, record, run_plan):
+            check.run()
 
         replay = False
         with self._connect() as conn:
@@ -1252,22 +1392,14 @@ class ResearchStore:
                 (attempt_id,),
             ).fetchone()
             if old is not None:
-                if _digest(str(old[0])) != str(old[1]) or str(old[0]) != record_payload:
-                    raise StoreConflict("implementation payload differs from stored payload")
-                if (
-                    existing_plan is None
-                    or _digest(str(existing_plan[0])) != str(existing_plan[1])
-                    or str(existing_plan[0]) != run_plan_payload
-                ):
-                    raise StoreConflict("run plan payload differs from stored payload")
-                if (
-                    existing_provenance is None
-                    or _digest(str(existing_provenance[0])) != str(existing_provenance[1])
-                    or str(existing_provenance[0]) != containment_provenance
-                ):
-                    raise StoreConflict(
-                        "containment provenance payload differs from stored payload"
-                    )
+                _require_identical_submission(
+                    old,
+                    existing_plan,
+                    existing_provenance,
+                    record_payload,
+                    run_plan_payload,
+                    containment_provenance,
+                )
                 conn.commit()
                 replay = True
                 updated = current

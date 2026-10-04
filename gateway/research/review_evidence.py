@@ -36,6 +36,7 @@ from .codec import to_json
 from .contracts import (
     Attempt,
     AttemptState,
+    EvaluationSpecSet,
     ReviewEvidence,
     ReviewRecord,
     RunPlan,
@@ -427,25 +428,87 @@ def _git_diff(worktree: Path, base_commit: str, commit: str) -> bytes:
     return _git(worktree, "diff", "--binary", base_commit, commit)
 
 
-def build_review_bundle(
+@dataclass(frozen=True, slots=True)
+class BundleCandidate:
+    """Implementation evidence that is not stored yet (the preflight dry-build input).
+
+    ``implementation_json`` is the exact ``ImplementationRecord`` JSON,
+    ``containment_provenance`` the canonical provenance text that
+    ``validate_provenance_evidence`` returns.
+    """
+
+    commit: str
+    implementation_json: str
+    run_plan: RunPlan
+    containment_provenance: str
+
+
+@dataclass(frozen=True, slots=True)
+class _BundleParts:
+    """Everything the bundle writer needs, gathered and bound-checked once."""
+
+    attempt_id: str
+    commit: str
+    spec_bytes: bytes
+    diff: bytes
+    test_bytes: bytes
+    instruction_bytes: bytes
+    run_plan: RunPlan
+    containment_provenance: dict[str, object]
+    spec_set: EvaluationSpecSet
+    tracked: _TrackedSource
+
+
+@dataclass(frozen=True, slots=True)
+class BundleReport:
+    """Size accounting of a dry-built review bundle."""
+
+    commit: str
+    digest: str | None
+    error: str | None
+    total_bytes: int
+    source_bytes: int
+    diff_bytes: int
+    deployed_estimate_bytes: int
+    max_bundle_bytes: int
+    files: tuple[tuple[str, int], ...]
+
+    @property
+    def largest_files(self) -> tuple[tuple[str, int], ...]:
+        return tuple(sorted(self.files, key=lambda item: (-item[1], item[0]))[:5])
+
+    @property
+    def within_limits(self) -> bool:
+        return (
+            self.error is None
+            and self.total_bytes <= self.max_bundle_bytes
+            and self.deployed_estimate_bytes <= self.max_bundle_bytes
+        )
+
+
+# Fixed allowance on top of tracked source + diff for the spec, plan, evidence and
+# instruction files when estimating the deployed bundle size.
+DEPLOYED_OVERHEAD_BYTES = 2 * 1024 * 1024
+
+
+def _prepare_bundle(
     store: ResearchStore,
     attempt_id: str,
     bundle_dir: Path,
     *,
-    instructions: str | None = None,
-) -> str:
-    """Build and freeze a review bundle from the committed implementation.
-
-    The source directory contains the actual committed files, not only a list
-    of hashes.  The target is never overwritten: an existing directory is
-    verified instead, which makes retries safe and prevents accidental bundle
-    replacement.
-    """
+    instructions: str | None,
+    candidate: BundleCandidate | None,
+) -> _BundleParts:
+    """Gather and bound-check bundle inputs from the store (or from a candidate)."""
 
     attempt = store.get_attempt(attempt_id)
     hypothesis = store.get_hypothesis(attempt.hypothesis_id)
-    if attempt.state != AttemptState.IMPLEMENTED or attempt.commit is None:
-        raise BundleError("review bundle requires an IMPLEMENTED attempt")
+    if candidate is None:
+        if attempt.state != AttemptState.IMPLEMENTED or attempt.commit is None:
+            raise BundleError("review bundle requires an IMPLEMENTED attempt")
+        commit = attempt.commit
+    else:
+        commit = candidate.commit
     if hypothesis.state.value != "FROZEN":
         raise BundleError("review bundle requires a frozen hypothesis")
     if not bundle_dir.is_absolute():
@@ -456,11 +519,23 @@ def build_review_bundle(
     spec_bytes = hypothesis.spec_json.encode("utf-8")
     if hashlib.sha256(spec_bytes).hexdigest() != hypothesis.spec_sha256:
         raise BundleError("frozen hypothesis spec digest does not match its bytes")
-    implementation = json.loads(store.evidence(attempt_id, "implementation"))
-    run_plan_payload = _stored_json(store, attempt_id, "run_plan")
+    implementation = json.loads(
+        store.evidence(attempt_id, "implementation")
+        if candidate is None
+        else candidate.implementation_json
+    )
+    run_plan_payload = (
+        _stored_json(store, attempt_id, "run_plan")
+        if candidate is None
+        else cast(dict[str, object], json.loads(candidate.run_plan.to_json()))
+    )
     if run_plan_payload is None:
         raise BundleError("review bundle requires immutable run-plan evidence")
-    containment_provenance = _stored_containment_provenance(store, attempt_id)
+    containment_provenance = (
+        _stored_containment_provenance(store, attempt_id)
+        if candidate is None
+        else _checked_containment_provenance(json.loads(candidate.containment_provenance))
+    )
     if containment_provenance is None:
         raise BundleError("review bundle requires containment provenance evidence")
     try:
@@ -479,15 +554,15 @@ def build_review_bundle(
     if not isinstance(test_path, str) or not test_path:
         raise BundleError("implementation has no bounded test evidence path")
     test_bytes = _read_bounded(Path(test_path), MAX_TEST_EVIDENCE_BYTES, "test evidence")
-    tracked = _tracked_source(source, attempt.commit, hypothesis.base_commit)
-    diff = _git_diff(source, hypothesis.base_commit, attempt.commit)
+    tracked = _tracked_source(source, commit, hypothesis.base_commit)
+    diff = _git_diff(source, hypothesis.base_commit, commit)
     if len(diff) > MAX_BUNDLE_BYTES:
         raise BundleError("implementation diff exceeds the bundle limit")
     verdict_example = json.dumps(
         {
             "verdict": "FAIL",
             "attempt_id": attempt.attempt_id,
-            "commit": attempt.commit,
+            "commit": commit,
             "spec_sha256": hypothesis.spec_sha256,
             "findings": [
                 "severity=high; location=source/example.py:1; explanation=Example finding."
@@ -499,7 +574,7 @@ def build_review_bundle(
         "Review only the committed source under source/. Your terminal response must be exactly "
         "one bare JSON object with exactly these keys: verdict, attempt_id, commit, spec_sha256, "
         "findings. Do not include markdown or surrounding prose. Verdict must be PASS or FAIL; "
-        f"use these exact bindings: attempt_id={attempt.attempt_id}, commit={attempt.commit}, "
+        f"use these exact bindings: attempt_id={attempt.attempt_id}, commit={commit}, "
         f"spec_sha256={hypothesis.spec_sha256}. Findings must be an array of nonempty strings, "
         "never objects, nested arrays, or null; encode severity, location, and explanation within "
         "each string, or use [] when there are no findings.\n"
@@ -516,6 +591,64 @@ def build_review_bundle(
     instruction_bytes = text.encode("utf-8")
     if len(instruction_bytes) > MAX_BUNDLE_FILE_BYTES:
         raise BundleError("review instructions exceed the bundle file limit")
+    return _BundleParts(
+        attempt_id=attempt.attempt_id,
+        commit=commit,
+        spec_bytes=spec_bytes,
+        diff=diff,
+        test_bytes=test_bytes,
+        instruction_bytes=instruction_bytes,
+        run_plan=run_plan,
+        containment_provenance=containment_provenance,
+        spec_set=spec_set,
+        tracked=tracked,
+    )
+
+
+def _write_bundle_tree(root: Path, parts: _BundleParts) -> None:
+    """Write the bundle files (not yet frozen) into the existing directory ``root``."""
+
+    (root / "source").mkdir()
+    (root / "spec.json").write_bytes(parts.spec_bytes)
+    (root / "diff.patch").write_bytes(parts.diff)
+    (root / "test-evidence").write_bytes(parts.test_bytes)
+    (root / "instructions.md").write_bytes(parts.instruction_bytes)
+    (root / "source" / "COMMIT").write_text(parts.commit + "\n", encoding="utf-8")
+    if parts.tracked.excluded:
+        (root / "source" / "EXCLUDED").write_bytes(_excluded_bytes(parts.tracked.excluded))
+    (root / "run-plan.json").write_text(parts.run_plan.to_json(), encoding="utf-8")
+    (root / "containment-provenance.json").write_text(
+        to_json(parts.containment_provenance), encoding="utf-8"
+    )
+    (root / "evaluation-spec-set.json").write_text(parts.spec_set.to_json(), encoding="utf-8")
+    for entry in parts.spec_set.specs:
+        destination = root / "evaluation-specs" / f"{entry.spec_id}.json"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(Path(entry.path).read_bytes())
+    for relative, content in parts.tracked.files:
+        destination = root / "source" / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+
+
+def build_review_bundle(
+    store: ResearchStore,
+    attempt_id: str,
+    bundle_dir: Path,
+    *,
+    instructions: str | None = None,
+) -> str:
+    """Build and freeze a review bundle from the committed implementation.
+
+    The source directory contains the actual committed files, not only a list
+    of hashes.  The target is never overwritten: an existing directory is
+    verified instead, which makes retries safe and prevents accidental bundle
+    replacement.
+    """
+
+    parts = _prepare_bundle(
+        store, attempt_id, bundle_dir, instructions=instructions, candidate=None
+    )
     target_exists = bundle_dir.exists() or bundle_dir.is_symlink()
     if target_exists:
         if bundle_dir.is_symlink() or not bundle_dir.is_dir():
@@ -539,27 +672,7 @@ def build_review_bundle(
     parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{bundle_dir.name}.", dir=parent))
     try:
-        (temporary / "source").mkdir()
-        (temporary / "spec.json").write_bytes(spec_bytes)
-        (temporary / "diff.patch").write_bytes(diff)
-        (temporary / "test-evidence").write_bytes(test_bytes)
-        (temporary / "instructions.md").write_bytes(instruction_bytes)
-        (temporary / "source" / "COMMIT").write_text(attempt.commit + "\n", encoding="utf-8")
-        if tracked.excluded:
-            (temporary / "source" / "EXCLUDED").write_bytes(_excluded_bytes(tracked.excluded))
-        (temporary / "run-plan.json").write_text(run_plan.to_json(), encoding="utf-8")
-        (temporary / "containment-provenance.json").write_text(
-            to_json(containment_provenance), encoding="utf-8"
-        )
-        (temporary / "evaluation-spec-set.json").write_text(spec_set.to_json(), encoding="utf-8")
-        for entry in spec_set.specs:
-            destination = temporary / "evaluation-specs" / f"{entry.spec_id}.json"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(Path(entry.path).read_bytes())
-        for relative, content in tracked.files:
-            destination = temporary / "source" / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(content)
+        _write_bundle_tree(temporary, parts)
         _bundle_digest(temporary)
         _readonly_tree(temporary)
         os.replace(temporary, bundle_dir)
@@ -569,6 +682,62 @@ def build_review_bundle(
             shutil.rmtree(temporary)
         raise
     return _bundle_digest(bundle_dir)
+
+
+def dry_build_review_bundle(
+    store: ResearchStore,
+    attempt_id: str,
+    candidate: BundleCandidate,
+    *,
+    nominal_bundle_dir: Path | None = None,
+) -> BundleReport:
+    """Build the review bundle for a not-yet-stored candidate and account its size.
+
+    The inputs are gathered and the files written by the same code ``review-bundle`` uses;
+    only the source of the implementation evidence differs.  Nothing outside a private
+    temporary directory is written, and that directory is always removed.  A size overrun
+    is reported (``error`` / ``within_limits``) rather than raised, but every other
+    ``BundleError`` propagates.  ``nominal_bundle_dir`` only fixes the absolute path quoted
+    in the review instructions so the byte count can match a real bundle exactly.
+    """
+
+    scratch = Path(tempfile.mkdtemp(prefix="submission-preflight-")).resolve()
+    try:
+        root = scratch / "bundle"
+        parts = _prepare_bundle(
+            store,
+            attempt_id,
+            nominal_bundle_dir or root,
+            instructions=None,
+            candidate=candidate,
+        )
+        root.mkdir()
+        _write_bundle_tree(root, parts)
+        files = tuple(
+            (path.relative_to(root).as_posix(), path.stat().st_size)
+            for path in sorted(root.rglob("*"))
+            if path.is_file() and not path.is_symlink()
+        )
+        source_bytes = sum(len(content) for _path, content in parts.tracked.files)
+        digest: str | None = None
+        error: str | None = None
+        try:
+            digest = _bundle_digest(root)
+        except BundleError as exc:
+            error = str(exc)
+        return BundleReport(
+            commit=parts.commit,
+            digest=digest,
+            error=error,
+            total_bytes=sum(size for _name, size in files),
+            source_bytes=source_bytes,
+            diff_bytes=len(parts.diff),
+            deployed_estimate_bytes=source_bytes + len(parts.diff) + DEPLOYED_OVERHEAD_BYTES,
+            max_bundle_bytes=MAX_BUNDLE_BYTES,
+            files=files,
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _validate_bundle(
@@ -1029,13 +1198,20 @@ def _stored_containment_provenance(
         payload = _stored_json(store, attempt_id, "containment_provenance")
     except (StoreConflict, json.JSONDecodeError) as exc:
         raise BundleError("containment provenance evidence is malformed") from exc
-    if payload is not None and (
-        payload.get("contract") != "research-provenance-evidence-v1"
+    if payload is None:
+        return None
+    return _checked_containment_provenance(payload)
+
+
+def _checked_containment_provenance(payload: object) -> dict[str, object]:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("contract") != "research-provenance-evidence-v1"
         or not isinstance(payload.get("stages"), list)
         or not payload["stages"]
     ):
         raise BundleError("containment provenance evidence is malformed")
-    return payload
+    return cast(dict[str, object], payload)
 
 
 def _reservation_from_payload(payload: Mapping[str, object]) -> ReviewReservation:

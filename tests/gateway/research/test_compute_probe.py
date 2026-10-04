@@ -495,6 +495,9 @@ def _submit(
             expected=HypothesisState.DRAFT,
         )
     else:
+        # The fixture's compute.max_wall_seconds (120) is below what the freeze cross-check
+        # needs for a 40 s measured stage (3 x 60 + 1); raise it as the owner would.
+        store.set_draft_compute(hypothesis.hypothesis_id, 900.0, 1024)
         record_probe(store, hypothesis.hypothesis_id, wall_seconds=wall)
         store.freeze(hypothesis.hypothesis_id)
     attempt = store.open_attempt(hypothesis.hypothesis_id, source)
@@ -587,6 +590,7 @@ def test_status_reports_probe_state_for_a_draft(tmp_path: Path) -> None:
     assert isinstance(framed, dict) and framed["requirements"] == requirements.as_dict()
     assert read_status(store.root, unit_state=None).compute_probe == framed
 
+    store.set_draft_compute(hid, 900.0, 1024)  # 3 x 60 + 1 > the fixture's 120 s
     store.freeze(hid)
     # Once frozen the additive field disappears again.
     assert (
@@ -918,6 +922,7 @@ def test_wake_texts_give_the_real_freeze_sequence(
         assert needle in probed.message, (needle, probed.message)
     assert "compute-probe" not in probed.message
 
+    store.set_draft_compute(hid, 900.0, 1024)  # 3 x 60 + 1 > the fixture's 120 s
     store.freeze(hid)
     store.decide_hypothesis(hid, HypothesisDecision.FINISHED, "done")
     after = compose_wake(store)
@@ -974,10 +979,12 @@ def test_freeze_gate_allows_the_timeout_boundary_and_refuses_one_second_more(
     tmp_path: Path,
 ) -> None:
     ok = golden_draft(tmp_path / "ok")
+    ok.store.set_draft_compute(_hid(ok), 28800.0, 1024)  # 3 x 9499 + 1 = 28498
     record_probe(ok.store, _hid(ok), wall_seconds=6332.6)  # ceil(1.5 x) = 9499
     assert ok.store.freeze(_hid(ok)).state == HypothesisState.FROZEN
 
     bad = golden_draft(tmp_path / "bad")
+    bad.store.set_draft_compute(_hid(bad), 28800.0, 1024)
     record_probe(bad.store, _hid(bad), wall_seconds=6333.0)  # ceil(1.5 x) = 9500
     with pytest.raises(StoreConflict) as raised:
         bad.store.freeze(_hid(bad))
@@ -986,6 +993,41 @@ def test_freeze_gate_allows_the_timeout_boundary_and_refuses_one_second_more(
     assert "needs scenario_timeout_seconds >= 9500" in message
     assert f"hypothesis-decide {_hid(bad)}" in message and "ABANDONED" in message
     assert bad.store.get_hypothesis(_hid(bad)).state == HypothesisState.DRAFT
+
+
+@pytest.mark.parametrize(
+    ("max_wall", "allowed"),
+    [(181.0, True), (180.0, False), (180.9, False), (900.0, True)],
+)
+def test_freeze_requires_max_wall_to_cover_the_smallest_plan_the_probe_allows(
+    tmp_path: Path, max_wall: float, allowed: bool
+) -> None:
+    # Measured stage wall 40 s -> min_scenario_timeout_seconds 60 -> smallest plan budget
+    # MIN_PLAN_SCENARIO_STAGES (3) x 60 + MIN_ANALYSIS_SECONDS (1) = 181 s.
+    draft = golden_draft(tmp_path)
+    store, hid = draft.store, _hid(draft)
+    store.set_draft_compute(hid, max_wall, 1024)
+    record_probe(store, hid, wall_seconds=40.0)
+    if allowed:
+        assert store.freeze(hid).state == HypothesisState.FROZEN
+        return
+    with pytest.raises(StoreConflict) as raised:
+        store.freeze(hid)
+    message = str(raised.value)
+    assert f"compute.max_wall_seconds={max_wall:g} is below 181" in message
+    assert "3 stages x min_scenario_timeout_seconds 60 + 1s analysis" in message
+    assert "raise --max-wall-seconds" in message and "hypothesis-set-compute" in message
+    assert f"hypothesis-decide {hid}" in message and "ABANDONED" in message
+    assert store.get_hypothesis(hid).state == HypothesisState.DRAFT
+
+
+def test_freeze_passes_the_max_wall_cross_check_for_a_small_measured_wall(
+    tmp_path: Path,
+) -> None:
+    # A tiny measured wall needs 3 x 1 + 1 = 4 s, far below the fixture's 120 s.
+    draft = golden_draft(tmp_path)
+    record_probe(draft.store, _hid(draft), wall_seconds=0.5)
+    assert draft.store.freeze(_hid(draft)).state == HypothesisState.FROZEN
 
 
 def _raising_stage(error: Exception, sleep_until: float | None = None):  # type: ignore[no-untyped-def]

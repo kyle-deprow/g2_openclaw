@@ -26,6 +26,7 @@ def main() -> int:
     parser.add_argument("--receipt", required=True)
     parser.add_argument("--out", required=True)
     parser.add_argument("--variant", default="baseline")
+    parser.add_argument("--scenario-id", default="")
     args = parser.parse_args()
     panel = Path(args.panel).read_bytes()
     receipt = Path(args.receipt).read_bytes()

@@ -35,6 +35,11 @@ command launches work unless the operator policy and route are proven.
 Freeze sequence (`compute-probe` first, then `hypothesis-set-compute`, then freeze): see the
 autoresearch skill.
 
+Submission: the implementer writes a `research-submission-input-v1` JSON.
+`submission-build ATTEMPT_ID --root ROOT --input FILE --out-dir DIR` derives the record,
+run plan, and provenance index and runs `submission-preflight`; both must PASS (read-only,
+`--json`) before `implementation-submit`. Never hand-compute digests or argv.
+
 New hypotheses use contract `research-hypothesis-v2` with a `power` block; fill
 it with the read-only `power-check --events N --sd-bps S`. The SD must come
 from outside the scored test period; create refuses designs whose MDE exceeds

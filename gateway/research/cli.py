@@ -55,6 +55,7 @@ from .contracts import (
     ImplementationRecord,
     RunOutcome,
     RunPlan,
+    SubmissionInput,
     compute_requirements,
 )
 from .host_records import HostRecordError, managed_native_databases
@@ -90,6 +91,7 @@ from .review_evidence import (
 )
 from .status import power_summary
 from .store import OperatorNoteKind, OwnerLockHeld, ResearchStore, StoreConflict, now_utc
+from .submission import PreflightReport, build_submission, run_preflight
 from .wake import (
     OpenClawWakeSender,
     OwnerPollUnavailable,
@@ -363,6 +365,82 @@ def implementation_submit(
         )
     except Exception as exc:
         _fail(exc)
+
+
+def _existing_store(root: Path) -> ResearchStore:
+    """Open a store that must already exist; a read-only command never creates one."""
+    resolved = _root(root)
+    if not (resolved / "state.sqlite3").is_file():
+        raise ValueError(f"--root holds no research store: {resolved}")
+    return ResearchStore(resolved)
+
+
+def _echo_preflight(report: PreflightReport, as_json: bool) -> None:
+    if as_json:
+        typer.echo(json.dumps(report.to_json_value(), sort_keys=True))
+    else:
+        for line in report.lines():
+            typer.echo(line)
+
+
+@app.command("submission-preflight")
+def submission_preflight(
+    attempt_id: str,
+    root: Path = typer.Option(..., "--root"),
+    file: Path = typer.Option(..., "--file"),
+    run_plan: Path = typer.Option(..., "--run-plan"),
+    provenance_evidence: Path = typer.Option(..., "--provenance-evidence"),
+    as_json: bool = typer.Option(False, "--json"),
+) -> None:
+    """Run every implementation-submit check plus launch, budget and bundle checks, read-only."""
+    try:
+        report = run_preflight(
+            _existing_store(root),
+            attempt_id,
+            record_path=file,
+            run_plan_path=run_plan,
+            provenance_path=provenance_evidence,
+        )
+    except Exception as exc:
+        _fail(exc)
+        return
+    _echo_preflight(report, as_json)
+    if not report.ok:
+        raise typer.Exit(code=1)
+
+
+@app.command("submission-build")
+def submission_build(
+    attempt_id: str,
+    root: Path = typer.Option(..., "--root"),
+    input_file: Path = typer.Option(..., "--input"),
+    out_dir: Path = typer.Option(..., "--out-dir"),
+) -> None:
+    """Derive the implementation record, run plan and provenance index, then preflight them."""
+    try:
+        store = _existing_store(root)
+        built = build_submission(
+            store,
+            attempt_id,
+            SubmissionInput.from_json(input_file.read_text(encoding="utf-8")),
+            out_dir,
+        )
+        typer.echo(f"wrote {built.implementation}")
+        typer.echo(f"wrote {built.run_plan}")
+        typer.echo(f"wrote {built.provenance}")
+        report = run_preflight(
+            store,
+            attempt_id,
+            record_path=built.implementation,
+            run_plan_path=built.run_plan,
+            provenance_path=built.provenance,
+        )
+    except Exception as exc:
+        _fail(exc)
+        return
+    _echo_preflight(report, False)
+    if not report.ok:
+        raise typer.Exit(code=1)
 
 
 @app.command("review-bundle")

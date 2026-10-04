@@ -195,6 +195,13 @@ target path or another scenario's stage.
 - The historical worker applies the same verification and fails the run with `provenance_invalid`.
 - Evaluator and analysis stages run `python -P -s` and are verified for those interpreter flags, while target entrypoints are verified by module origin and hashes rather than interpreter flags.
 
+## Submission build and preflight
+
+- The implementer writes only a `research-submission-input-v1` JSON: `commit`, repo-relative `test_evidence_path` and `target_script`, coder model/effort/tier, absolute `interpreter`, `scenarios` (`scenario_id`, `spec_id`, `extra_args`), `primary_scenario_id`, `analysis`, both timeouts, and `provenance_stages` (stage plus committed repo-relative records dir).
+- `gateway-cli research submission-build ATTEMPT_ID --root ROOT --input FILE --out-dir DIR` needs an OPENED attempt and a clean worktree at `commit`, and `--out-dir` outside the worktree and empty. It derives the production targets argv, store spec digests, `implementation_sha256`, and provenance index, writes `implementation-record.json`, `run-plan.json` and `provenance-evidence.json`, and runs the preflight. It never submits.
+- `gateway-cli research submission-preflight ATTEMPT_ID --root ROOT --file F --run-plan P --provenance-evidence E [--json]` is read-only and prints `PASS|FAIL <check> <detail>` for every `implementation-submit` check plus worktree, argv shape, launch, stage budget and a review-bundle dry-build with size accounting. Exit 0 only when all pass.
+- `submission-build` and `submission-preflight` must PASS before `implementation-submit`; never hand-compute digests, argv or `--out` paths.
+
 ## Scientific boundary
 
 The initial capability is price-panel-only and ETF-scoped. Require trusted

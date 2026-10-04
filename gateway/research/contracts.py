@@ -639,6 +639,179 @@ class RunPlan:
         return cls(**data)  # type: ignore[arg-type]
 
 
+SUBMISSION_INPUT_CONTRACT = "research-submission-input-v1"
+_RESERVED_TARGET_FLAGS = frozenset({"--panel", "--receipt", "--scenario-id", "--out"})
+
+
+def is_host_owned_target_flag(token: str) -> bool:
+    """Whether ``token`` would set a host-owned targets flag, however it is spelled.
+
+    Covers the exact flag, the ``--flag=value`` form and any argparse-style abbreviation
+    (a ``--`` prefix of a reserved flag, including a bare ``--``), so extra arguments cannot
+    override the bound panel, receipt, scenario id or output path.
+    """
+    if not token.startswith("--"):
+        return False
+    name = token.split("=", 1)[0]
+    return any(flag.startswith(name) for flag in _RESERVED_TARGET_FLAGS)
+
+
+def _repo_relative(value: object, name: str) -> str:
+    text = require_str(value, name)
+    path = Path(text)
+    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError(f"{name} must be a safe repo-relative path")
+    return path.as_posix()
+
+
+def _string_tuple(value: object, name: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item for item in value):
+        raise ValueError(f"{name} must be an array of non-empty strings")
+    return tuple(value)
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionScenarioInput:
+    """One scenario of the declarative submission input; the host derives its argv."""
+
+    scenario_id: str
+    spec_id: str
+    extra_args: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _check_id(self.scenario_id, _SCENARIO_ID, "scenario_id")
+        _check_id(self.spec_id, _SPEC_ID, "spec_id")
+        if not isinstance(self.extra_args, tuple) or any(
+            not isinstance(item, str) or not item or is_host_owned_target_flag(item)
+            for item in self.extra_args
+        ):
+            raise ValueError(
+                "extra_args must be non-empty strings that do not set the host-owned "
+                "--panel/--receipt/--scenario-id/--out flags (also as --flag=value or an "
+                "abbreviation)"
+            )
+
+    @classmethod
+    def from_json_value(cls, value: object) -> Self:
+        raw = _json_dict(value, "submission scenario")
+        data = require_keys_exact(raw, {"scenario_id", "spec_id", "extra_args"}, "scenario")
+        return cls(
+            scenario_id=require_str(data["scenario_id"], "scenario_id"),
+            spec_id=require_str(data["spec_id"], "spec_id"),
+            extra_args=_string_tuple(data["extra_args"], "extra_args"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenanceStageInput:
+    """One provenance stage and its committed, repo-relative records directory."""
+
+    stage: str
+    records_dir: str
+
+    def __post_init__(self) -> None:
+        require_str(self.stage, "provenance stage")
+        _repo_relative(self.records_dir, "provenance records_dir")
+
+    @classmethod
+    def from_json_value(cls, value: object) -> Self:
+        raw = _json_dict(value, "provenance stage")
+        data = require_keys_exact(raw, {"stage", "records_dir"}, "provenance stage")
+        return cls(
+            stage=require_str(data["stage"], "provenance stage"),
+            records_dir=_repo_relative(data["records_dir"], "provenance records_dir"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionInput:
+    """Small declarative input from which ``submission-build`` derives every digest and argv."""
+
+    contract: str
+    commit: str
+    test_evidence_path: str
+    reported_coder_model: str
+    coder_effort: str
+    coder_service_tier: str
+    interpreter: str
+    target_script: str
+    scenarios: tuple[SubmissionScenarioInput, ...]
+    primary_scenario_id: str
+    analysis: AnalysisPlan
+    scenario_timeout_seconds: float
+    analysis_timeout_seconds: float
+    provenance_stages: tuple[ProvenanceStageInput, ...]
+
+    def __post_init__(self) -> None:
+        if self.contract != SUBMISSION_INPUT_CONTRACT:
+            raise ValueError("unsupported submission input contract")
+        _check_commit(self.commit, "commit")
+        _repo_relative(self.test_evidence_path, "test_evidence_path")
+        _repo_relative(self.target_script, "target_script")
+        for value, name in (
+            (self.reported_coder_model, "reported_coder_model"),
+            (self.coder_effort, "coder_effort"),
+            (self.coder_service_tier, "coder_service_tier"),
+        ):
+            require_str(value, name)
+        if not Path(require_str(self.interpreter, "interpreter")).is_absolute():
+            raise ValueError("interpreter must be an absolute path")
+        if not isinstance(self.scenarios, tuple) or not (
+            1 <= len(self.scenarios) <= _MAX_SCENARIOS
+        ):
+            raise ValueError("scenarios must contain 1..16 entries")
+        expected = tuple(f"s{index:03d}" for index in range(len(self.scenarios)))
+        if tuple(item.scenario_id for item in self.scenarios) != expected:
+            raise ValueError("scenario ids must be contiguous and ordered from s000")
+        if self.primary_scenario_id not in expected:
+            raise ValueError("primary_scenario_id must name a scenario")
+        if not self.provenance_stages:
+            raise ValueError("provenance_stages must not be empty")
+        for seconds, seconds_name in (
+            (self.scenario_timeout_seconds, "scenario_timeout_seconds"),
+            (self.analysis_timeout_seconds, "analysis_timeout_seconds"),
+        ):
+            if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+                raise ValueError(f"{seconds_name} must be a number")
+
+    @classmethod
+    def from_json(cls, value: str) -> Self:
+        raw = _json_dict(json.loads(value), "submission input")
+        data = require_keys_exact(
+            raw,
+            {
+                "contract",
+                "commit",
+                "test_evidence_path",
+                "reported_coder_model",
+                "coder_effort",
+                "coder_service_tier",
+                "interpreter",
+                "target_script",
+                "scenarios",
+                "primary_scenario_id",
+                "analysis",
+                "scenario_timeout_seconds",
+                "analysis_timeout_seconds",
+                "provenance_stages",
+            },
+            "submission input",
+        )
+        scenarios = data["scenarios"]
+        stages = data["provenance_stages"]
+        if not isinstance(scenarios, list) or not isinstance(stages, list):
+            raise ValueError("scenarios and provenance_stages must be arrays")
+        data["scenarios"] = tuple(SubmissionScenarioInput.from_json_value(i) for i in scenarios)
+        data["provenance_stages"] = tuple(ProvenanceStageInput.from_json_value(i) for i in stages)
+        data["analysis"] = AnalysisPlan.from_json_value(data["analysis"])
+        for key in ("scenario_timeout_seconds", "analysis_timeout_seconds"):
+            number = data[key]
+            if isinstance(number, bool) or not isinstance(number, (int, float)):
+                raise ValueError(f"{key} must be a number")
+            data[key] = float(number)
+        return cls(**data)  # type: ignore[arg-type]
+
+
 # Short names used by the admission and worker layers.  Keep the descriptive
 # wire-record names above as the canonical public API.
 SpecEntry = EvaluationSpecEntry
