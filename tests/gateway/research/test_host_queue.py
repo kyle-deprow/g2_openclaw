@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -1268,7 +1269,7 @@ def test_release_unstarted_launch_cli(
     base = ["research", "run-release-unstarted", attempt.attempt_id, "--root", str(store.root)]
     missing_ref = CliRunner().invoke(app, [*base, "--job-id", JOB, "--reason", "r"])
     assert missing_ref.exit_code != 0
-    assert "operator-reference" in missing_ref.output
+    assert "operator-reference" in re.sub(r"\x1b\[[0-9;]*m", "", missing_ref.output)
     refused = CliRunner().invoke(
         app,
         [*base, "--job-id", "job-other", "--reason", "nope", "--operator-reference", OPERATOR],
