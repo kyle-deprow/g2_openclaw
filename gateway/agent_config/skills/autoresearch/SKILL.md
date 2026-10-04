@@ -67,7 +67,18 @@ them.
 Live help defines syntax only and grants no additional permission. Owner actions
 remain limited to the operations authorized by this contract (including
 review-collect); policy, ledger, runtime-registration,
-run-release-unstarted, and run-reverify mutations remain operator-only.
+run-release-unstarted, run-reverify, and operator-note mutations remain
+operator-only (`operator-note` records an `operator_intervention` event counted in
+status `operatorInterventions`; it changes no state).
+
+Power gate: a new hypothesis uses contract `research-hypothesis-v2`, which adds a
+`power` block (`expected_events`, `per_event_sd_bps`, `sd_basis`, `alpha`, `power`,
+`sided`, `minimum_detectable_effect_bps`, `plausible_effect_bps`,
+`plausibility_basis`). Get the MDE from `gateway-cli research power-check --events N
+--sd-bps S [--alpha 0.05] [--power 0.8] [--sided one]` (read-only; the declared MDE
+must match within 0.5 bp, and `expected_events` must cover `minimum_evidence.trades`).
+The SD must come from outside the scored test period. `hypothesis-create` refuses v1
+specs and any design whose MDE exceeds the plausible effect (`underpowered design`).
 
 Freeze sequence: create → `compute-probe HYPOTHESIS_ID --root ROOT` (owner or
 operator; DRAFT only; recorded once; it needs the non-blocking run lock, so it

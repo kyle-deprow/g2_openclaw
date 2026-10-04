@@ -16,6 +16,7 @@ import tempfile
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import TextIO, cast
 
@@ -156,8 +157,43 @@ def _read_bounded_exposure_ledger(path: Path) -> bytes:
             os.close(descriptor)
 
 
+class OperatorNoteKind(StrEnum):
+    BRIEF = "brief"
+    AUDIT = "audit"
+    HOLD = "hold"
+    ABORT = "abort"
+    OTHER = "other"
+
+
+OPERATOR_NOTE_KINDS = tuple(kind.value for kind in OperatorNoteKind)
+
+
 def _digest(text: str) -> str:
     return sha256_bytes(text.encode())
+
+
+def _require_powered_design(spec_json: str) -> None:
+    """New hypotheses must be contract v2 and not underpowered for a plausible effect."""
+    document = HypothesisDocument.from_json(spec_json)
+    if document.power is None:
+        raise ValueError(
+            "hypothesis-create requires contract research-hypothesis-v2 with a power block "
+            "(see `gateway-cli research power-check`)"
+        )
+    mde = document.power.recomputed_mde_bps()
+    plausible = document.power.plausible_effect_bps
+    if mde > plausible:
+        raise ValueError(
+            f"underpowered design: MDE {mde:.1f} bps exceeds plausible effect {plausible:g} bps"
+        )
+    # Admission requires the stored spec to equal the document's canonical serialization, so a
+    # spec that does not round-trip (for example an integer ``compute.max_wall_seconds``) would
+    # be admission-dead after freeze with no repair path.
+    if document.to_json() != spec_json:
+        raise ValueError(
+            "spec is not in canonical form; re-serialize it so every number keeps the type the "
+            "contract emits (for example compute.max_wall_seconds as 120.0, not 120) and retry"
+        )
 
 
 class ResearchStore:
@@ -711,6 +747,7 @@ class ResearchStore:
             raise ValueError("dividends must be a regular non-symlink file")
         raw = json.loads(spec_file.read_text(encoding="utf-8"))
         spec_json = to_json(raw)
+        _require_powered_design(spec_json)
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -1817,6 +1854,54 @@ class ResearchStore:
             detail={"decision": decision.value, "reason": reason},
         )
         return result
+
+    def record_operator_intervention(
+        self,
+        hypothesis_id: str,
+        kind: str,
+        reason: str,
+        operator_reference: str,
+        attempt_id: str | None = None,
+    ) -> int:
+        """Record an ``operator_intervention`` event and change nothing else.
+
+        The event is a pure ledger entry so operator briefs and audits are counted by the
+        status metric.  It never touches hypothesis, attempt, campaign or wake state.
+        """
+        if kind not in OPERATOR_NOTE_KINDS:
+            raise ValueError(f"kind must be one of {', '.join(OPERATOR_NOTE_KINDS)}")
+        if not reason.strip():
+            raise ValueError("reason must not be empty")
+        if not operator_reference.strip():
+            raise ValueError("operator reference must not be empty")
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if (
+                conn.execute(
+                    "SELECT 1 FROM hypotheses WHERE hypothesis_id=?", (hypothesis_id,)
+                ).fetchone()
+                is None
+            ):
+                raise ValueError(f"unknown hypothesis: {hypothesis_id}")
+            if attempt_id is not None:
+                row = conn.execute(
+                    "SELECT hypothesis_id FROM attempts WHERE attempt_id=?", (attempt_id,)
+                ).fetchone()
+                if row is None:
+                    raise ValueError(f"unknown attempt: {attempt_id}")
+                if str(row["hypothesis_id"]) != hypothesis_id:
+                    raise ValueError(f"attempt {attempt_id} does not belong to {hypothesis_id}")
+            self._event(
+                conn,
+                hypothesis_id,
+                attempt_id,
+                "operator_intervention",
+                {"kind": kind, "reason": reason, "operator_reference": operator_reference},
+                "operator",
+            )
+            seq = int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+            conn.commit()
+        return seq
 
     def pause(self, reason: str) -> None:
         with self._connect() as conn:

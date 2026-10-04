@@ -1022,7 +1022,7 @@ def test_hypothesis_create_requires_decided_previous_and_reconcile_repairs(
         "done",
     )
     spec_file = store.root / "second-spec.json"
-    spec_file.write_text('{"second": true}', encoding="utf-8")
+    spec_file.write_text(json.dumps(_payload()), encoding="utf-8")
     second_eval = Path(hypothesis.evaluation_spec_path)
     second_set = store.root / "second-evaluation-spec-set.json"
     second_set.write_text(

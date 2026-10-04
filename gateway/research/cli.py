@@ -48,6 +48,7 @@ from .contracts import (
     Attempt,
     AttemptDecision,
     AttemptState,
+    Event,
     HypothesisDecision,
     HypothesisSpec,
     HypothesisState,
@@ -57,7 +58,7 @@ from .contracts import (
     compute_requirements,
 )
 from .host_records import HostRecordError, managed_native_databases
-from .hypothesis import HypothesisDocument
+from .hypothesis import HypothesisDocument, minimum_detectable_effect_bps
 from .jobs import (
     JobError,
     JobRecord,
@@ -87,7 +88,8 @@ from .review_evidence import (
     request_cancel,
     reserve_review,
 )
-from .store import OwnerLockHeld, ResearchStore, StoreConflict, now_utc
+from .status import power_summary
+from .store import OperatorNoteKind, OwnerLockHeld, ResearchStore, StoreConflict, now_utc
 from .wake import (
     OpenClawWakeSender,
     OwnerPollUnavailable,
@@ -1856,6 +1858,56 @@ def run_reverify(
             store.release_run_lock()
 
 
+@app.command("operator-note")
+def operator_note(
+    hypothesis_id: str,
+    root: Path = typer.Option(..., "--root"),
+    kind: OperatorNoteKind = typer.Option(..., "--kind"),
+    reason: str = typer.Option(..., "--reason"),
+    operator_reference: str = typer.Option(..., "--operator-reference"),
+    attempt_id: str | None = typer.Option(None, "--attempt"),
+) -> None:
+    """Operator-only: record an operator_intervention event (counted in status; no state change).
+
+    --kind is one of brief, audit, hold, abort, other.
+    """
+    try:
+        seq = ResearchStore(_root(root)).record_operator_intervention(
+            hypothesis_id, kind.value, reason, operator_reference, attempt_id
+        )
+        typer.echo(f"recorded operator_intervention seq={seq}")
+    except Exception as exc:
+        _fail(exc)
+
+
+@app.command("power-check")
+def power_check(
+    events: int = typer.Option(..., "--events"),
+    sd_bps: float = typer.Option(..., "--sd-bps"),
+    alpha: float = typer.Option(0.05, "--alpha"),
+    power: float = typer.Option(0.8, "--power"),
+    sided: str = typer.Option("one", "--sided"),
+) -> None:
+    """Read-only: print the minimum detectable effect (bps) for the v2 `power` block."""
+    try:
+        mde = minimum_detectable_effect_bps(events, sd_bps, alpha, power, sided)
+        typer.echo(
+            json.dumps(
+                {
+                    "alpha": alpha,
+                    "expected_events": events,
+                    "minimum_detectable_effect_bps": round(mde, 3),
+                    "per_event_sd_bps": sd_bps,
+                    "power": power,
+                    "sided": sided,
+                },
+                sort_keys=True,
+            )
+        )
+    except Exception as exc:
+        _fail(exc)
+
+
 @app.command("reconcile")
 def reconcile(root: Path = typer.Option(..., "--root")) -> None:
     store: ResearchStore | None = None
@@ -2025,6 +2077,32 @@ def _status_compute_probe(store: ResearchStore, hypothesis: HypothesisSpec) -> d
     }
 
 
+def _status_power(hypothesis: HypothesisSpec) -> dict[str, object]:
+    """Additive status field for a v2 hypothesis: its MDE and plausible effect."""
+    summary = power_summary(hypothesis.spec_json)
+    return {} if summary is None else {"power": summary}
+
+
+def _status_operator_interventions(
+    store: ResearchStore, specs: list[HypothesisSpec], events: list[Event]
+) -> dict[str, int]:
+    """Additive status field: operator-actor events for the newest hypothesis and attempt."""
+    if not specs:
+        return {"hypothesis": 0, "attempt": 0}
+    current = specs[-1].hypothesis_id
+    attempts = store.attempts_for(current)
+    attempt_ids = {a.attempt_id for a in attempts}
+    operator = [e for e in events if e.actor == "operator"]
+    return {
+        "hypothesis": sum(
+            1 for e in operator if e.hypothesis_id == current or e.attempt_id in attempt_ids
+        ),
+        "attempt": (
+            sum(1 for e in operator if e.attempt_id == attempts[-1].attempt_id) if attempts else 0
+        ),
+    }
+
+
 @app.command("status")
 def status(
     root: Path = typer.Option(..., "--root"), as_json: bool = typer.Option(False, "--json")
@@ -2059,6 +2137,7 @@ def status(
                     "state": h.state.value,
                     "admission_refusal": _status_refusal(store, h.hypothesis_id),
                     **_status_compute_probe(store, h),
+                    **_status_power(h),
                     "attempts": [
                         {
                             "attempt_id": a.attempt_id,
@@ -2080,6 +2159,7 @@ def status(
             ],
             "last_event": events[-1].to_json() if events else None,
             "owner_turn_failed": owner_failure,
+            "operator_interventions": _status_operator_interventions(store, specs, events),
         }
         typer.echo(
             json.dumps(data, sort_keys=True)

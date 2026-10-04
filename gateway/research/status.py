@@ -25,6 +25,7 @@ from typing import Literal
 from websockets.exceptions import ConnectionClosed
 
 from .contracts import ComputeProbe, compute_requirements
+from .hypothesis import HypothesisDocument
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,10 @@ class ResearchStatus:
     unavailable_reason: str | None = None
     # Additive: only set while the newest hypothesis is a DRAFT.
     compute_probe: dict[str, object] | None = None
+    # Additive: operator-actor event counts for the newest hypothesis / its newest attempt.
+    operator_interventions: dict[str, int] | None = None
+    # Additive: only set while the newest hypothesis is contract v2 (MDE vs plausible effect).
+    power: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         """Return the snake-case representation used by Python callers."""
@@ -299,6 +304,52 @@ def _draft_compute_probe(conn: sqlite3.Connection, hypothesis_id: str) -> dict[s
     }
 
 
+def _operator_interventions(
+    conn: sqlite3.Connection, hypothesis_id: str | None, attempt_id: str | None
+) -> dict[str, int]:
+    """Count operator-actor events for the current hypothesis (and its attempts) and attempt."""
+    if hypothesis_id is None:
+        return {"hypothesis": 0, "attempt": 0}
+    hypothesis_count = conn.execute(
+        "SELECT COUNT(*) FROM events WHERE actor='operator' AND (hypothesis_id=? OR attempt_id IN "
+        "(SELECT attempt_id FROM attempts WHERE hypothesis_id=?))",
+        (hypothesis_id, hypothesis_id),
+    ).fetchone()[0]
+    attempt_count = 0
+    if attempt_id is not None:
+        attempt_count = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE actor='operator' AND attempt_id=?",
+            (attempt_id,),
+        ).fetchone()[0]
+    return {"hypothesis": int(hypothesis_count), "attempt": int(attempt_count)}
+
+
+def power_summary(spec_json: object) -> dict[str, object] | None:
+    """MDE and plausible effect of a v2 hypothesis spec; ``None`` for v1 or unreadable specs."""
+    if not isinstance(spec_json, str):
+        return None
+    try:
+        document = HypothesisDocument.from_json(spec_json)
+    except ValueError:
+        return None
+    if document.power is None:
+        return None
+    return {
+        "minimumDetectableEffectBps": document.power.minimum_detectable_effect_bps,
+        "plausibleEffectBps": document.power.plausible_effect_bps,
+    }
+
+
+def _hypothesis_power(conn: sqlite3.Connection, hypothesis_id: str) -> dict[str, object] | None:
+    try:
+        row = conn.execute(
+            "SELECT spec_json FROM hypotheses WHERE hypothesis_id=?", (hypothesis_id,)
+        ).fetchone()
+    except sqlite3.DatabaseError:
+        return None
+    return None if row is None else power_summary(row[0])
+
+
 def _read_status_from_connection(
     conn: sqlite3.Connection,
     root: Path,
@@ -351,6 +402,16 @@ def _read_status_from_connection(
                 else (str(latest["at"]) if latest is not None else None)
             ),
             compute_probe=compute_probe,
+            operator_interventions=_operator_interventions(
+                conn,
+                str(hypothesis["hypothesis_id"]) if hypothesis is not None else None,
+                str(attempt["attempt_id"]) if attempt is not None else None,
+            ),
+            power=(
+                _hypothesis_power(conn, str(hypothesis["hypothesis_id"]))
+                if hypothesis is not None
+                else None
+            ),
         )
     finally:
         conn.rollback()
@@ -408,6 +469,12 @@ def build_status_frame(status: ResearchStatus) -> dict[str, object]:
         "available": status.available,
         "unavailableReason": status.unavailable_reason,
         **({"computeProbe": status.compute_probe} if status.compute_probe is not None else {}),
+        **(
+            {"operatorInterventions": status.operator_interventions}
+            if status.operator_interventions is not None
+            else {}
+        ),
+        **({"power": status.power} if status.power is not None else {}),
     }
 
 

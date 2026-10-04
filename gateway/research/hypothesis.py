@@ -18,12 +18,17 @@ import math
 from dataclasses import asdict, dataclass
 from datetime import date
 from pathlib import PurePosixPath, PureWindowsPath
+from statistics import NormalDist, StatisticsError
 from typing import Self, cast
 
 from .codec import require_keys_exact, require_str, to_json
 from .contracts import MAX_RUN_TIMEOUT_SECONDS, MAX_STAGE_RSS_MB
 
-_CONTRACT = "research-hypothesis-v1"
+_CONTRACT_V1 = "research-hypothesis-v1"
+_CONTRACT_V2 = "research-hypothesis-v2"
+_CONTRACTS = {_CONTRACT_V1, _CONTRACT_V2}
+MDE_TOLERANCE_BPS = 0.5
+_SIDES = {"one", "two"}
 _SOURCES = {"panel", "derived", "reddit"}
 _PURPOSES = {"DEVELOPMENT_VALIDATION", "FINAL_HOLDOUT"}
 _MAX_TEXT_LENGTH = 16_384
@@ -34,7 +39,18 @@ _FEATURE_KEYS = {"name", "source", "as_of_rule", "lookback_sessions"}
 _DATE_RANGE_KEYS = {"start", "end"}
 _EVIDENCE_KEYS = {"sessions", "trades"}
 _COMPUTE_KEYS = {"max_wall_seconds", "max_rss_mb"}
-_DOCUMENT_KEYS = {
+_POWER_KEYS = {
+    "expected_events",
+    "per_event_sd_bps",
+    "sd_basis",
+    "alpha",
+    "power",
+    "sided",
+    "minimum_detectable_effect_bps",
+    "plausible_effect_bps",
+    "plausibility_basis",
+}
+_V1_DOCUMENT_KEYS = {
     "contract",
     "mechanism",
     "prediction",
@@ -61,6 +77,7 @@ _DOCUMENT_KEYS = {
     "compute",
     "deliverables",
 }
+_V2_DOCUMENT_KEYS = _V1_DOCUMENT_KEYS | {"power"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +164,103 @@ class ComputeLimits:
         )
 
 
+def _finite_positive(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number")
+    try:
+        result = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be finite") from exc
+    if not math.isfinite(result) or result <= 0:
+        raise ValueError(f"{name} must be finite and positive")
+    return result
+
+
+def minimum_detectable_effect_bps(
+    events: int, sd_bps: float, alpha: float, power: float, sided: str
+) -> float:
+    """Return the minimum detectable mean effect in bps for a paired-event z-test.
+
+    MDE = (z_{1-alpha/k} + z_{power}) * sd / sqrt(events), with k = 1 (one-sided) or 2.
+    """
+    _integer(events, "power.expected_events", minimum=1)
+    sd = _finite_positive(sd_bps, "power.per_event_sd_bps")
+    if isinstance(alpha, bool) or not isinstance(alpha, (int, float)) or not 0 < alpha <= 0.5:
+        raise ValueError("power.alpha must be finite and in (0, 0.5]")
+    if isinstance(power, bool) or not isinstance(power, (int, float)) or not 0.5 <= power <= 0.99:
+        raise ValueError("power.power must be finite and in [0.5, 0.99]")
+    if sided not in _SIDES:
+        raise ValueError(f"invalid power.sided: {sided!r}")
+    normal = NormalDist()
+    tail = float(alpha) / (2 if sided == "two" else 1)
+    try:
+        z_alpha = -normal.inv_cdf(tail)
+        z_power = normal.inv_cdf(float(power))
+    except StatisticsError as exc:
+        raise ValueError("power.alpha or power.power is outside the supported bounds") from exc
+    result = (z_alpha + z_power) * sd / math.sqrt(events)
+    if not math.isfinite(result):
+        raise ValueError("power parameters yield a non-finite minimum detectable effect")
+    if result <= 0:
+        raise ValueError("power parameters yield a zero minimum detectable effect")
+    return result
+
+
+@dataclass(frozen=True, slots=True)
+class PowerDesign:
+    """Pre-registered statistical power declaration (hypothesis contract v2)."""
+
+    expected_events: int
+    per_event_sd_bps: float
+    sd_basis: str
+    alpha: float
+    power: float
+    sided: str
+    minimum_detectable_effect_bps: float
+    plausible_effect_bps: float
+    plausibility_basis: str
+
+    def __post_init__(self) -> None:
+        # Validate without coercing: the stored spec must round-trip byte-identically, so the
+        # author's number types (``100`` vs ``100.0``) are kept as written.
+        _integer(self.expected_events, "power.expected_events", minimum=1)
+        _finite_positive(self.per_event_sd_bps, "power.per_event_sd_bps")
+        _text(self.sd_basis, "power.sd_basis")
+        _finite_positive(self.alpha, "power.alpha")
+        _finite_positive(self.power, "power.power")
+        _choice(self.sided, _SIDES, "power.sided")
+        _finite_positive(self.minimum_detectable_effect_bps, "power.minimum_detectable_effect_bps")
+        _finite_positive(self.plausible_effect_bps, "power.plausible_effect_bps")
+        _text(self.plausibility_basis, "power.plausibility_basis")
+        recomputed = self.recomputed_mde_bps()
+        if abs(self.minimum_detectable_effect_bps - recomputed) > MDE_TOLERANCE_BPS:
+            raise ValueError(
+                f"power.minimum_detectable_effect_bps {self.minimum_detectable_effect_bps:g} "
+                f"does not match the recomputed {recomputed:.3f} bps "
+                f"(tolerance {MDE_TOLERANCE_BPS:g} bp)"
+            )
+
+    def recomputed_mde_bps(self) -> float:
+        return minimum_detectable_effect_bps(
+            self.expected_events, self.per_event_sd_bps, self.alpha, self.power, self.sided
+        )
+
+    @classmethod
+    def from_mapping(cls, value: object) -> Self:
+        data = require_keys_exact(value, _POWER_KEYS, "power")
+        return cls(
+            expected_events=data["expected_events"],  # type: ignore[arg-type]
+            per_event_sd_bps=data["per_event_sd_bps"],  # type: ignore[arg-type]
+            sd_basis=data["sd_basis"],  # type: ignore[arg-type]
+            alpha=data["alpha"],  # type: ignore[arg-type]
+            power=data["power"],  # type: ignore[arg-type]
+            sided=data["sided"],  # type: ignore[arg-type]
+            minimum_detectable_effect_bps=data["minimum_detectable_effect_bps"],  # type: ignore[arg-type]
+            plausible_effect_bps=data["plausible_effect_bps"],  # type: ignore[arg-type]
+            plausibility_basis=data["plausibility_basis"],  # type: ignore[arg-type]
+        )
+
+
 def _reject_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
@@ -169,7 +283,9 @@ def _load_object(value: str) -> dict[str, object]:
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid hypothesis document JSON") from exc
-    return require_keys_exact(raw, _DOCUMENT_KEYS, "hypothesis document")
+    is_v2 = isinstance(raw, dict) and raw.get("contract") == _CONTRACT_V2
+    keys = _V2_DOCUMENT_KEYS if is_v2 else _V1_DOCUMENT_KEYS
+    return require_keys_exact(raw, keys, "hypothesis document")
 
 
 def _text(value: object, name: str, *, max_length: int = _MAX_TEXT_LENGTH) -> str:
@@ -284,8 +400,15 @@ def _deliverable_paths(value: object) -> tuple[str, ...]:
 
 
 def _validate_document(document: HypothesisDocument) -> None:
-    if document.contract != _CONTRACT:
+    if document.contract not in _CONTRACTS:
         raise ValueError(f"invalid contract: {document.contract!r}")
+    if document.contract == _CONTRACT_V2:
+        if not isinstance(document.power, PowerDesign):
+            raise ValueError("research-hypothesis-v2 requires a power block")
+        if document.power.expected_events < document.minimum_evidence.trades:
+            raise ValueError("power.expected_events must be at least minimum_evidence.trades")
+    elif document.power is not None:
+        raise ValueError("research-hypothesis-v1 must not carry a power block")
     for name, value in (
         ("mechanism", document.mechanism),
         ("prediction", document.prediction),
@@ -382,12 +505,17 @@ class HypothesisDocument:
     missing_data_rule: str
     compute: ComputeLimits
     deliverables: tuple[str, ...]
+    power: PowerDesign | None = None
 
     def __post_init__(self) -> None:
         _validate_document(self)
 
     def to_json(self) -> str:
-        return to_json(asdict(self))
+        data = asdict(self)
+        if self.power is None:
+            # v1 documents never emitted a power key; keep their bytes and digest unchanged.
+            del data["power"]
+        return to_json(data)
 
     @property
     def sha256(self) -> str:
@@ -432,4 +560,5 @@ class HypothesisDocument:
             deliverables=cast(
                 tuple[str, ...], tuple(_array_values(data["deliverables"], "deliverables"))
             ),
+            power=PowerDesign.from_mapping(data["power"]) if "power" in data else None,
         )

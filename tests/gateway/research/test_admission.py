@@ -40,7 +40,30 @@ DIVIDENDS_SHA = hashlib.sha256(b"dividends").hexdigest()
 SPEC_SET_SHA = hashlib.sha256(b"evaluation-spec-set-fixture").hexdigest()
 
 
+def _power_block() -> dict[str, object]:
+    """A valid v2 power block: 100 events, 100 bp SD, one-sided 0.05/0.8 -> MDE 24.865 bp."""
+    return {
+        "expected_events": 100,
+        "per_event_sd_bps": 100.0,
+        "sd_basis": "per-event SD of the 2020-2023 development sessions, outside the test period",
+        "alpha": 0.05,
+        "power": 0.8,
+        "sided": "one",
+        "minimum_detectable_effect_bps": 24.86,
+        "plausible_effect_bps": 30.0,
+        "plausibility_basis": "gross reversal edge reported for liquid ETFs in the literature",
+    }
+
+
 def _payload() -> dict[str, object]:
+    """Shared v2 hypothesis fixture: every create/freeze test goes through the power gate."""
+    payload = _payload_v1()
+    payload["contract"] = "research-hypothesis-v2"
+    payload["power"] = _power_block()
+    return payload
+
+
+def _payload_v1() -> dict[str, object]:
     return {
         "contract": "research-hypothesis-v1",
         "mechanism": "A short-term reversal after an overnight move.",

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import FrozenInstanceError, replace
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -15,6 +17,8 @@ from gateway.research.hypothesis import (
     FeatureDeclaration,
     HypothesisDocument,
     MinimumEvidence,
+    PowerDesign,
+    minimum_detectable_effect_bps,
 )
 
 
@@ -419,3 +423,236 @@ def test_text_field_above_the_historical_bound_round_trips(
 
     assert len(document.position_sizing_rule) == 8_883
     assert HypothesisDocument.from_json(document.to_json()).to_json() == document.to_json()
+
+
+# --- contract v2: pre-registered power block -------------------------------------------------
+
+H0008_SPEC = Path(__file__).parent / "fixtures" / "H0008-spec.json"
+# pragma: allowlist nextline secret
+H0008_STORED_SHA256 = "bb9bede618d6b9e5deb185cf10926ced5703c912424942f9d102b3a900304452"
+
+
+def _power() -> dict[str, object]:
+    return {
+        "expected_events": 100,
+        "per_event_sd_bps": 100.0,
+        "sd_basis": "SD of paired events in the 2020-2023 development period, not the test period",
+        "alpha": 0.05,
+        "power": 0.8,
+        "sided": "one",
+        "minimum_detectable_effect_bps": 24.86,
+        "plausible_effect_bps": 30.0,
+        "plausibility_basis": "reported gross reversal edge for liquid ETFs",
+    }
+
+
+@pytest.fixture
+def v2_payload(document_payload: dict[str, object]) -> dict[str, object]:
+    document_payload["contract"] = "research-hypothesis-v2"
+    document_payload["power"] = _power()
+    return document_payload
+
+
+def _v2_power(payload: dict[str, object]) -> dict[str, object]:
+    power = payload["power"]
+    assert isinstance(power, dict)
+    return power
+
+
+def test_v2_document_round_trips_and_carries_the_power_block(
+    v2_payload: dict[str, object],
+) -> None:
+    document = HypothesisDocument.from_json(_json(v2_payload))
+
+    assert isinstance(document.power, PowerDesign)
+    assert document.power.minimum_detectable_effect_bps == 24.86
+    assert json.loads(document.to_json())["power"]["sided"] == "one"
+    restored = HypothesisDocument.from_json(document.to_json())
+    assert restored == document
+    assert restored.sha256 == document.sha256
+
+
+def test_v1_document_does_not_emit_a_power_key(document_payload: dict[str, object]) -> None:
+    document = HypothesisDocument.from_json(_json(document_payload))
+
+    assert document.power is None
+    assert "power" not in json.loads(document.to_json())
+
+
+def test_v1_document_rejects_a_power_block_and_v2_requires_one(
+    v2_payload: dict[str, object],
+) -> None:
+    with_power = {**v2_payload, "contract": "research-hypothesis-v1"}
+    with pytest.raises(ValueError, match="keys must be exactly"):
+        HypothesisDocument.from_json(_json(with_power))
+    del v2_payload["power"]
+    with pytest.raises(ValueError, match="keys must be exactly"):
+        HypothesisDocument.from_json(_json(v2_payload))
+
+
+def test_real_h0008_v1_spec_round_trips_byte_identically_with_its_stored_digest() -> None:
+    text = H0008_SPEC.read_text(encoding="utf-8")
+
+    document = HypothesisDocument.from_json(text)
+
+    assert document.contract == "research-hypothesis-v1"
+    assert document.power is None
+    assert document.to_json() == text
+    assert document.sha256 == H0008_STORED_SHA256
+    assert hashlib.sha256(H0008_SPEC.read_bytes()).hexdigest() == H0008_STORED_SHA256
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("expected_events", 0),
+        ("expected_events", 1.5),
+        ("expected_events", True),
+        ("expected_events", "100"),
+        ("per_event_sd_bps", 0),
+        ("per_event_sd_bps", -1.0),
+        ("per_event_sd_bps", True),
+        ("per_event_sd_bps", "100"),
+        ("sd_basis", ""),
+        ("sd_basis", "   "),
+        ("alpha", 0),
+        ("alpha", 0.51),
+        ("alpha", -0.05),
+        ("power", 0.49),
+        ("power", 0.995),
+        ("sided", "both"),
+        ("sided", ""),
+        ("minimum_detectable_effect_bps", 0),
+        ("minimum_detectable_effect_bps", -24.86),
+        ("plausible_effect_bps", 0),
+        ("plausible_effect_bps", -5),
+        ("plausibility_basis", ""),
+        ("plausibility_basis", " "),
+    ],
+)
+def test_v2_power_fields_are_strictly_validated(
+    v2_payload: dict[str, object], key: str, value: object
+) -> None:
+    _v2_power(v2_payload)[key] = value
+
+    with pytest.raises(ValueError):
+        HypothesisDocument.from_json(_json(v2_payload))
+
+
+@pytest.mark.parametrize("key", sorted(_power()))
+def test_v2_power_block_keys_are_exact(v2_payload: dict[str, object], key: str) -> None:
+    power = _v2_power(v2_payload)
+    del power[key]
+    with pytest.raises(ValueError, match="power keys must be exactly"):
+        HypothesisDocument.from_json(_json(v2_payload))
+    power[key] = _power()[key]
+    power["extra"] = 1
+    with pytest.raises(ValueError, match="power keys must be exactly"):
+        HypothesisDocument.from_json(_json(v2_payload))
+
+
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity"])
+def test_v2_power_rejects_non_finite_json_numbers(v2_payload: dict[str, object], bad: str) -> None:
+    text = _json(v2_payload).replace('"per_event_sd_bps":100.0', f'"per_event_sd_bps":{bad}')
+
+    with pytest.raises(ValueError, match="invalid hypothesis document JSON"):
+        HypothesisDocument.from_json(text)
+
+
+def test_v2_mde_must_match_the_recomputation_within_half_a_basis_point(
+    v2_payload: dict[str, object],
+) -> None:
+    exact = minimum_detectable_effect_bps(100, 100.0, 0.05, 0.8, "one")
+    assert exact == pytest.approx(24.8648, abs=1e-3)
+    power = _v2_power(v2_payload)
+    for declared in (exact - 0.49, exact + 0.49, exact):
+        power["minimum_detectable_effect_bps"] = declared
+        HypothesisDocument.from_json(_json(v2_payload))
+    for declared in (exact - 0.51, exact + 0.51, 2 * exact):
+        power["minimum_detectable_effect_bps"] = declared
+        with pytest.raises(ValueError, match="does not match the recomputed"):
+            HypothesisDocument.from_json(_json(v2_payload))
+
+
+def test_v2_one_and_two_sided_mdes_differ_and_each_is_enforced(
+    v2_payload: dict[str, object],
+) -> None:
+    one = minimum_detectable_effect_bps(100, 100.0, 0.05, 0.8, "one")
+    two = minimum_detectable_effect_bps(100, 100.0, 0.05, 0.8, "two")
+    assert two > one + 3
+    power = _v2_power(v2_payload)
+    power["sided"] = "two"
+    with pytest.raises(ValueError, match="does not match the recomputed"):
+        HypothesisDocument.from_json(_json(v2_payload))
+    power["minimum_detectable_effect_bps"] = round(two, 2)
+    document = HypothesisDocument.from_json(_json(v2_payload))
+    assert document.power is not None and document.power.sided == "two"
+
+
+def test_minimum_detectable_effect_reproduces_the_h0008_numbers() -> None:
+    assert minimum_detectable_effect_bps(107, 194.0, 0.05, 0.8, "one") == pytest.approx(
+        46.6, abs=0.1
+    )
+
+
+@pytest.mark.parametrize(
+    ("events", "sd", "alpha", "power", "sided"),
+    [
+        (0, 100.0, 0.05, 0.8, "one"),
+        (100, 0.0, 0.05, 0.8, "one"),
+        (100, float("inf"), 0.05, 0.8, "one"),
+        (100, 100.0, 0.0, 0.8, "one"),
+        (100, 100.0, 0.6, 0.8, "one"),
+        (100, 100.0, 0.05, 0.4, "one"),
+        (100, 100.0, 0.05, 0.8, "three"),
+    ],
+)
+def test_minimum_detectable_effect_refuses_invalid_inputs(
+    events: int, sd: float, alpha: float, power: float, sided: str
+) -> None:
+    with pytest.raises(ValueError):
+        minimum_detectable_effect_bps(events, sd, alpha, power, sided)
+
+
+def test_v2_expected_events_must_cover_minimum_evidence_trades(
+    v2_payload: dict[str, object],
+) -> None:
+    v2_payload["minimum_evidence"] = {"sessions": 20, "trades": 100}
+    HypothesisDocument.from_json(_json(v2_payload))
+    v2_payload["minimum_evidence"] = {"sessions": 20, "trades": 101}
+
+    with pytest.raises(ValueError, match="expected_events must be at least"):
+        HypothesisDocument.from_json(_json(v2_payload))
+
+
+def test_v2_direct_construction_requires_a_power_design(v2_payload: dict[str, object]) -> None:
+    document = HypothesisDocument.from_json(_json(v2_payload))
+
+    with pytest.raises(ValueError, match="requires a power block"):
+        replace(document, power=None)
+    with pytest.raises(ValueError, match="must not carry a power block"):
+        replace(document, contract="research-hypothesis-v1")
+
+
+def test_v2_integer_and_float_bps_values_keep_their_written_types(
+    v2_payload: dict[str, object],
+) -> None:
+    power = _v2_power(v2_payload)
+    power.update(
+        {"per_event_sd_bps": 100, "minimum_detectable_effect_bps": 25, "plausible_effect_bps": 30}
+    )
+    canonical = json.dumps(v2_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+    document = HypothesisDocument.from_json(canonical)
+
+    assert document.to_json() == canonical
+    assert '"per_event_sd_bps":100,' in canonical
+    assert document.sha256 == hashlib.sha256(canonical.encode()).hexdigest()
+    power["per_event_sd_bps"] = 100.0
+    as_float = json.dumps(v2_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert HypothesisDocument.from_json(as_float).to_json() == as_float != canonical
+
+
+def test_minimum_detectable_effect_refuses_a_zero_effect() -> None:
+    with pytest.raises(ValueError, match="zero minimum detectable effect"):
+        minimum_detectable_effect_bps(100, 100.0, 0.5, 0.5, "one")

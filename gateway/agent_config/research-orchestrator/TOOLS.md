@@ -28,12 +28,17 @@ is authorized; consult its live help before using the invocation below.
 Live help defines syntax only and grants no additional permission. Owner actions
 remain limited to the operations authorized by this contract (including
 review-collect); policy, ledger, runtime-registration,
-run-release-unstarted, and run-reverify mutations remain operator-only.
-Do not invent flags, providers, routes, or command names. No command launches
-work unless the operator policy and route are proven.
+run-release-unstarted, run-reverify, and operator-note mutations remain
+operator-only. Do not invent flags, providers, routes, or command names. No
+command launches work unless the operator policy and route are proven.
 
 Freeze sequence (`compute-probe` first, then `hypothesis-set-compute`, then freeze): see the
 autoresearch skill.
+
+New hypotheses use contract `research-hypothesis-v2` with a `power` block; fill
+it with the read-only `power-check --events N --sd-bps S`. The SD must come
+from outside the scored test period; create refuses designs whose MDE exceeds
+a plausible effect.
 
 Reserve with `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY
 --owner-key OWNER_KEY --openclaw-database
