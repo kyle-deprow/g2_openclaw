@@ -111,6 +111,30 @@ or proof that a current-price ETF feed is installed.
   runtime capability. Reject or inconclusive evidence is useful; smoke, API,
   process, or zero-trade success is not scientific evidence.
 
+## Campaign record and new-hypothesis gates (2026-10-04)
+
+- **Family closed.** The single-slot sector-ETF residual reversal family
+  (H0001–H0008) is closed: H0008 FINISHED as REJECT_FOR_THIS_DESIGN (paired
+  −26.2 bp, p=0.871). Do not author further variants of it on this panel.
+- **Holdout.** Sessions after 2026-07-31 are a reserved holdout. Never score,
+  tune or inspect them in development; evaluating them needs an explicit
+  operator decision.
+- **Controls.** A new hypothesis must say why it should beat the same-date
+  matched-market and unconditional-dip controls, which beat H0008's signal.
+- **Power.** New hypotheses use contract `research-hypothesis-v2` with a
+  `power` block. The SD basis must come from outside the scored test period;
+  `research power-check` computes the MDE. Create refuses non-canonical specs
+  and designs whose MDE exceeds the declared plausible effect.
+- **Compute.** Run `compute-probe` after create (it can take tens of minutes to
+  hours), then `hypothesis-set-compute` from its requirements, then freeze. A
+  DRAFT that cannot be frozen is abandoned with `hypothesis-decide ... ABANDONED`.
+- **Submission.** `submission-build` derives the record, run plan and
+  provenance index; `submission-preflight` must PASS before
+  `implementation-submit`. Never hand-compute digests or targets argv.
+- **Operator-only.** `run-reverify` (once, for a verified
+  `run_evidence_mismatch`) and `operator-note` (counted in
+  `operatorInterventions`) are operator mutations.
+
 ## Frozen fields and proof boundary
 
 The outer frozen fields are `hypothesis_id`, `title`, `spec_json`,
@@ -126,7 +150,7 @@ The exact document fields are `contract`, `mechanism`, `prediction`, `target`,
 `position_sizing_rule`, `variants`, `search_budget_evaluations`, `analysis`,
 `evaluation`, `training`, `purpose`, `forward_label_sessions`, `purge_rule`,
 `primary_metric`, `minimum_evidence`, `null_tests`, `reject_criteria`,
-`missing_data_rule`, `compute`, and `deliverables`.
+`missing_data_rule`, `compute`, and `deliverables`; contract v2 adds `power`.
 
 Exposure counting uses a digest-matched immutable ledger and the classifications
 NONE, KNOWN_EXPOSED, and UNKNOWN_HISTORY. Unknown history blocks FINAL_HOLDOUT;

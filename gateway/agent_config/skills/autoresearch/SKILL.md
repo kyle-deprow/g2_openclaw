@@ -87,7 +87,9 @@ tens of minutes to hours) → `hypothesis-set-compute` with `--max-rss-mb` at
 least the probe's `min_rss_mb` → `hypothesis-freeze`. The probe measures
 `validate-inputs` per spec and an empty-target `evaluate` under the worker's
 containment and prints `min_rss_mb` and `min_scenario_timeout_seconds`. Freeze
-refuses without a probe or with a smaller `compute.max_rss_mb`; implementation
+refuses without a probe, with a smaller `compute.max_rss_mb`, or with a
+`compute.max_wall_seconds` that no plan meeting the probe fits; set it to cover
+the intended plan's stage budget, which preflight enforces; implementation
 submit refuses a run plan whose `scenario_timeout_seconds` is below
 `min_scenario_timeout_seconds`; `run --max-rss-mb` may not undercut either
 bound. A failed or timed-out probe records nothing; fix the cause and retry. A
@@ -209,6 +211,14 @@ panel sessions, immutable receipts, the exposure ledger, and evaluator bounds.
 Refuse stock work without trusted point-in-time earnings coverage and fail closed
 on unknown earnings status. A holding horizon above five sessions is refused.
 Do not claim alpha from smoke or synthetic data.
+
+Campaign record (2026-10-04): the single-slot sector-ETF residual reversal
+family (H0001–H0008) is closed after H0008 FINISHED as REJECT_FOR_THIS_DESIGN;
+do not author further variants of it on this panel. Sessions after 2026-07-31
+are a reserved holdout: never score, tune or inspect them in development;
+evaluating them needs an explicit operator decision. Each new hypothesis states
+why it should beat the same-date matched-market and unconditional-dip controls,
+which beat H0008's signal, and must be powered (v2 `power` block).
 
 Use quantipy-data-contract readiness receipts for universe, price, corporate
 action, timing, cache, unsupported-data, and prompt-hygiene rules. Do not query

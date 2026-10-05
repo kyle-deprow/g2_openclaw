@@ -191,6 +191,15 @@ recorded; it measures real cost and can take tens of minutes to hours) →
 abandoned with `hypothesis-decide HYPOTHESIS_ID --root ROOT --decision ABANDONED
 --reason "..."`.
 
+New hypotheses use contract `research-hypothesis-v2` with a `power` block whose
+SD basis comes from outside the scored test period (`power-check` computes the
+MDE); create refuses non-canonical specs and designs whose MDE exceeds the
+plausible effect. The sector-ETF residual reversal family (H0001–H0008) is
+closed, and sessions after 2026-07-31 are a reserved holdout. Before
+`implementation-submit`, `submission-build` derives the record, run plan and
+provenance index and `submission-preflight` must PASS; never hand-compute
+digests or targets argv. `run-reverify` and `operator-note` are operator-only.
+
 For a fresh hypothesis, author and freeze one immutable `EvaluationSpecSet`
 manifest before review. Its regular, digest-bound evaluator files must share
 the primary panel, universe, dates, horizon, and operator-policy bounds; only

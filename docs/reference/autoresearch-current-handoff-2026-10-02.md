@@ -339,6 +339,64 @@ Open follow-ups, none blocking:
   - No further attempts or hypotheses are admitted; resuming is a fresh user
     decision.
 
+## Post-E2E improvements (2026-10-04, user directive: sonnet/opus loop)
+
+Each package was implemented by Sonnet and reviewed adversarially by Opus
+until READY. The parent verified each package serially, with FORCE_COLOR set
+and unset. All packages are committed and pushed.
+
+- **Golden end-to-end test (`0abce5f`).**
+  - The production queue → serve → launch → real worker under bwrap and
+    systemd-run → host verify → close/decide path runs with fake
+    target/evaluator/analysis programs only.
+  - Mutation checks show it catches the c92c566 verifier bug and the 3fbc3cb
+    stage-budget bug.
+- **Compute probe (`d330ebd`, `4540576`).**
+  - `research compute-probe H` runs on a DRAFT and measures validate-inputs
+    plus an empty-target evaluate under the worker's containment.
+  - Freeze requires a matching probe, `max_rss_mb` ≥ 1.25× the measured peak,
+    and a `max_wall_seconds` that some plan fits.
+  - Submit requires `scenario_timeout` ≥ 1.5× the measured wall.
+  - `hypothesis-set-compute` edits a DRAFT's compute block. A DRAFT can be
+    ABANDONED if it is infeasible. Freeze writes are state-conditioned.
+- **Power gate and operator metric (`031fab7`).**
+  - Contract `research-hypothesis-v2` adds a `power` block. The MDE is
+    recomputed, and designs whose MDE exceeds the plausible effect are
+    refused at create, as are non-canonical specs.
+  - The v1 specs H0001–H0008 are byte-identical.
+  - `research power-check` computes the MDE. Status reports
+    `operatorInterventions`; the operator-only `research operator-note`
+    records briefs and audits.
+- **Submission tools (`27a17f5`).**
+  - `research submission-build` derives the record, plan and provenance
+    deterministically.
+  - `research submission-preflight` is read-only and shares
+    implementation-submit's checks. It adds a bundle dry-build that
+    reproduces the real H0008-A001 bundle byte-for-byte.
+- **Quantipy evaluator speedup (quantipy `7a2ce40`).**
+  - validate-inputs went from 642–1848 s to about 8–10 s. evaluate went from
+    about 600 s to about 10 s. Peak RSS went from about 6 GB to 2.2 GB.
+  - All five real H0008 cases are byte-identical to the old code. evaluate
+    s000 also matches the production containment run.
+  - **Not yet live.** The live campaign's `driver_config` pins the evaluator
+    snapshot `quantipy-source-snapshot-44c77a8` and has no re-pin path. The
+    speedup takes effect only for a new research root (or campaign)
+    initialized with a fresh snapshot of quantipy `7a2ce40` or later. That
+    choice belongs to the operator when the next campaign starts.
+- **Research direction** is now in the autoresearch and research-loop runtime
+  skills and the `.claude` mirror:
+  - the sector-ETF residual reversal family is closed;
+  - sessions after 2026-07-31 are a reserved holdout;
+  - new hypotheses must explain why they beat the matched-market and dip
+    controls, and must be powered.
+- **Housekeeping.** The superseded 2026-09-06 planning drafts
+  (`autoresearch-simplification-plan.md`, `autoresearch-cleanup-inventory.json`,
+  `fable-autoresearch-handoff.md`) moved from `docs/reference/` to
+  `.archive/2026-09-06-simplification-planning/`. They were preserved and
+  never tracked.
+- **State.** The campaign remains PAUSED and `research-owner.service` is
+  stopped. The next family choice is the user's.
+
 ## Guardrails (unchanged, plus the 10-02 directive)
 
 OpenAI models only for the research loop. Use no Anthropic, Claude, ACP, or Opus
