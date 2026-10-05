@@ -394,6 +394,18 @@ and unset. All packages are committed and pushed.
   `fable-autoresearch-handoff.md`) moved from `docs/reference/` to
   `.archive/2026-09-06-simplification-planning/`. They were preserved and
   never tracked.
+- **Deploy (2026-10-04).** The first push rolled back. `research-status`
+  printed rich-colored JSON under `FORCE_COLOR=3`, which this host's agent
+  shell sets, so the command-contract probe could not parse it.
+  - Fixed in `e10b830`: plain `json.dumps` output, plus a subprocess
+    regression test.
+  - Each rollback and each successful push leaves
+    `.push-openclaw-config-artifacts.*` behind. It holds a copy of the
+    read-only H0006 A003 review bundle, which the script cannot `rm`.
+  - The live original was verified identical before the copy was removed
+    with `chmod -R u+w` + `rm`.
+  - The redeploy passed, the live docs match the repo, and the gateway is
+    healthy.
 - **State.** The campaign remains PAUSED and `research-owner.service` is
   stopped. The next family choice is the user's.
 
