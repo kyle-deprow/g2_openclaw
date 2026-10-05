@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -86,3 +89,22 @@ def test_read_only_research_status_uses_shared_env_root(
 
     assert result.exit_code == 0
     read_status.assert_called_once_with(root)
+
+
+def test_research_status_emits_plain_json_when_color_is_forced(tmp_path: Path) -> None:
+    """The deploy probe and G2 parse this stdout; ANSI styling must never reach it."""
+    env = {**os.environ, "FORCE_COLOR": "3", "TERM": "xterm-256color"}
+    env.pop("NO_COLOR", None)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "gateway", "research-status", "--root", str(tmp_path / "missing")],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "\x1b[" not in result.stdout
+    assert json.loads(result.stdout)["type"] == "autoresearch_status"

@@ -43,7 +43,8 @@ def research_status(
 ) -> None:
     """Print the read-only research status projection without initializing storage."""
     status = read_status(resolve_research_root(root))
-    console.print_json(json.dumps(build_status_frame(status), sort_keys=True))
+    # Machine-readable contract: plain JSON on stdout regardless of FORCE_COLOR or a TTY.
+    typer.echo(json.dumps(build_status_frame(status), sort_keys=True, indent=2))
 
 
 # ---------------------------------------------------------------------------
