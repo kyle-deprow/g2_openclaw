@@ -195,7 +195,9 @@ New hypotheses use contract `research-hypothesis-v2` with a `power` block whose
 SD basis comes from outside the scored test period (`power-check` computes the
 MDE); create refuses non-canonical specs and designs whose MDE exceeds the
 plausible effect. The sector-ETF residual reversal family (H0001–H0008) is
-closed, and sessions after 2026-07-31 are a reserved holdout. Before
+closed, and sessions after 2026-07-31 are a reserved holdout. The active
+campaign is calendar-flows-20261005 (root `research-v3`); its workspace
+`campaigns/calendar-flows-20261005/CHARTER.md` governs authoring. Before
 `implementation-submit`, `submission-build` derives the record, run plan and
 provenance index and `submission-preflight` must PASS; never hand-compute
 digests or targets argv. `run-reverify` and `operator-note` are operator-only.
