@@ -409,6 +409,52 @@ and unset. All packages are committed and pushed.
 - **State.** The campaign remains PAUSED and `research-owner.service` is
   stopped. The next family choice is the user's.
 
+## Autonomous campaign calendar-flows-20261005 (2026-10-05/06)
+
+**User directive:** "pick the next research family … fully autonomous … you
+will drive it".
+
+- **Family.** Scheduled-flow calendar effects (turn of month first) in liquid,
+  unlevered ETFs. This family fits the trusted evaluator: long-only,
+  close-to-open, at most 5-session holds.
+- **Data.**
+  - The Massive plan serves only a rolling ~5 years of minute data. The 2008
+    probes returned 403.
+  - The user declined to buy depth until it was justified. They approved a
+    5-year, 15-ETF panel: SPY, QQQ, IWM, EFA, EEM, TLT, IEF, HYG, GLD, VNQ,
+    XLE, XLF, XLK, XLU and XLV, from 2021-11-01 to 2026-07-31.
+  - The pull took 327 provider requests. All 1,191 sessions are complete for
+    every ticker.
+  - Inputs, charter, recipe and backup:
+    `/home/dev/autoresearch-calendar-20261005/` (read-only) and
+    `/home/dev/backups/`.
+- **Root.** A new root `/home/dev/.openclaw/research-v3`, pinned to quantipy
+  `7a2ce40`. `RESEARCH_V2_ROOT` in `gateway/openclaw_config/.env` now points
+  there. The old root `research-v2` (H0001–H0008) is untouched.
+- **Result.** Astra ran autonomously:
+  1. Her turn-of-month equity basket was refused at create: MDE 110.7 bp vs a
+     plausible 30 bp, on 44 events, with SD measured on an excluded warm-up
+     year.
+  2. The operator nudged her once (intervention #1), because a refused create
+     left no record and so no wake.
+  3. Her cross-asset redesign was refused: MDE 63.8 bp vs a plausible 6 bp.
+  4. She then paused under the charter stop condition, with quantified
+     history requirements: about 50 years at 30 bp for the equity basket, and
+     even a generous 30 bp needs about 17 years.
+
+  **Conclusion:** long-only time-series calendar effects on a few correlated
+  ETFs are unpowered at any affordable data depth. The operator's earlier
+  "20 years would power it" estimate was wrong; the measured noise is about
+  295 bp per event.
+- **Fix.** a83c32e: refused creates are now recorded and re-wake the owner, and
+  `pause --owner` exists. The operator found that uncommitted edits in the
+  main tree run live, because gateway-cli is an editable install. While a
+  campaign is active, develop in a `git worktree`.
+- **Next (user-approved).** Build a trusted point-in-time earnings calendar
+  (SEC EDGAR 8-K Item 2.02) to unlock cross-sectional stock research, where
+  in-event breadth gives power. research-v3 stays PAUSED with the owner
+  stopped.
+
 ## Guardrails (unchanged, plus the 10-02 directive)
 
 OpenAI models only for the research loop. Use no Anthropic, Claude, ACP, or Opus
