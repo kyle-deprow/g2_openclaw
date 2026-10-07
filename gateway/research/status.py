@@ -26,6 +26,7 @@ from websockets.exceptions import ConnectionClosed
 
 from .contracts import ComputeProbe, compute_requirements
 from .hypothesis import HypothesisDocument
+from .refusals import read_create_refusals
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,9 @@ class ResearchStatus:
     operator_interventions: dict[str, int] | None = None
     # Additive: only set while the newest hypothesis is contract v2 (MDE vs plausible effect).
     power: dict[str, object] | None = None
+    # Additive: only set while no hypothesis exists or the newest one is DECIDED (the
+    # NO_HYPOTHESIS/ALL_DECIDED stages); refused creates since the last create/decide/resume.
+    create_refusals: dict[str, object] | None = None
 
     def as_dict(self) -> dict[str, object]:
         """Return the snake-case representation used by Python callers."""
@@ -304,6 +308,15 @@ def _draft_compute_probe(conn: sqlite3.Connection, hypothesis_id: str) -> dict[s
     }
 
 
+def _create_refusals(
+    conn: sqlite3.Connection, hypothesis_state: str | None
+) -> dict[str, object] | None:
+    if hypothesis_state not in {None, "DECIDED"}:
+        return None
+    count, latest = read_create_refusals(conn)
+    return {"count": count, "latestReason": latest}
+
+
 def _operator_interventions(
     conn: sqlite3.Connection, hypothesis_id: str | None, attempt_id: str | None
 ) -> dict[str, int]:
@@ -412,6 +425,9 @@ def _read_status_from_connection(
                 if hypothesis is not None
                 else None
             ),
+            create_refusals=_create_refusals(
+                conn, str(hypothesis["state"]) if hypothesis is not None else None
+            ),
         )
     finally:
         conn.rollback()
@@ -475,6 +491,9 @@ def build_status_frame(status: ResearchStatus) -> dict[str, object]:
             else {}
         ),
         **({"power": status.power} if status.power is not None else {}),
+        **(
+            {"createRefusals": status.create_refusals} if status.create_refusals is not None else {}
+        ),
     }
 
 

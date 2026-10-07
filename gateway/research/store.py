@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import TextIO, cast
+from typing import Literal, TextIO, cast
 
 from .admission import AdmissionDecision, CampaignPolicy
 from .codec import to_json
@@ -63,6 +63,7 @@ from .machine import (
 from .machine import (
     open_attempt as machine_open_attempt,
 )
+from .refusals import REFUSED_KIND, read_create_refusals
 
 
 class OwnerLockHeld(RuntimeError):
@@ -769,13 +770,81 @@ class ResearchStore:
         evaluation_spec_set: Path | None = None,
     ) -> HypothesisSpec:
         if any(h.state != HypothesisState.DECIDED for h in self.hypotheses()):
+            # A state precondition, not a design refusal: the DRAFT wake already covers it.
             raise ValueError("hypothesis-create requires every existing hypothesis to be DECIDED")
         with self._connect() as conn:
             configured = conn.execute(
                 "SELECT containment_ready FROM driver_config WHERE singleton=1"
             ).fetchone()
         if configured is None or not bool(configured[0]):
+            # Operator setup state, not an owner design refusal: never recorded.
             raise ValueError("contained runtime must be configured before hypothesis-create")
+        try:
+            return self._create_hypothesis(
+                title,
+                spec_file,
+                panel,
+                receipt,
+                eval_spec,
+                base_commit,
+                dividends,
+                max_attempts,
+                evaluation_spec_set,
+            )
+        except (ValueError, StoreConflict) as exc:
+            self._record_create_refusal(exc, spec_file)
+            raise
+
+    def _record_create_refusal(self, exc: Exception, spec_file: Path) -> None:
+        """Append one ``hypothesis_create_refused`` event for a deterministic refusal.
+
+        Runs in its own transaction after the refusal is final. A store that cannot record
+        (locked or unavailable) never masks the original refusal, which the caller re-raises.
+        """
+        spec_sha256: str | None = None
+        with suppress(OSError, ValueError):
+            spec_sha256 = _digest(to_json(json.loads(spec_file.read_text(encoding="utf-8"))))
+        try:
+            with self._connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT COALESCE(MAX(CAST(SUBSTR(hypothesis_id,2) AS INTEGER)),0)+1 "
+                    "FROM hypotheses"
+                ).fetchone()
+                next_id = f"H{int(row[0]):04d}"
+                self._event(
+                    conn,
+                    next_id,
+                    None,
+                    REFUSED_KIND,
+                    {
+                        "reason": str(exc),
+                        "spec_sha256": spec_sha256,
+                        "next_hypothesis_id": next_id,
+                    },
+                    "astra",
+                )
+                conn.commit()
+        except sqlite3.Error:
+            return
+
+    def create_refusals(self) -> tuple[int, str | None]:
+        """Refusals since the last create, decide or resume, and the latest reason."""
+        with self._connect() as conn:
+            return read_create_refusals(conn)
+
+    def _create_hypothesis(
+        self,
+        title: str,
+        spec_file: Path,
+        panel: Path,
+        receipt: Path,
+        eval_spec: Path,
+        base_commit: str,
+        dividends: Path,
+        max_attempts: int,
+        evaluation_spec_set: Path | None,
+    ) -> HypothesisSpec:
         if evaluation_spec_set is None:
             raise ValueError("evaluation spec set is required for every new hypothesis")
         if dividends.is_symlink() or not dividends.is_file():
@@ -2035,12 +2104,16 @@ class ResearchStore:
             conn.commit()
         return seq
 
-    def pause(self, reason: str) -> None:
+    def pause(self, reason: str, actor: Literal["operator", "astra"] = "operator") -> None:
+        """Pause the campaign; ``actor="astra"`` marks an owner stop (not an operator action).
+
+        The event attaches to the newest hypothesis (``H0001`` when none exists yet).
+        """
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("UPDATE campaign SET status='PAUSED' WHERE singleton=1")
             row = conn.execute(
-                "SELECT hypothesis_id FROM hypotheses ORDER BY hypothesis_id LIMIT 1"
+                "SELECT hypothesis_id FROM hypotheses ORDER BY hypothesis_id DESC LIMIT 1"
             ).fetchone()
             self._event(
                 conn,
@@ -2048,7 +2121,7 @@ class ResearchStore:
                 None,
                 "campaign_paused",
                 {"reason": reason},
-                "operator",
+                actor,
             )
             conn.commit()
 
@@ -2087,7 +2160,7 @@ class ResearchStore:
             )
             row = conn.execute("SELECT resume_seq FROM campaign WHERE singleton=1").fetchone()
             row_h = conn.execute(
-                "SELECT hypothesis_id FROM hypotheses ORDER BY hypothesis_id LIMIT 1"
+                "SELECT hypothesis_id FROM hypotheses ORDER BY hypothesis_id DESC LIMIT 1"
             ).fetchone()
             self._event(
                 conn,

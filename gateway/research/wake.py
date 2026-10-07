@@ -110,6 +110,32 @@ _FREEZE_SEQUENCE = (
 )
 
 
+_REFUSAL_REASON_LIMIT = 300
+_CHARTER_STOP_SENTENCE = (
+    "If the campaign charter's stop condition is met (for example, consecutive underpowered "
+    "refusals), pause with `gateway-cli research pause --root ROOT --owner --reason TEXT`; "
+    "otherwise redesign - do not resubmit the same design unchanged."
+)
+
+
+def _create_refusal_suffix(count: int, reason: str | None) -> str:
+    """Wake text appended only after refused creates; empty (byte-identical) otherwise."""
+    if count == 0:
+        return ""
+    shown = " ".join((reason or "no reason recorded").split())
+    if len(shown) > _REFUSAL_REASON_LIMIT:
+        shown = shown[: _REFUSAL_REASON_LIMIT - 3] + "..."
+    return (
+        f" {count} hypothesis-create refusal(s) of any reason since the last create, decide or "
+        f"resume; latest: {shown}. {_CHARTER_STOP_SENTENCE}"
+    )
+
+
+def _create_refusal_key(hypothesis_id: str, state: str, resume_seq: int, count: int) -> str:
+    # Zero refusals keeps the historical key; each new refusal yields exactly one new key.
+    return _key(hypothesis_id, f"create_refusals:{count}" if count else None, state, resume_seq)
+
+
 def _draft_wake_text(store: ResearchStore, hypothesis_id: str) -> str:
     try:
         probe = store.compute_probe(hypothesis_id)
@@ -134,6 +160,10 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
     if status == "PAUSED":
         return None
     hypotheses = store.hypotheses()
+    refusal_count, refusal_reason = (0, None)
+    if not hypotheses or all(item.state == HypothesisState.DECIDED for item in hypotheses):
+        refusal_count, refusal_reason = store.create_refusals()
+    refusal_suffix = _create_refusal_suffix(refusal_count, refusal_reason)
     frozen = next((item for item in hypotheses if item.state == HypothesisState.FROZEN), None)
     if frozen is None:
         if not hypotheses:
@@ -141,8 +171,8 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
                 "H0001",
                 None,
                 "NO_HYPOTHESIS",
-                f"Astra: create one hypothesis with `gateway-cli research hypothesis-create --root ROOT ...`, then {_FREEZE_SEQUENCE.format(hid='H0001')}",
-                _key("H0001", None, "NO_HYPOTHESIS", resume_seq),
+                f"Astra: create one hypothesis with `gateway-cli research hypothesis-create --root ROOT ...`, then {_FREEZE_SEQUENCE.format(hid='H0001')}{refusal_suffix}",
+                _create_refusal_key("H0001", "NO_HYPOTHESIS", resume_seq, refusal_count),
                 resume_seq,
             )
         if all(item.state == HypothesisState.DECIDED for item in hypotheses):
@@ -152,8 +182,8 @@ def compose_wake(store: ResearchStore) -> WakePlan | None:
                 next_id,
                 None,
                 "ALL_DECIDED",
-                f"Astra: author the next hypothesis {next_id} (all existing hypotheses are DECIDED), then {_FREEZE_SEQUENCE.format(hid=next_id)}",
-                _key(next_id, None, "ALL_DECIDED", resume_seq),
+                f"Astra: author the next hypothesis {next_id} (all existing hypotheses are DECIDED), then {_FREEZE_SEQUENCE.format(hid=next_id)}{refusal_suffix}",
+                _create_refusal_key(next_id, "ALL_DECIDED", resume_seq, refusal_count),
                 resume_seq,
             )
         draft = next(

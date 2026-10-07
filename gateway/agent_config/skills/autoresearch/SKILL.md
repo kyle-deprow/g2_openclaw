@@ -79,6 +79,12 @@ Power gate: a new hypothesis uses contract `research-hypothesis-v2`, which adds 
 must match within 0.5 bp, and `expected_events` must cover `minimum_evidence.trades`).
 The SD must come from outside the scored test period. `hypothesis-create` refuses v1
 specs and any design whose MDE exceeds the plausible effect (`underpowered design`).
+A refused create writes no hypothesis but records a `hypothesis_create_refused` event;
+the NO_HYPOTHESIS/ALL_DECIDED wake then re-fires once per new refusal with the latest reason
+and the count since the last create, decide or resume (status `createRefusals`). The campaign
+charter's stop condition applies: `gateway-cli research pause --root ROOT --owner --reason TEXT`
+is owner-authorized for it (for example after consecutive underpowered refusals, pause with a
+summary); never resume yourself.
 
 Freeze sequence: create → `compute-probe HYPOTHESIS_ID --root ROOT` (owner or
 operator; DRAFT only; recorded once; it needs the non-blocking run lock, so it

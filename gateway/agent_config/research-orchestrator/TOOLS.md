@@ -32,6 +32,12 @@ run-release-unstarted, run-reverify, and operator-note mutations remain
 operator-only. Do not invent flags, providers, routes, or command names. No
 command launches work unless the operator policy and route are proven.
 
+`pause --root ROOT --owner --reason TEXT` is owner-authorized for the campaign charter's stop
+condition (for example after consecutive underpowered `hypothesis-create` refusals): pause
+with a summary instead of retrying, and never resume yourself. Use `--owner` for any
+owner-initiated pause. A refused create is recorded
+and re-wakes you once with the reason and count; an operator `resume` resets that count.
+
 Freeze sequence (`compute-probe` first, then `hypothesis-set-compute`, then freeze): see the
 autoresearch skill.
 

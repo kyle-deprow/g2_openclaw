@@ -2092,10 +2092,14 @@ def hypothesis_decide(
 
 @app.command("pause")
 def pause(
-    root: Path = typer.Option(..., "--root"), reason: str = typer.Option(..., "--reason")
+    root: Path = typer.Option(..., "--root"),
+    reason: str = typer.Option(..., "--reason"),
+    owner: bool = typer.Option(
+        False, "--owner", help="Record an owner (Astra) stop instead of an operator pause."
+    ),
 ) -> None:
     try:
-        ResearchStore(_root(root)).pause(reason)
+        ResearchStore(_root(root)).pause(reason, actor="astra" if owner else "operator")
         typer.echo("PAUSED")
     except Exception as exc:
         _fail(exc)
@@ -2181,6 +2185,14 @@ def _status_operator_interventions(
     }
 
 
+def _status_create_refusals(store: ResearchStore, specs: list[HypothesisSpec]) -> dict[str, object]:
+    """Additive status field for the NO_HYPOTHESIS/ALL_DECIDED stage: refused creates."""
+    if specs and specs[-1].state != HypothesisState.DECIDED:
+        return {}
+    count, latest = store.create_refusals()
+    return {"create_refusals": {"count": count, "latestReason": latest}}
+
+
 @app.command("status")
 def status(
     root: Path = typer.Option(..., "--root"), as_json: bool = typer.Option(False, "--json")
@@ -2238,6 +2250,7 @@ def status(
             "last_event": events[-1].to_json() if events else None,
             "owner_turn_failed": owner_failure,
             "operator_interventions": _status_operator_interventions(store, specs, events),
+            **_status_create_refusals(store, specs),
         }
         typer.echo(
             json.dumps(data, sort_keys=True)
