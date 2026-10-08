@@ -455,6 +455,38 @@ will drive it".
   in-event breadth gives power. research-v3 stays PAUSED with the owner
   stopped.
 
+## Stock-research validation and close-out (2026-10-06/08)
+
+- **B1 discovery (read-only).** It found several blockers:
+  - The evaluator marks a run non-compliant on any missing stock session.
+    Only 45 of 215 cached stocks are complete, which forces survivorship
+    bias.
+  - Minute-bar memory caps a run at about 75–105 stocks.
+  - The cached names are not a point-in-time universe, and 18 show
+    ticker-reuse or split artifacts.
+  - The admission enum disagrees with quantipy: `stock` vs `common_stock`.
+  - Earnings data could only ever carry SNAPSHOT_REPLAY provenance.
+  - The estimated build is 10–14 working days.
+- **V1/V1b validation.** It measured noise only, never means. Report:
+  `.archive/research-improvements-20261004/V1-report.md`.
+  - 72–80% of the bottom-decile-minus-universe variance is systematic tilt.
+    Breadth cuts the SD only 8–14%.
+  - At 100-name deciles and 200 weekly events, the MDE is 44–55 bp against
+    the equal-weight universe. Against the best control (characteristic-
+    matched stocks) it is 29–46 bp.
+  - A plausible net long-only effect is about 0–20 bp. **NO-GO.** The user
+    chose to stop and write up.
+- **Write-up for the user:** the Claude Docs doc "Autonomous Research
+  Campaigns Write-up" (https://claude.ai/code/artifact/8584f584-d728-456c-ad89-65f93ed094c6).
+- **State.**
+  - research-v3 is PAUSED and `research-owner.service` is stopped.
+  - The service unit and `RESEARCH_V2_ROOT` point at research-v3.
+  - The old research-v2 root is intact.
+  - No stock build was started.
+- **If research resumes:** first run a dispersion-only noise check of a hedged
+  (long-short) or event-driven design. Hedging needs an evaluator-contract
+  change, because the evaluator is long-only today.
+
 ## Guardrails (unchanged, plus the 10-02 directive)
 
 OpenAI models only for the research loop. Use no Anthropic, Claude, ACP, or Opus
