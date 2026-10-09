@@ -894,11 +894,19 @@ def reserve_review(
         raise ReviewEvidenceError("owner session key must be non-empty")
     if not wake_pending_key:
         raise ReviewEvidenceError("native review reserve requires an exact completed wake key")
+    # The expected key is salted by the lost-owner-run count, so a re-woken IMPLEMENTED turn
+    # reserves under the salted key and the pre-loss key is refused.  Known limitation: if the
+    # lost IMPLEMENTED turn had already stored a spawn-bound reservation, the re-woken turn's
+    # different owner run conflicts on owner_run_id below and needs operator repair.
     wake = store.wake_row(wake_pending_key)
     attempt = store.get_attempt(attempt_id)
     _campaign_status, current_resume_seq = store.campaign()
     expected_wake_key = canonical_wake_key(
-        attempt.hypothesis_id, attempt_id, AttemptState.IMPLEMENTED.value, current_resume_seq
+        attempt.hypothesis_id,
+        attempt_id,
+        AttemptState.IMPLEMENTED.value,
+        current_resume_seq,
+        store.lost_owner_runs()[0],
     )
     if wake_pending_key != expected_wake_key:
         raise ReviewUnresolved("native review wake key is not the current canonical key")

@@ -106,6 +106,10 @@ class NativeOwnerHostRecord:
     provider: str
     started_at_ms: int
     ended_at_ms: int | None
+    # Additive: the end event's terminal ``status`` ("success" | "error" | "interrupted") and
+    # whether it reports ``aborted``/``externalAbort``; None while the run has no end event.
+    ended_status: str | None = None
+    ended_aborted: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -526,6 +530,13 @@ def read_exact_native_owner(
         end_data = cast(dict[str, object], end_event["data"])
         if end_data.get("threadId") != thread_id:
             raise HostRecordError("native owner end event thread does not match owner")
+    ended_status: str | None = None
+    ended_aborted: bool | None = None
+    for _created_at, end_event in ends.get(run_id, []):
+        end_data = cast(dict[str, object], end_event["data"])
+        raw_status = end_data.get("status")
+        ended_status = raw_status if isinstance(raw_status, str) else ""
+        ended_aborted = end_data.get("aborted") is True or end_data.get("externalAbort") is True
     provider = _required_text(start_event.get("provider"), "native owner provider")
     model = _required_text(start_event.get("modelId"), "native owner model")
     # Only the bound run's own start is checked: earlier history on the same
@@ -541,6 +552,8 @@ def read_exact_native_owner(
         provider,
         started_at,
         ended_at,
+        ended_status,
+        ended_aborted,
     )
 
 

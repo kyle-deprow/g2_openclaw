@@ -2245,6 +2245,7 @@ def status(
             "owner_turn_failed": owner_failure,
             "operator_interventions": _status_operator_interventions(store, specs, events),
             **_status_create_refusals(store, specs),
+            **({"lost_owner_runs": lost} if (lost := store.lost_owner_runs()[0]) else {}),
         }
         typer.echo(
             json.dumps(data, sort_keys=True)
@@ -2284,7 +2285,7 @@ def serve(
             if plan is not None:
                 deliver(store, sender, plan, session_key)
             try:
-                poll_owner_turn(store, sender)
+                poll_owner_turn(store, sender, session_key=session_key)
             except OwnerPollUnavailable as exc:
                 consecutive_poll_failures += 1
                 typer.echo(

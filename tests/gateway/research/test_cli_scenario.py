@@ -1147,7 +1147,7 @@ def test_serve_once_dispatches_queue_while_wake_is_pending(
 
     monkeypatch.setattr(research_cli, "launch", fake_launch)
     monkeypatch.setattr(research_cli, "compose_wake", lambda _store: None)
-    monkeypatch.setattr(research_cli, "poll_owner_turn", lambda *_a: None)
+    monkeypatch.setattr(research_cli, "poll_owner_turn", lambda *_a, **_k: None)
     monkeypatch.setattr(research_cli, "OpenClawWakeSender", lambda *_a: object())
     _call(store.root, "serve", "--session-key", "owner", "--once")
     assert seen == ["job-cli-test"]

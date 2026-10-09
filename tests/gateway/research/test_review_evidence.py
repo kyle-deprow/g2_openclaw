@@ -1545,3 +1545,38 @@ def test_wake_asks_for_native_sol_xhigh_reviewer(
     assert "gpt-5.6-sol" in plan.message
     assert "xhigh" in plan.message
     assert "spawn_agent" in plan.message
+
+
+def test_reserve_after_a_lost_owner_run_accepts_only_the_salted_implemented_key(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec], tmp_path: Path
+) -> None:
+    store, _source, _hypothesis, attempt_id, bundle = _setup(campaign, tmp_path)
+    _status, resume_seq = store.campaign()
+    unsalted = canonical_wake_key("H0001", attempt_id, "IMPLEMENTED", resume_seq)
+    assert store.reserve_wake(unsalted, attempt_id, "IMPLEMENTED", resume_seq)
+    store.complete_wake(unsalted, "run-lost-before-restart")
+    assert store.mark_wake_lost(unsalted, "run_lost_gateway_restart", "restart") == 1
+    salted = canonical_wake_key("H0001", attempt_id, "IMPLEMENTED", resume_seq, 1)
+    assert salted != unsalted
+    owner_database = create_owner_database(tmp_path / "owner.sqlite", owner_ended_event=False)
+    with pytest.raises(ReviewUnresolved, match="current canonical key"):
+        reserve_review(
+            store,
+            attempt_id,
+            bundle,
+            OWNER_SESSION,
+            wake_pending_key=unsalted,
+            openclaw_database=owner_database,
+        )
+    # The re-woken turn is the run the host records, so the salted wake binds OWNER_RUN_ID.
+    assert store.reserve_wake(salted, attempt_id, "IMPLEMENTED", resume_seq)
+    store.complete_wake(salted, OWNER_RUN_ID)
+    reservation = reserve_review(
+        store,
+        attempt_id,
+        bundle,
+        OWNER_SESSION,
+        wake_pending_key=salted,
+        openclaw_database=owner_database,
+    )
+    assert reservation.owner_run_id == OWNER_RUN_ID

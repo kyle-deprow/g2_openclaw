@@ -7,14 +7,19 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import sqlite3
+import subprocess
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Protocol
 
-from gateway.openclaw_client import OpenClawClient, OpenClawTransportError
+from gateway.openclaw_client import OpenClawClient, OpenClawError, OpenClawTransportError
 
 from .contracts import AttemptDecision, AttemptState, HypothesisState, compute_requirements
-from .host_records import HostRecordError, managed_native_databases
+from .host_records import HostRecordError, managed_native_databases, read_exact_native_owner
+from .lost_runs import GATEWAY_RESTART_STATUS, UNKNOWN_RUN_STATUS, lost_wake_key
 from .store import ResearchStore, StoreConflict, canonical_wake_key
 
 
@@ -28,6 +33,31 @@ class WakeUncertain(RuntimeError):
 
 class OwnerPollUnavailable(RuntimeError):
     """The owner-turn observation failed due to an unavailable transport."""
+
+
+_GATEWAY_UNIT = "openclaw-gateway.service"
+_run = subprocess.run
+
+
+@dataclass(frozen=True, slots=True)
+class GatewayInstance:
+    """One gateway process: systemd's per-start InvocationID and its wall-clock start."""
+
+    invocation_id: str | None
+    started_at: datetime | None
+
+
+def _parse_systemd_utc(value: str) -> datetime | None:
+    """Parse ``Fri 2026-10-09 21:56:26.935517 UTC`` (``--timestamp=us+utc``)."""
+    parts = value.split()
+    if len(parts) != 4 or parts[3] != "UTC":
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(f"{parts[1]} {parts[2]}", fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
 
 
 class WakeSender(Protocol):
@@ -81,6 +111,39 @@ class OpenClawWakeSender:
             return payload
 
         return asyncio.run(request())
+
+    def gateway_instance(self) -> GatewayInstance | None:
+        """Identify the running gateway process, or None when systemd cannot say."""
+        try:
+            result = _run(
+                [
+                    "systemctl",
+                    "--user",
+                    "show",
+                    _GATEWAY_UNIT,
+                    "--timestamp=us+utc",
+                    "-p",
+                    "ActiveState",
+                    "-p",
+                    "ActiveEnterTimestamp",
+                    "-p",
+                    "InvocationID",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        fields = dict(line.partition("=")[::2] for line in result.stdout.splitlines())
+        if fields.get("ActiveState") != "active":
+            return None
+        invocation = fields.get("InvocationID") or None
+        started = _parse_systemd_utc(fields.get("ActiveEnterTimestamp", ""))
+        if invocation is None and started is None:
+            return None
+        return GatewayInstance(invocation, started)
 
 
 def _key(hypothesis_id: str, attempt_id: str | None, state: str, resume_seq: int) -> str:
@@ -155,7 +218,29 @@ def _draft_wake_text(store: ResearchStore, hypothesis_id: str) -> str:
     )
 
 
+_LOST_RUN_SUFFIX = (
+    " The previous owner turn for this state was interrupted by a gateway restart and its run was "
+    "lost; resume from your durable notes and the recorded campaign state instead of assuming "
+    "that turn finished its work."
+)
+
+
 def compose_wake(store: ResearchStore) -> WakePlan | None:
+    """Compose the next owner wake, salting its key once per lost owner run since the resume."""
+    plan = _compose_base_wake(store)
+    if plan is None:
+        return None
+    lost, latest = store.lost_owner_runs()
+    if lost == 0:
+        return plan
+    key = lost_wake_key(plan.pending_key, lost)
+    message = plan.message.replace(plan.pending_key, key)
+    if latest == (plan.attempt_id, plan.state):
+        message += _LOST_RUN_SUFFIX
+    return replace(plan, message=message, pending_key=key)
+
+
+def _compose_base_wake(store: ResearchStore) -> WakePlan | None:
     status, resume_seq = store.campaign()
     if status == "PAUSED":
         return None
@@ -296,6 +381,11 @@ def deliver(
         row = store.wake_row(plan.pending_key)
         if row is None or row["run_id"] != "PENDING":
             return None
+    # Read before sending: a restart in between then reads as a (bounded) lost run, never a
+    # silently missed one.
+    instance_of = getattr(sender, "gateway_instance", None)
+    instance = instance_of() if callable(instance_of) else None
+    invocation_id = instance.invocation_id if isinstance(instance, GatewayInstance) else None
     try:
         run_id = sender.send(plan.message, session_key, plan.pending_key)
     except WakeUncertain:
@@ -308,38 +398,162 @@ def deliver(
     if not isinstance(run_id, str) or not run_id:
         store.release_wake(plan.pending_key)
         raise WakeRejected("wake sender returned no runId")
-    store.complete_wake(plan.pending_key, run_id)
+    store.complete_wake(plan.pending_key, run_id, invocation_id)
     return run_id
 
 
-def poll_owner_turn(store: ResearchStore, sender: WakeSender, *, required: bool = False) -> None:
-    """Observe the latest owner turn through the installed ``agent.wait`` RPC."""
+_TERMINAL_STATUSES = frozenset({"ok", "error", "lost", "superseded"})
+_UNKNOWN_RUN_STATUSES = frozenset(
+    {"unknown", "unknown_run", "not_found", "notfound", "missing", "no_such_run"}
+)
+# OpenClaw rejects agent.wait for a run it does not know with "agent run was not found".
+_UNKNOWN_RUN_ERROR = re.compile(
+    r"agent run was not found|unknown run|run not found|no such run", re.IGNORECASE
+)
+
+
+def poll_owner_turn(
+    store: ResearchStore,
+    sender: WakeSender,
+    *,
+    required: bool = False,
+    session_key: str | None = None,
+) -> None:
+    """Observe the newest owner turn through the installed ``agent.wait`` RPC.
+
+    Only the newest delivered wake row of the current resume can be observed or declared lost;
+    older unfinished rows are closed as ``superseded`` (no failure event, no lost count).
+    """
     del required
     poll = getattr(sender, "owner_task_status", None)
+    delivered = [row for row in store.wake_rows() if row["run_id"] != "PENDING"]
     if not callable(poll):
-        rows = [row for row in store.wake_rows() if row["run_id"] != "PENDING"]
-        if rows:
-            store.update_wake_status(str(rows[-1]["pending_key"]), "pending_runtime_gate")
+        if delivered:
+            store.update_wake_status(str(delivered[-1]["pending_key"]), "pending_runtime_gate")
         return
-    terminal_statuses = {
-        "ok",
-        "error",
-    }
-    rows = [
-        row
-        for row in store.wake_rows()
-        if row["run_id"] != "PENDING" and row["turn_status"] not in terminal_statuses
-    ]
-    if not rows:
+    if not delivered:
         return
-    row = rows[-1]
+    row = delivered[-1]
+    for older in delivered[:-1]:
+        if older["turn_status"] not in _TERMINAL_STATUSES:
+            store.supersede_wake(str(older["pending_key"]))
+    if row["turn_status"] in _TERMINAL_STATUSES:
+        return
+    pending_key = str(row["pending_key"])
+    if int(row["resume_seq"]) != store.campaign()[1]:
+        # Delivered before the last operator resume: that turn can no longer be re-woken.
+        store.supersede_wake(pending_key)
+        return
     try:
         result = poll(str(row["run_id"]))
     except (OpenClawTransportError, WakeUncertain) as exc:
         raise OwnerPollUnavailable(f"owner poll unavailable: {exc}") from exc
+    except OpenClawError as exc:
+        if _UNKNOWN_RUN_ERROR.search(str(exc)) is None:
+            raise
+        _declare_lost(
+            store, row, session_key, UNKNOWN_RUN_STATUS, f"gateway rejected agent.wait: {exc}"
+        )
+        return
     status = (
         result.get("status", result.get("state", "unknown"))
         if isinstance(result, Mapping)
         else "unknown"
     )
-    store.update_wake_status(str(row["pending_key"]), str(status))
+    explicit = result.get("status", result.get("state")) if isinstance(result, Mapping) else None
+    if isinstance(explicit, str) and explicit.lower() in _UNKNOWN_RUN_STATUSES:
+        _declare_lost(
+            store,
+            row,
+            session_key,
+            UNKNOWN_RUN_STATUS,
+            f"gateway no longer knows the run (status={status})",
+        )
+        return
+    if str(status) not in _TERMINAL_STATUSES:
+        # The incident case: after a restart the gateway keeps answering "timeout" for the
+        # run it no longer knows, so only the process identity can reveal the loss.
+        restarted = _restart_after_send(sender, row)
+        if restarted is not None:
+            _declare_lost(store, row, session_key, GATEWAY_RESTART_STATUS, restarted)
+            return
+    store.update_wake_status(pending_key, str(status))
+
+
+def _declare_lost(
+    store: ResearchStore, row: sqlite3.Row, session_key: str | None, failure: str, reason: str
+) -> None:
+    """Record a lost run unless the durable host record proves how the run actually ended.
+
+    "Ended" is not "succeeded": a gateway restart aborts in-flight runs and writes their end
+    event with status ``interrupted``, which stays a lost run.
+    """
+    pending_key = str(row["pending_key"])
+    outcome = (
+        _host_record_outcome(session_key, str(row["run_id"]), str(row["sent_at"]))
+        if session_key is not None
+        else None
+    )
+    if outcome is not None:
+        store.update_wake_status(pending_key, outcome)
+        return
+    store.mark_wake_lost(pending_key, failure, reason)
+
+
+def _host_record_outcome(session_key: str, run_id: str, sent_at: str) -> str | None:
+    """``ok`` or ``error`` when the native end event proves a finished run, else None (lost)."""
+    configured = os.environ.get("RESEARCH_CORE_DATABASE")
+    if not configured:
+        return None
+    try:
+        sent_ms = int(datetime.fromisoformat(sent_at.replace("Z", "+00:00")).timestamp() * 1000)
+        owner = read_exact_native_owner(
+            managed_native_databases(configured).openclaw_database,
+            session_key,
+            sent_ms,
+            expected_run_id=run_id,
+        )
+    except (HostRecordError, OSError, ValueError, sqlite3.Error):
+        return None
+    if owner.ended_at_ms is None or owner.ended_aborted is not False:
+        return None
+    if owner.ended_status == "success":
+        return "ok"
+    if owner.ended_status == "error":
+        return "error"
+    return None  # "interrupted", unknown or missing status
+
+
+def _restart_after_send(sender: WakeSender, row: sqlite3.Row) -> str | None:
+    """Return a reason when the gateway process is not the one that accepted the wake.
+
+    Limitation: an in-process restart (SIGUSR1) keeps systemd's InvocationID and start time,
+    so it is invisible here; only a unit restart or the run-unknown responses reveal a loss.
+    """
+    instance_of = getattr(sender, "gateway_instance", None)
+    instance = instance_of() if callable(instance_of) else None
+    if not isinstance(instance, GatewayInstance):
+        return None
+    recorded = row["gateway_invocation_id"]
+    if recorded and instance.invocation_id:
+        if recorded == instance.invocation_id:
+            return None
+        return (
+            f"gateway invocation changed from {recorded} to {instance.invocation_id} after the "
+            "wake was sent; the in-flight run was lost in the restart"
+        )
+    sent_at = str(row["sent_at"])
+    if instance.started_at is None:
+        return None
+    try:
+        sent = datetime.fromisoformat(sent_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if sent.tzinfo is None:
+        sent = sent.replace(tzinfo=UTC)
+    if instance.started_at <= sent:
+        return None
+    return (
+        f"gateway process started at {instance.started_at.isoformat()}, after the wake was sent "
+        f"at {sent_at}; the in-flight run was lost in the restart"
+    )

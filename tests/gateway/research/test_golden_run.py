@@ -428,7 +428,7 @@ def _serve_once(root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Run one real serve loop body; only the wake/poll network edges are stubbed."""
     monkeypatch.setattr(research_cli, "OpenClawWakeSender", lambda *_a: object())
     monkeypatch.setattr(research_cli, "compose_wake", lambda _store: None)
-    monkeypatch.setattr(research_cli, "poll_owner_turn", lambda *_a: None)
+    monkeypatch.setattr(research_cli, "poll_owner_turn", lambda *_a, **_k: None)
     _call(root, "serve", "--session-key", "agent:research-orchestrator:golden", "--once")
 
 

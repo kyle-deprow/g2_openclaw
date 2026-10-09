@@ -131,6 +131,10 @@ replace unknown evidence with a synthetic result. An exact cancel rereads the
 current task and is sent once; an unknown response remains pending and pauses
 the owner. Read-only main controls must remain available.
 
+A wake that says your previous turn was interrupted by a gateway restart means that
+run was lost; resume from durable notes and recorded state, and never assume it
+finished. Three lost runs in one resume pause the campaign for the operator.
+
 Reserve with `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY
 --owner-key OWNER_KEY --openclaw-database
 /home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`.

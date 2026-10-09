@@ -56,6 +56,7 @@ from .contracts import (
     compute_requirements,
 )
 from .hypothesis import ComputeLimits, HypothesisDocument
+from .lost_runs import MAX_LOST_OWNER_RUNS, OWNER_FAILED_KIND, lost_wake_key, read_lost_owner_runs
 from .machine import (
     IllegalTransition,
     decide_hypothesis,
@@ -116,16 +117,28 @@ def now_utc() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _wake_sent_at() -> str:
+    """Fixed-width microsecond UTC stamp: ``sent_at`` is ordered as text, and a plain
+    ``isoformat()`` drops the fraction at exactly 0 microseconds, sorting that row wrongly."""
+    return datetime.now(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
 def canonical_wake_key(
-    hypothesis_id: str, attempt_id: str | None, state: str, resume_seq: int
+    hypothesis_id: str, attempt_id: str | None, state: str, resume_seq: int, lost: int = 0
 ) -> str:
-    """Derive the only accepted idempotency key for the current owner wake."""
+    """Derive the only accepted idempotency key for the current owner wake.
+
+    ``lost`` is the count of lost owner runs since the last resume; zero keeps the historical key.
+    """
 
     if not hypothesis_id or not state or type(resume_seq) is not int or resume_seq < 0:
         raise ValueError("wake key inputs are malformed")
-    return hashlib.sha256(
-        f"{hypothesis_id}|{attempt_id or ''}|{state}|{resume_seq}".encode()
-    ).hexdigest()
+    return lost_wake_key(
+        hashlib.sha256(
+            f"{hypothesis_id}|{attempt_id or ''}|{state}|{resume_seq}".encode()
+        ).hexdigest(),
+        lost,
+    )
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -417,7 +430,7 @@ class ResearchStore:
                 CREATE TABLE IF NOT EXISTS wake_deliveries (
                   pending_key TEXT PRIMARY KEY, attempt_id TEXT, state TEXT NOT NULL,
                   resume_seq INTEGER NOT NULL, sent_at TEXT NOT NULL, run_id TEXT NOT NULL,
-                  turn_status TEXT, turn_checked_at TEXT
+                  turn_status TEXT, turn_checked_at TEXT, gateway_invocation_id TEXT
                 );
                 CREATE TRIGGER IF NOT EXISTS immutable_frozen_hypothesis
                 BEFORE UPDATE ON hypotheses WHEN (OLD.state != 'DRAFT' OR NEW.state != 'DRAFT') AND
@@ -486,6 +499,12 @@ class ResearchStore:
             for name, statement in additions:
                 if name not in columns:
                     conn.execute(statement)
+            wake_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(wake_deliveries)").fetchall()
+            }
+            if "gateway_invocation_id" not in wake_columns:
+                # Additive and nullable: rows delivered before this column read as unknown.
+                conn.execute("ALTER TABLE wake_deliveries ADD COLUMN gateway_invocation_id TEXT")
             if conn.in_transaction:
                 conn.commit()
             conn.execute("BEGIN IMMEDIATE")
@@ -2502,7 +2521,7 @@ class ResearchStore:
                 return False
             conn.execute(
                 "INSERT INTO wake_deliveries(pending_key,attempt_id,state,resume_seq,sent_at,run_id) VALUES(?,?,?,?,?,?)",
-                (pending_key, attempt_id, state, resume_seq, now_utc(), "PENDING"),
+                (pending_key, attempt_id, state, resume_seq, _wake_sent_at(), "PENDING"),
             )
             attempt_row = (
                 conn.execute(
@@ -2534,12 +2553,15 @@ class ResearchStore:
                 ).fetchone(),
             )
 
-    def complete_wake(self, pending_key: str, run_id: str) -> None:
+    def complete_wake(
+        self, pending_key: str, run_id: str, gateway_invocation_id: str | None = None
+    ) -> None:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
-                "UPDATE wake_deliveries SET run_id=?,sent_at=? WHERE pending_key=?",
-                (run_id, now_utc(), pending_key),
+                "UPDATE wake_deliveries SET run_id=?,sent_at=?,gateway_invocation_id=? "
+                "WHERE pending_key=?",
+                (run_id, _wake_sent_at(), gateway_invocation_id, pending_key),
             )
             row = conn.execute(
                 "SELECT attempt_id FROM wake_deliveries WHERE pending_key=?", (pending_key,)
@@ -2643,6 +2665,102 @@ class ResearchStore:
                     "driver",
                 )
             conn.commit()
+
+    def supersede_wake(self, pending_key: str) -> None:
+        """Close an unfinished wake row that a newer delivered wake replaced.
+
+        No failure event is recorded and the row never counts as a lost run.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "UPDATE wake_deliveries SET turn_status='superseded',turn_checked_at=? "
+                "WHERE pending_key=? AND COALESCE(turn_status,'') NOT IN ('ok','error','lost')",
+                (now_utc(), pending_key),
+            )
+            conn.commit()
+
+    def mark_wake_lost(self, pending_key: str, failure_status: str, reason: str) -> int:
+        """Record a lost owner run without pausing, unless the lost-run bound is reached.
+
+        Sets the wake row to ``lost`` and appends ``owner_turn_status`` plus ``owner_turn_failed``
+        events. Returns the lost-run count since the last resume; reaching
+        ``MAX_LOST_OWNER_RUNS`` pauses the campaign for the operator in the same transaction.
+        """
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT attempt_id,state,turn_status FROM wake_deliveries WHERE pending_key=?",
+                (pending_key,),
+            ).fetchone()
+            if row is None or row["turn_status"] == "lost":
+                return read_lost_owner_runs(conn)[0]
+            conn.execute(
+                "UPDATE wake_deliveries SET turn_status='lost',turn_checked_at=? WHERE pending_key=?",
+                (now_utc(), pending_key),
+            )
+            attempt_row = (
+                conn.execute(
+                    "SELECT hypothesis_id FROM attempts WHERE attempt_id=?", (row["attempt_id"],)
+                ).fetchone()
+                if row["attempt_id"]
+                else None
+            )
+            first = conn.execute(
+                "SELECT hypothesis_id FROM hypotheses ORDER BY hypothesis_id LIMIT 1"
+            ).fetchone()
+            hyp = str(attempt_row[0]) if attempt_row else (str(first[0]) if first else "H0001")
+            self._event(
+                conn,
+                hyp,
+                row["attempt_id"],
+                "owner_turn_status",
+                {"status": "lost", "reason": reason},
+                "driver",
+            )
+            self._event(
+                conn,
+                hyp,
+                row["attempt_id"],
+                OWNER_FAILED_KIND,
+                {
+                    "status": failure_status,
+                    "reason": reason,
+                    "lost": True,
+                    "wake_state": row["state"],
+                    "pending_key": pending_key,
+                },
+                "driver",
+            )
+            count = read_lost_owner_runs(conn)[0]
+            already_paused = conn.execute(
+                "SELECT status FROM campaign WHERE singleton=1"
+            ).fetchone()
+            if count >= MAX_LOST_OWNER_RUNS and not (
+                already_paused is not None and already_paused[0] == "PAUSED"
+            ):
+                conn.execute("UPDATE campaign SET status='PAUSED' WHERE singleton=1")
+                self._event(
+                    conn,
+                    hyp,
+                    None,
+                    "campaign_paused",
+                    {
+                        "reason": (
+                            f"{count} owner runs were lost since the last resume ({reason}); "
+                            "operator review required before resuming"
+                        ),
+                        "lost_owner_runs": count,
+                    },
+                    "driver",
+                )
+            conn.commit()
+        return count
+
+    def lost_owner_runs(self) -> tuple[int, tuple[str | None, str | None] | None]:
+        """Lost owner runs since the last resume and the latest lost wake's (attempt, state)."""
+        with self._connect() as conn:
+            return read_lost_owner_runs(conn)
 
     def wake_rows(self) -> list[sqlite3.Row]:
         with self._connect() as conn:

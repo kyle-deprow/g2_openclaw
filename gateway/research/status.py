@@ -26,6 +26,7 @@ from websockets.exceptions import ConnectionClosed
 
 from .contracts import ComputeProbe, compute_requirements
 from .hypothesis import HypothesisDocument
+from .lost_runs import read_lost_owner_runs
 from .refusals import read_create_refusals
 
 logger = logging.getLogger(__name__)
@@ -83,6 +84,8 @@ class ResearchStatus:
     # Additive: only set while no hypothesis exists or the newest one is DECIDED (the
     # NO_HYPOTHESIS/ALL_DECIDED stages); refused creates since the last create/decide/resume.
     create_refusals: dict[str, object] | None = None
+    # Additive: owner runs lost to a gateway restart since the last resume (only when nonzero).
+    lost_owner_runs: int | None = None
 
     def as_dict(self) -> dict[str, object]:
         """Return the snake-case representation used by Python callers."""
@@ -188,9 +191,13 @@ def _boundary_failure(events: list[sqlite3.Row], attempt: sqlite3.Row | None) ->
             event
             for event in events
             if str(event["attempt_id"] or "") == attempt_id
-            or (str(event["kind"]) == "owner_turn_failed" and event["attempt_id"] is None)
+            or (
+                str(event["kind"]) in {"owner_turn_failed", "owner_turn_status"}
+                and event["attempt_id"] is None
+            )
         ]
     reverified = False
+    recovered = False
     for event in reversed(events):
         kind = str(event["kind"])
         detail = _json_detail(event["detail"])
@@ -201,7 +208,13 @@ def _boundary_failure(events: list[sqlite3.Row], attempt: sqlite3.Row | None) ->
             continue
         if kind == "run_finished" and reverified:
             continue
+        if kind == "owner_turn_status" and detail.get("status") == "ok":
+            recovered = True
+            continue
         if kind == "owner_turn_failed":
+            if recovered and detail.get("lost") is True:
+                # A lost owner run is recovered once a later wake completes.
+                continue
             return str(detail.get("status") or detail.get("reason") or "owner_turn_failed")
         if kind == "review_submitted" and detail.get("verdict") == "FAIL":
             return "review_failed"
@@ -428,6 +441,7 @@ def _read_status_from_connection(
             create_refusals=_create_refusals(
                 conn, str(hypothesis["state"]) if hypothesis is not None else None
             ),
+            lost_owner_runs=read_lost_owner_runs(conn)[0] or None,
         )
     finally:
         conn.rollback()
@@ -494,6 +508,7 @@ def build_status_frame(status: ResearchStatus) -> dict[str, object]:
         **(
             {"createRefusals": status.create_refusals} if status.create_refusals is not None else {}
         ),
+        **({"lostOwnerRuns": status.lost_owner_runs} if status.lost_owner_runs is not None else {}),
     }
 
 
