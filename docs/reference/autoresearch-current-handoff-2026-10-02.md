@@ -487,6 +487,45 @@ will drive it".
   (long-short) or event-driven design. Hedging needs an evaluator-contract
   change, because the evaluator is long-only today.
 
+## Trust-model change and stock-platform build (2026-10-08)
+
+**User directive:** "what would you recommend we start researching to build
+strategies with alpha? … open to getting more data, but only if you can show
+that we need it" → "proceed"; then "I've updated massive, proceed".
+
+- **Evidence.** The power formula T ≥ (2.49/S)² years means 5 years can only
+  confirm true Sharpe ≳ 1.1. N1 (dispersion-only, N1-report.md) measured
+  hedged post-gap events at MDE 62 bp (5-session hold) vs 0–30 bp plausible,
+  hedges removing only 15–30% of variance (remainder idiosyncratic → breadth ×
+  years is the lever); attention spikes worse. D1/D2 probes: the old plan
+  served ~5y minute and no older daily; the upgraded plan serves daily bars
+  back ~10 rolling years (2016-10 served, 2015-01 denied) WITH delisted names
+  (TWTR, BBBY; `active=false` list carries delisted_utc), but no earnings
+  endpoint (Benzinga earnings 403; financials family 403/retired).
+- **Evaluator contract v3** (quantipy `3819ef5`, user-authorized): hedged
+  long-short books for instruments the OPERATOR marks shortable in the trusted
+  universe (positive borrow floor), borrow accrual, short-dividend payables,
+  NAV≤0 halt, 1–60 session horizons; v1 specs keep identical digests and
+  economics (three H0008 digests, five real-input cases, 40-seed property
+  test vs verbatim v2). Opus caught a negative-NAV reduction crash and the
+  spec-declared-shortable trust gap before merge.
+- **Gateway v3 support** (`9a54bd0`, deployed): sixty-session limit, hedged
+  specs need shortable + borrow > 0 (borrow is a cost field), evaluator v2|v3,
+  create-time purge-gap and event-capacity refusals, compute-probe errors
+  carry validator reasons, hedged golden variant, H0008 spec fixtures, docs.
+- **Decisions (user-approved):** SEC EDGAR fetcher User-Agent = the user's
+  name + account email, sent only to data.sec.gov when the operator runs the
+  fetch; earnings SURPRISE = announcement-day price reaction (no consensus
+  vendor for the first campaign).
+- **In flight:** B2a evaluator daily-bar mode + per-instrument coverage,
+  delisting policy, membership windows, earnings-gated stocks
+  (PLAN-B2a-evaluator-daily-mode.md); B2b data builders — grouped-daily
+  immutable store, monthly PIT listings, rule-based PIT universe membership,
+  EDGAR rule-D earnings snapshot builder (PLAN-B2b-data-builders.md). Next:
+  B2c gateway bound inputs, data runs, new root, post-earnings campaign.
+- **Note:** the Q2 commit swept in a formatter-only reflow of
+  `src/quantipy/worker/historical_import_handler.py` (pre-existing, harmless).
+
 ## Guardrails (unchanged, plus the 10-02 directive)
 
 OpenAI models only for the research loop. Use no Anthropic, Claude, ACP, or Opus
