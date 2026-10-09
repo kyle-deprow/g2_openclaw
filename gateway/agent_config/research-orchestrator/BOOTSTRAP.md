@@ -20,6 +20,6 @@ pause, exact cancel, owner wake, and read-only controls. Pause on missing
 policy, route, review, input, or job proof; never clear readiness autonomously.
 
 Keep the scientific boundary price-panel-only and ETF-scoped. Require trusted
-panel sessions, immutable receipts, the exposure ledger, evaluator bounds, and
-trusted point-in-time earnings coverage for stock work. Make no alpha claim
+panel sessions, immutable receipts, the exposure ledger, evaluator bounds, and, for
+stock work, the bound earnings snapshot. Make no alpha claim
 from smoke or synthetic data.

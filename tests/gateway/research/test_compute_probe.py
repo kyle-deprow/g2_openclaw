@@ -221,6 +221,82 @@ def test_probe_record_round_trips_and_rejects_bad_stages() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {},
+        {"earnings_sha256": "e"},
+        {"membership_sha256": "e"},
+        {"earnings_sha256": "e", "membership_sha256": "e"},
+    ],
+)
+def test_probe_inputs_may_carry_the_optional_stock_digests(extra: dict[str, str]) -> None:
+    probe = _probe(_stage_set(100, 10.0))
+    inputs = {**probe.inputs, **{key: "e" * 64 for key in extra}}
+
+    bound = ComputeProbe(
+        probe.contract,
+        probe.probe_id,
+        probe.hypothesis_id,
+        probe.pins,
+        inputs,
+        probe.stages,
+        probe.measured_at,
+    )
+
+    assert ComputeProbe.from_json(bound.to_json()) == bound
+
+
+@pytest.mark.parametrize("key", ["dividends_sha256", "panel_sha256"])
+def test_probe_inputs_still_require_every_mandatory_digest(key: str) -> None:
+    probe = _probe(_stage_set(100, 10.0))
+    inputs = {name: value for name, value in probe.inputs.items() if name != key}
+
+    with pytest.raises(ValueError, match="inputs keys must be exactly"):
+        ComputeProbe(
+            probe.contract,
+            probe.probe_id,
+            probe.hypothesis_id,
+            probe.pins,
+            inputs,
+            probe.stages,
+            probe.measured_at,
+        )
+
+
+def test_probe_inputs_refuse_unknown_digest_names_and_malformed_optional_digests() -> None:
+    probe = _probe(_stage_set(100, 10.0))
+    for inputs in (
+        {**probe.inputs, "universe_sha256": "e" * 64},
+        {**probe.inputs, "earnings_sha256": "not-a-digest"},
+    ):
+        with pytest.raises(ValueError):
+            ComputeProbe(
+                probe.contract,
+                probe.probe_id,
+                probe.hypothesis_id,
+                probe.pins,
+                inputs,
+                probe.stages,
+                probe.measured_at,
+            )
+
+
+@pytest.mark.parametrize("reported", [{}, {"earnings_sha256": "f" * 64}])
+def test_probe_validation_must_echo_the_bound_optional_digests(
+    tmp_path: Path, reported: dict[str, str]
+) -> None:
+    out = tmp_path / "validate.out"
+    out.write_text(json.dumps({"verdict": "PASS", "panel_sha256": "a" * 64, **reported}))
+    expected = {"panel_sha256": "a" * 64, "earnings_sha256": "e" * 64}
+
+    with pytest.raises(compute_probe_module.ComputeProbeError, match="do not bind"):
+        compute_probe_module._check_validation(out, "validate-c000", expected)
+
+    out.write_text(json.dumps({"verdict": "PASS", "panel_sha256": "a" * 64, **expected}))
+    compute_probe_module._check_validation(out, "validate-c000", expected)
+
+
 # -- real-containment probe --------------------------------------------------------
 
 

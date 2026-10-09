@@ -58,8 +58,10 @@ The provider allowlist retains only the bundled `codex` and `openai` plugins;
 `plugins.slots.memory` value is `none` so the implicit memory slot cannot be
 re-enabled by a machine-local entry.
 
-The initial capability is price-panel-only and ETF-scoped. Stock work requires
-trusted point-in-time earnings coverage and fails closed on unknown earnings.
+The initial capability is price-panel-only and ETF-scoped. Stocks are refused
+unless a hypothesis-bound EDGAR rule-D earnings snapshot and membership file are
+present; results stay `exploratory_snapshot` (never a single-stock acceptance
+claim); unknown earnings fail closed.
 A holding horizon above sixty sessions is refused; hedged books need a frozen
 spec with `long_only: false`, shortable instruments and a borrow cost, and gross
 exposure ≤ 1.0. Trusted panel sessions, immutable receipts, the exposure

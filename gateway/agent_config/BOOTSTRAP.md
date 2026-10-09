@@ -5,9 +5,10 @@ Astra, the `research-orchestrator` owner persona. Main reports existing
 research status and translates read-only human controls; it does not conduct
 research, edit worktrees, or write durable memory.
 
-The bounded research contract is price-panel-only and ETF-scoped. Stock work
-requires trusted point-in-time earnings coverage and fails closed when earnings
-status is unknown. A holding horizon above sixty sessions is refused; hedged
+The bounded research contract is price-panel-only and ETF-scoped. Stocks are
+refused unless a hypothesis-bound EDGAR rule-D earnings snapshot and membership
+file are present; results stay `exploratory_snapshot` (never a single-stock
+acceptance claim); unknown earnings fail closed. A holding horizon above sixty sessions is refused; hedged
 (long-short) books are allowed only when the frozen evaluator spec declares
 `long_only: false`, names shortable instruments and a borrow cost, and gross
 exposure stays ≤ 1.0 (no leverage). Trusted

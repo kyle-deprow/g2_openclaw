@@ -68,11 +68,14 @@ class AdmissionReason(StrEnum):
 
 class InstrumentClass(StrEnum):
     ETF = "etf"
-    STOCK = "stock"
+    COMMON_STOCK = "common_stock"
 
 
 class EarningsCoverageStatus(StrEnum):
     TRUSTED = "TRUSTED"
+    # An operator-bound earnings snapshot exists; the evaluator reports its results as
+    # ``exploratory_snapshot``, never as provider-backed acceptance.
+    SNAPSHOT_BOUND = "SNAPSHOT_BOUND"
     UNAVAILABLE = "UNAVAILABLE"
     UNKNOWN = "UNKNOWN"
 
@@ -98,6 +101,12 @@ def _positive_int(value: object, name: str) -> int:
     return value
 
 
+DAILY_RECEIPT_CONTRACT = "research-price-panel-daily-v1"
+MINUTE_RECEIPT_CONTRACT = "research-price-panel-receipt-v2"
+#: The evaluator's own refusal text for a stock spec without an earnings snapshot.
+COMMON_STOCK_REFUSAL = (
+    "trusted universe cannot contain common stock until an earnings calendar source exists"
+)
 NO_SHORTABLE_INSTRUMENT_REASON = "long_only is false but no instrument is shortable"
 BORROW_COST_MISSING_REASON = "long_only is false but costs.borrow_bps_annual is not set above zero"
 
@@ -132,6 +141,20 @@ def evaluator_spec_bound_error(forward_label_sessions: int, spec_text: str) -> s
         if isinstance(borrow, bool) or not isinstance(borrow, (int, float)) or not borrow > 0:
             return BORROW_COST_MISSING_REASON
     return None
+
+
+def evaluator_spec_has_common_stock(spec_text: str) -> bool:
+    """Whether one evaluator spec lists a ``common_stock`` instrument (lenient on shape)."""
+    try:
+        document = json.loads(spec_text)
+    except json.JSONDecodeError:
+        return False
+    instruments = document.get("instruments") if isinstance(document, dict) else None
+    return isinstance(instruments, list) and any(
+        isinstance(item, dict)
+        and item.get("instrument_class") == InstrumentClass.COMMON_STOCK.value
+        for item in instruments
+    )
 
 
 def _nonnegative_int(value: object, name: str) -> int:
@@ -169,6 +192,14 @@ class EarningsCoverage:
     @property
     def trusted(self) -> bool:
         return self.status is EarningsCoverageStatus.TRUSTED
+
+    @property
+    def admits_stock(self) -> bool:
+        """Whether single-stock instruments may be admitted (trusted or a bound snapshot)."""
+        return self.status in {
+            EarningsCoverageStatus.TRUSTED,
+            EarningsCoverageStatus.SNAPSHOT_BOUND,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -423,6 +454,11 @@ class ValidationReceipt:
             },
             "price panel receipt.coverage",
         )
+        if outer["contract_version"] != MINUTE_RECEIPT_CONTRACT:
+            # A minute receipt must not be able to claim the daily contract.
+            raise ValueError(
+                f"price panel receipt contract_version must be {MINUTE_RECEIPT_CONTRACT}"
+            )
         tickers = request["tickers"]
         if not isinstance(tickers, list):
             raise ValueError("price panel receipt.request.tickers must be an array")
@@ -433,7 +469,7 @@ class ValidationReceipt:
             panel_sha256=cast(str, outer["panel_sha256"]),
             instruments=tuple(cast(str, item) for item in tickers),
             acceptance_class=acceptance_class,
-            contract_version=cast(str, outer["contract_version"]),
+            contract_version=MINUTE_RECEIPT_CONTRACT,
             request_contract_version=cast(str, request["contract_version"]),
             request_start=cast(str, request["start"]),
             request_end=cast(str, request["end"]),
@@ -1081,7 +1117,13 @@ def admit_hypothesis(
         )
 
     expected_tickers = tuple(item.ticker for item in evaluator_bounds.instruments)
-    if set(receipt.instruments) != set(expected_tickers):
+    # A daily receipt lists the whole screened universe (membership union plus reference
+    # tickers); the spec trades a subset of it.  Minute receipts must match exactly.
+    if (
+        not set(expected_tickers) <= set(receipt.instruments)
+        if receipt.contract_version == DAILY_RECEIPT_CONTRACT
+        else set(receipt.instruments) != set(expected_tickers)
+    ):
         return _decision(
             admitted=False,
             purpose=purpose,
@@ -1231,14 +1273,15 @@ def admit_hypothesis(
             evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     has_stock = any(
-        item.instrument_class is InstrumentClass.STOCK for item in evaluator_bounds.instruments
+        item.instrument_class is InstrumentClass.COMMON_STOCK
+        for item in evaluator_bounds.instruments
     )
-    if has_stock and not evaluator_bounds.earnings_coverage.trusted:
+    if has_stock and not evaluator_bounds.earnings_coverage.admits_stock:
         return _decision(
             admitted=False,
             purpose=purpose,
             reason=AdmissionReason.STOCK_EARNINGS_UNAVAILABLE,
-            detail="single-stock instruments require trusted earnings coverage",
+            detail="single-stock instruments require a bound earnings snapshot or trusted coverage",
             hypothesis=hypothesis,
             spec=hypothesis_spec,
             receipt=receipt,

@@ -39,6 +39,7 @@ from gateway.research import cli as research_cli
 from gateway.research import jobs
 from gateway.research.admission import (
     BORROW_COST_MISSING_REASON,
+    COMMON_STOCK_REFUSAL,
     NO_SHORTABLE_INSTRUMENT_REASON,
 )
 from gateway.research.contracts import (
@@ -59,6 +60,13 @@ from gateway.research.store import ResearchStore
 from typer.testing import CliRunner, Result
 
 from tests.gateway.research.conftest import provenance_evidence, review, verified_review
+from tests.gateway.research.stock_fixtures import (
+    daily_receipt_text,
+    earnings_bytes,
+    membership_bytes,
+    stock_eval_spec_text,
+    stock_payload,
+)
 from tests.gateway.research.test_admission import (
     _admit,
     _bounds,
@@ -69,6 +77,7 @@ from tests.gateway.research.test_admission import (
 from tests.gateway.research.test_readiness import configure_real_readiness
 
 FIXTURES = Path(__file__).parent / "fixtures" / "golden"
+LEDGER_FIXTURE = Path(__file__).parent / "fixtures" / "exposure-ledger.json"
 HEDGED_SESSIONS = 20
 HEDGED_BORROW_BPS = 50.0
 SCENARIO_TIMEOUT_SECONDS = 30.0
@@ -98,6 +107,7 @@ def _git(cwd: Path, *args: str) -> str:
 
 def _write_readonly(path: Path, text: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)  # a variant may replace an earlier read-only default
     path.write_text(text, encoding="utf-8")
     path.chmod(0o444)
     return path
@@ -114,6 +124,8 @@ class GoldenDraft:
     panel: Path
     receipt: Path
     specs: tuple[Path, ...]
+    earnings: Path | None = None
+    membership: Path | None = None
 
 
 def _hedged_payload() -> dict[str, object]:
@@ -153,8 +165,15 @@ def golden_draft(
     failing_second_spec: bool = False,
     failing_first_spec: bool = False,
     hedged: bool = False,
+    stock: bool = False,
+    with_earnings: bool = True,
 ) -> GoldenDraft:
-    """Configure real runtime pins and create (without freezing) the golden hypothesis."""
+    """Configure real runtime pins and create (without freezing) the golden hypothesis.
+
+    ``stock`` swaps in a daily-panel receipt, a membership file, an earnings snapshot and a
+    real-parseable evaluator spec with one ``common_stock`` instrument; ``with_earnings=False``
+    omits the snapshot so create must refuse.
+    """
     inputs = tmp_path / "inputs"
     # Real runtime pins: shared venv python, pinned evaluator console script, snapshot.
     snapshot = tmp_path / "snapshot"
@@ -191,6 +210,25 @@ def golden_draft(
             _spec_text(3, failing=failing_second_spec, hedged=hedged),
         ),
     )
+    earnings: Path | None = None
+    membership: Path | None = None
+    if stock:
+        membership_data = membership_bytes()
+        membership = _write_readonly(inputs / "membership.json", membership_data.decode())
+        if with_earnings:
+            earnings = _write_readonly(inputs / "earnings.json", earnings_bytes().decode())
+        receipt = _write_readonly(
+            inputs / "receipt.json",
+            daily_receipt_text(
+                hashlib.sha256(panel.read_bytes()).hexdigest(),
+                hashlib.sha256(membership_data).hexdigest(),
+            ),
+        )
+        spec.write_text(json.dumps(stock_payload()), encoding="utf-8")
+        specs = (
+            _write_readonly(inputs / "eval-c000.json", stock_eval_spec_text(1)),
+            _write_readonly(inputs / "eval-c001.json", stock_eval_spec_text(3)),
+        )
     spec_set = inputs / "evaluation-spec-set.json"
     spec_set.write_text(
         EvaluationSpecSet(
@@ -227,8 +265,10 @@ def golden_draft(
         base_commit,
         dividends=dividends,
         evaluation_spec_set=spec_set,
+        earnings=earnings,
+        membership=membership,
     )
-    return GoldenDraft(store, source, hypothesis, venv, panel, receipt, specs)
+    return GoldenDraft(store, source, hypothesis, venv, panel, receipt, specs, earnings, membership)
 
 
 def freeze_golden(draft: GoldenDraft) -> None:
@@ -246,9 +286,16 @@ def _build_golden(
     *,
     failing_second_spec: bool,
     hedged: bool = False,
+    stock: bool = False,
 ) -> Golden:
-    """Configure, freeze, implement, review and admit a two-scenario attempt."""
-    draft = golden_draft(tmp_path, failing_second_spec=failing_second_spec, hedged=hedged)
+    """Configure, freeze, implement, review and admit a two-scenario attempt.
+
+    The stock variant admits through the REAL typed admission wiring (daily receipt,
+    membership, bound earnings snapshot); every other variant uses the synthetic decision.
+    """
+    draft = golden_draft(
+        tmp_path, failing_second_spec=failing_second_spec, hedged=hedged, stock=stock
+    )
     store, source, hypothesis, venv = draft.store, draft.source, draft.hypothesis, draft.venv
     panel, receipt = draft.panel, draft.receipt
     freeze_golden(draft)
@@ -321,6 +368,16 @@ def _build_golden(
     )
     verified_review(store, review(attempt.attempt_id, commit, hypothesis.spec_sha256))
     assert store.get_attempt(attempt.attempt_id).state == AttemptState.REVIEW_PASSED
+
+    if stock:
+        configure_real_readiness(store, tmp_path, monkeypatch)
+        store.register_exposure_ledger(
+            LEDGER_FIXTURE, hashlib.sha256(LEDGER_FIXTURE.read_bytes()).hexdigest()
+        )
+        real = research_cli._admission_for_hypothesis(store, hypothesis.hypothesis_id)
+        assert real.admitted, real.detail
+        store.insert_admission_decision(attempt.attempt_id, real)
+        return Golden(store, source, hypothesis, attempt.attempt_id, plan, run_dir, panel, receipt)
 
     # Synthetic typed admission and native readiness record, as in the dispatch tests.
     decision = _admit(
@@ -694,3 +751,164 @@ def test_fake_evaluator_mirrors_the_gateway_constants() -> None:
     assert module.MAX_SESSIONS == MAX_HOLDING_SESSIONS
     assert module.BORROW_COST_MISSING_REASON == BORROW_COST_MISSING_REASON
     assert module.NO_SHORTABLE_REASON == NO_SHORTABLE_INSTRUMENT_REASON
+    assert module.COMMON_STOCK_REFUSAL == COMMON_STOCK_REFUSAL
+
+
+def test_golden_stock_daily_run_binds_earnings_and_membership_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One common_stock instrument on a daily panel, with an earnings snapshot and membership.
+
+    create (refusals and bindings) -> real compute probe -> freeze -> REAL typed admission
+    (``SNAPSHOT_BOUND`` earnings, daily receipt superset universe) -> submit -> queue ->
+    detached worker with the two extra read-only mounts -> host verification -> close/decide.
+    """
+    golden = _build_golden(tmp_path, monkeypatch, failing_second_spec=False, stock=True)
+    store = golden.store
+    hypothesis_id = golden.hypothesis.hypothesis_id
+    bindings = store.input_bindings(hypothesis_id)
+    assert set(bindings) == {"earnings", "membership"}
+    earnings_digest = bindings["earnings"].sha256
+    membership_digest = bindings["membership"].sha256
+    probe = store.compute_probe(hypothesis_id)
+    assert probe is not None
+    assert probe.inputs["earnings_sha256"] == earnings_digest
+    assert probe.inputs["membership_sha256"] == membership_digest
+    job_id = _queue_via_cli(golden)
+    row = store.job_for(golden.attempt_id)
+    assert row is not None
+    queued = json.loads(row["payload_json"])
+    assert queued["artifact_digests"]["earnings"] == earnings_digest
+    assert queued["artifact_digests"]["membership"] == membership_digest
+    assert queued["artifact_paths"]["earnings"] == bindings["earnings"].path
+
+    _drive_to_terminal(golden, monkeypatch, job_id)
+
+    attempt = store.get_attempt(golden.attempt_id)
+    assert attempt.state == AttemptState.RUN_SUCCEEDED, attempt.run_outcome
+    assert attempt.run_outcome is not None
+    assert json.loads(attempt.run_outcome)["status"] == "succeeded"
+    validated = json.loads((golden.run_dir / "validated-inputs.json").read_text(encoding="utf-8"))
+    assert validated["earnings_sha256"] == earnings_digest
+    assert validated["membership_sha256"] == membership_digest
+    for scenario_id in ("s000", "s001"):
+        out = golden.run_dir / "scenarios" / scenario_id / "evaluator-stage" / "out"
+        result = json.loads((out / "result.json").read_text(encoding="utf-8"))
+        # The fake hashed the files it read from /inputs inside the sandbox.
+        assert result["earnings_sha256"] == earnings_digest
+        assert result["membership_sha256"] == membership_digest
+        assert result["acceptance_class"] == "exploratory_snapshot"
+        assert result["delisting_policy"] == {"long_haircut": 0.3, "max_stale_sessions": 5}
+    validation = json.loads((golden.run_dir / "logs" / "validate-c000.out").read_text())
+    assert validation["earnings_sha256"] == earnings_digest
+    analysis = json.loads(
+        (golden.run_dir / "analysis-stage" / "analysis" / "result.json").read_text()
+    )
+    assert not any("earnings" in name or "membership" in name for name in analysis["inputs"])
+    _call(
+        store.root, "attempt-close", golden.attempt_id, "--decision", "FINISH", "--reason", "golden"
+    )
+    _call(
+        store.root,
+        "hypothesis-decide",
+        hypothesis_id,
+        "--decision",
+        "FINISHED",
+        "--reason",
+        "golden",
+    )
+    assert store.get_hypothesis(hypothesis_id).state == HypothesisState.DECIDED
+
+
+def test_golden_stock_spec_without_earnings_is_refused_at_create(tmp_path: Path) -> None:
+    with pytest.raises(ValueError) as refused:
+        golden_draft(tmp_path, stock=True, with_earnings=False)
+
+    assert COMMON_STOCK_REFUSAL in str(refused.value)
+    assert "--earnings" in str(refused.value)
+    store = ResearchStore(tmp_path / "driver")
+    assert store.hypotheses() == []
+    recorded = [event for event in store.events() if event.kind == "hypothesis_create_refused"]
+    assert len(recorded) == 1 and COMMON_STOCK_REFUSAL in recorded[0].detail
+
+
+def _requeue_payload(golden: Golden, change: dict[str, object]) -> None:
+    """Rewrite the queued job payload in this disposable store (a corrupted queue row)."""
+    row = golden.store.job_for(golden.attempt_id)
+    assert row is not None
+    payload = json.loads(row["payload_json"])
+    for key, value in change.items():
+        payload[key] = value
+    text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    with golden.store._connect() as conn:
+        conn.execute(
+            "UPDATE jobs SET payload_json=?,payload_sha256=? WHERE job_id=?",
+            (text, hashlib.sha256(text.encode()).hexdigest(), row["job_id"]),
+        )
+
+
+def test_golden_stock_dispatch_refuses_a_queue_row_missing_a_bound_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    golden = _build_golden(tmp_path, monkeypatch, failing_second_spec=False, stock=True)
+    _queue_via_cli(golden)
+    row = golden.store.job_for(golden.attempt_id)
+    assert row is not None
+    payload = json.loads(row["payload_json"])
+    paths = {k: v for k, v in payload["artifact_paths"].items() if k != "earnings"}
+    digests = {k: v for k, v in payload["artifact_digests"].items() if k != "earnings"}
+    _requeue_payload(golden, {"artifact_paths": paths, "artifact_digests": digests})
+
+    _serve_once(golden.store.root, monkeypatch)
+
+    attempt = golden.store.get_attempt(golden.attempt_id)
+    assert attempt.state == AttemptState.RUN_FAILED
+    assert attempt.run_outcome is not None
+    assert json.loads(attempt.run_outcome)["status"] == "input_binding_mismatch"
+
+
+def test_golden_stock_dispatch_refuses_an_unbound_extra_input_in_the_queue_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    golden = _build_golden(tmp_path, monkeypatch, failing_second_spec=False)
+    _queue_via_cli(golden)
+    row = golden.store.job_for(golden.attempt_id)
+    assert row is not None
+    payload = json.loads(row["payload_json"])
+    extra = golden.panel  # any real file: the hypothesis binds no earnings input
+    _requeue_payload(
+        golden,
+        {
+            "artifact_paths": {**payload["artifact_paths"], "earnings": str(extra)},
+            "artifact_digests": {
+                **payload["artifact_digests"],
+                "earnings": hashlib.sha256(extra.read_bytes()).hexdigest(),
+            },
+        },
+    )
+
+    _serve_once(golden.store.root, monkeypatch)
+
+    attempt = golden.store.get_attempt(golden.attempt_id)
+    assert attempt.state == AttemptState.RUN_FAILED
+    assert attempt.run_outcome is not None
+    assert json.loads(attempt.run_outcome)["status"] == "input_binding_mismatch"
+
+
+def test_golden_stock_dispatch_refuses_a_bound_input_changed_after_queueing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    golden = _build_golden(tmp_path, monkeypatch, failing_second_spec=False, stock=True)
+    _queue_via_cli(golden)
+    earnings = Path(golden.store.input_bindings(golden.hypothesis.hypothesis_id)["earnings"].path)
+    earnings.chmod(0o644)
+    earnings.write_text("{}", encoding="utf-8")
+
+    _serve_once(golden.store.root, monkeypatch)
+
+    # Typed admission re-reads the bound snapshot and fails closed before any launch.
+    attempt = golden.store.get_attempt(golden.attempt_id)
+    assert attempt.state == AttemptState.REVIEW_PASSED
+    refusal = golden.store.latest_admission_refusal(golden.hypothesis.hypothesis_id)
+    assert refusal is not None and refusal[0] == "EARNINGS_DIGEST_MISMATCH"
+    assert not (golden.run_dir / "job.json").exists()

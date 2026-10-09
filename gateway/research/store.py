@@ -22,14 +22,17 @@ from pathlib import Path
 from typing import Literal, TextIO, cast
 
 from .admission import (
+    COMMON_STOCK_REFUSAL,
     AdmissionDecision,
     CampaignPolicy,
     evaluator_spec_bound_error,
+    evaluator_spec_has_common_stock,
     panel_design_error,
 )
 from .codec import to_json
 from .containment import ContainmentError, runtime_pins
 from .contracts import (
+    INPUT_BINDING_KINDS,
     MAX_RUN_TIMEOUT_SECONDS,
     MAX_STAGE_RSS_MB,
     MIN_ANALYSIS_SECONDS,
@@ -46,6 +49,7 @@ from .contracts import (
     HypothesisSpec,
     HypothesisState,
     ImplementationRecord,
+    InputBinding,
     ReviewEvidence,
     RunOutcome,
     RunPlan,
@@ -68,7 +72,11 @@ from .machine import (
 from .machine import (
     open_attempt as machine_open_attempt,
 )
-from .receipt_sessions import panel_sessions_from_receipt_bytes
+from .receipt_sessions import (
+    daily_receipt_membership_sha256,
+    is_daily_receipt_wire,
+    panel_sessions_from_receipt_bytes,
+)
 from .refusals import REFUSED_KIND, read_create_refusals
 
 
@@ -247,16 +255,81 @@ def _require_panel_supports_design(
     unreadable receipt or spec is left to admission, which stays the backstop.
     """
     try:
-        sessions = panel_sessions_from_receipt_bytes(receipt.read_bytes())
-        instruments = json.loads(primary_spec.read_text(encoding="utf-8"))["instruments"]
-    except (OSError, ValueError, KeyError, TypeError):
+        receipt_bytes = receipt.read_bytes()
+        spec_document = json.loads(primary_spec.read_text(encoding="utf-8"))
+        instruments = spec_document["instruments"]
+        start, end = spec_document.get("start_session"), spec_document.get("end_session")
+        range_kwargs = (
+            {"start": start, "end": end} if isinstance(start, str) and isinstance(end, str) else {}
+        )
+        is_daily = is_daily_receipt_wire(json.loads(receipt_bytes))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return
     if not isinstance(instruments, list):
+        return
+    try:
+        sessions = panel_sessions_from_receipt_bytes(receipt_bytes, **range_kwargs)
+    except (ValueError, KeyError, TypeError) as exc:
+        if is_daily:
+            # The daily list must match what the evaluator sees; never left to admission.
+            raise ValueError(f"invalid daily panel receipt: {exc}") from exc
         return
     count = len(instruments)
     error = panel_design_error(document, sessions, count)
     if error is not None:
         raise ValueError(f"{error[0].value}: {error[1]}")
+
+
+def _optional_bindings(earnings: Path | None, membership: Path | None) -> dict[str, InputBinding]:
+    """Digest the optional ``earnings`` / ``membership`` inputs supplied at create."""
+    return {
+        name: InputBinding(str(path.resolve()), sha256_file(path))
+        for name, path in (("earnings", earnings), ("membership", membership))
+        if path is not None
+    }
+
+
+def _require_optional_inputs(
+    receipt: Path, spec_set: EvaluationSpecSet, bindings: dict[str, InputBinding]
+) -> None:
+    """Refuse at create what the evaluator would refuse forever for the optional inputs.
+
+    * a ``common_stock`` instrument in any evaluation spec needs an earnings snapshot, with the
+      evaluator's own refusal text;
+    * a daily-panel receipt needs the membership file it binds, byte for byte;
+    * a minute-panel receipt takes no membership file.
+    """
+    try:
+        wire = json.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        wire = None  # an unreadable receipt is left to admission, the backstop
+    if isinstance(wire, dict) and is_daily_receipt_wire(wire):
+        try:
+            bound = daily_receipt_membership_sha256(wire)
+        except ValueError as exc:
+            raise ValueError(f"invalid daily panel receipt: {exc}") from exc
+        if bound is None:
+            raise ValueError("daily panel receipt does not bind a membership_sha256")
+        membership = bindings.get("membership")
+        if membership is None:
+            raise ValueError(
+                "a daily panel receipt requires --membership with the pit-universe-membership-v1 "
+                "file it binds"
+            )
+        if membership.sha256 != bound:
+            raise ValueError("membership file does not match the receipt membership_sha256")
+    elif "membership" in bindings and wire is not None:
+        raise ValueError("universe membership requires a daily panel receipt")
+    for entry in spec_set.specs:
+        try:
+            text = Path(entry.path).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if evaluator_spec_has_common_stock(text) and "earnings" not in bindings:
+            raise ValueError(
+                f"{COMMON_STOCK_REFUSAL}; evaluation spec {entry.spec_id} lists a common_stock "
+                "instrument, so --earnings with an earnings-snapshot-v1 file is required"
+            )
 
 
 class ResearchStore:
@@ -795,6 +868,8 @@ class ResearchStore:
         dividends: Path,
         max_attempts: int = 3,
         evaluation_spec_set: Path | None = None,
+        earnings: Path | None = None,
+        membership: Path | None = None,
     ) -> HypothesisSpec:
         if any(h.state != HypothesisState.DECIDED for h in self.hypotheses()):
             # A state precondition, not a design refusal: the DRAFT wake already covers it.
@@ -817,6 +892,8 @@ class ResearchStore:
                 dividends,
                 max_attempts,
                 evaluation_spec_set,
+                earnings,
+                membership,
             )
         except (ValueError, StoreConflict) as exc:
             self._record_create_refusal(exc, spec_file)
@@ -871,11 +948,16 @@ class ResearchStore:
         dividends: Path,
         max_attempts: int,
         evaluation_spec_set: Path | None,
+        earnings: Path | None,
+        membership: Path | None,
     ) -> HypothesisSpec:
         if evaluation_spec_set is None:
             raise ValueError("evaluation spec set is required for every new hypothesis")
         if dividends.is_symlink() or not dividends.is_file():
             raise ValueError("dividends must be a regular non-symlink file")
+        for label, optional in (("earnings", earnings), ("membership", membership)):
+            if optional is not None and (optional.is_symlink() or not optional.is_file()):
+                raise ValueError(f"{label} must be a regular non-symlink file")
         raw = json.loads(spec_file.read_text(encoding="utf-8"))
         spec_json = to_json(raw)
         _require_powered_design(spec_json)
@@ -906,6 +988,8 @@ class ResearchStore:
             if sha256_file(eval_spec) != parsed_primary.sha256:
                 raise ValueError("primary evaluation spec does not match immutable set")
             _require_panel_supports_design(document, receipt, eval_spec)
+            bindings = _optional_bindings(earnings, membership)
+            _require_optional_inputs(receipt, parsed_set, bindings)
             # Verify every spec against the hypothesis before copying any of them.
             contents: dict[str, bytes] = {}
             for entry in parsed_set.specs:
@@ -985,12 +1069,22 @@ class ResearchStore:
                 "INSERT INTO hypothesis_evidence VALUES(?,?,?,?)",
                 (hid, "evaluation_spec_set", set_payload, _digest(set_payload)),
             )
+            binding_payloads = {
+                INPUT_BINDING_KINDS[name]: binding.to_json() for name, binding in bindings.items()
+            }
+            for kind, binding_payload in binding_payloads.items():
+                conn.execute(
+                    "INSERT INTO hypothesis_evidence VALUES(?,?,?,?)",
+                    (hid, kind, binding_payload, _digest(binding_payload)),
+                )
             self._event(conn, hid, None, "hypothesis_created", {"title": title}, "astra")
             conn.commit()
         self._projection(self.root / "hypotheses" / hid / "spec.json", spec_json)
         self._projection(
             self.root / "hypotheses" / hid / "evaluation-spec-set.json", spec_set.to_json()
         )
+        for kind, binding_payload in binding_payloads.items():
+            self._projection(self.root / "hypotheses" / hid / f"{kind}.json", binding_payload)
         for entry in spec_set.specs:
             self._projection_bytes(Path(entry.path), Path(entry.path).read_bytes())
         return spec
@@ -1045,7 +1139,57 @@ class ResearchStore:
             "panel_sha256": hypothesis.panel_sha256,
             "receipt_sha256": hypothesis.receipt_sha256,
         }
+        for name, binding in self.input_bindings(hypothesis_id).items():
+            inputs[f"{name}_sha256"] = binding.sha256
         return pins, inputs
+
+    def input_bindings(self, hypothesis_id: str) -> dict[str, InputBinding]:
+        """Optional bound inputs (``earnings``, ``membership``); absent ones are omitted.
+
+        Old hypotheses carry no such rows and load unchanged.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT kind,payload_json,payload_sha256 FROM hypothesis_evidence "
+                "WHERE hypothesis_id=? AND kind IN (?,?)",
+                (hypothesis_id, *INPUT_BINDING_KINDS.values()),
+            ).fetchall()
+        by_kind = {str(row["kind"]): row for row in rows}
+        bindings: dict[str, InputBinding] = {}
+        for name, kind in INPUT_BINDING_KINDS.items():
+            row = by_kind.get(kind)
+            if row is None:
+                continue
+            payload = str(row["payload_json"])
+            if _digest(payload) != str(row["payload_sha256"]):
+                raise StoreConflict(f"{kind} evidence payload digest mismatch")
+            bindings[name] = InputBinding.from_json(payload)
+        return bindings
+
+    def frozen_inputs(self, hypothesis: HypothesisSpec) -> tuple[dict[str, Path], dict[str, str]]:
+        """Every frozen input artifact (path, digest) a run of ``hypothesis`` is bound to.
+
+        The five mandatory artifacts plus ``earnings`` / ``membership`` when bound; the one
+        place the queue, the submission check and the dispatcher derive them from.
+        """
+        paths = {
+            "spec": self.root / "hypotheses" / hypothesis.hypothesis_id / "spec.json",
+            "panel": Path(hypothesis.panel_path),
+            "receipt": Path(hypothesis.receipt_path),
+            "evaluation_spec": Path(hypothesis.evaluation_spec_path),
+            "dividends": Path(hypothesis.dividends_path),
+        }
+        digests = {
+            "spec": hypothesis.spec_sha256,
+            "panel": hypothesis.panel_sha256,
+            "receipt": hypothesis.receipt_sha256,
+            "evaluation_spec": hypothesis.evaluation_spec_sha256,
+            "dividends": hypothesis.dividends_sha256,
+        }
+        for name, binding in self.input_bindings(hypothesis.hypothesis_id).items():
+            paths[name] = Path(binding.path)
+            digests[name] = binding.sha256
+        return paths, digests
 
     def compute_probe(self, hypothesis_id: str) -> ComputeProbe | None:
         """Return the recorded compute probe, or ``None`` when none was recorded."""
@@ -2575,20 +2719,7 @@ class ResearchStore:
             or (host_review.get("bound_run_plan_sha256") != _digest(stored_plan.to_json()))
         ):
             raise StoreConflict("verified host review evidence is required")
-        artifact_paths = {
-            "spec": self.root / "hypotheses" / hypothesis.hypothesis_id / "spec.json",
-            "panel": Path(hypothesis.panel_path),
-            "receipt": Path(hypothesis.receipt_path),
-            "evaluation_spec": Path(hypothesis.evaluation_spec_path),
-            "dividends": Path(hypothesis.dividends_path),
-        }
-        artifact_digests = {
-            "spec": hypothesis.spec_sha256,
-            "panel": hypothesis.panel_sha256,
-            "receipt": hypothesis.receipt_sha256,
-            "evaluation_spec": hypothesis.evaluation_spec_sha256,
-            "dividends": hypothesis.dividends_sha256,
-        }
+        artifact_paths, artifact_digests = self.frozen_inputs(hypothesis)
         evaluation_spec_paths: dict[str, str] = {}
         evaluation_spec_digests: dict[str, str] = {}
         spec_set = self.evaluation_spec_set(hypothesis.hypothesis_id)

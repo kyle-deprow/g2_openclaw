@@ -469,6 +469,8 @@ def bwrap_argv(
     receipt: Path | None = None,
     spec: Path | None = None,
     dividends: Path | None = None,
+    earnings: Path | None = None,
+    membership: Path | None = None,
     targets_file: Path | None = None,
     scenarios_dir: Path | None = None,
     analysis_stage: Path | None = None,
@@ -481,6 +483,11 @@ def bwrap_argv(
     """Build the fixed bubblewrap command for one research stage."""
     _require_stage(stage)
     base_stage = stage.split("-", 1)[0]
+    if (earnings is not None or membership is not None) and base_stage not in {
+        "validate",
+        "evaluate",
+    }:
+        raise ContainmentError("earnings and membership are only mounted in validation/evaluation")
     needs_provenance = base_stage in {"targets", "evaluate", "analysis"}
     if needs_provenance and provenance_dir is None:
         raise ContainmentError(f"provenance directory is required for {stage}")
@@ -505,6 +512,10 @@ def bwrap_argv(
             raise ContainmentError("spec and dividends are required in validation/evaluation")
         argv.extend(("--ro-bind", str(spec), "/inputs/spec.json"))
         argv.extend(("--ro-bind", str(dividends), "/inputs/dividends.json"))
+        if earnings is not None:
+            argv.extend(("--ro-bind", str(earnings), "/inputs/earnings.json"))
+        if membership is not None:
+            argv.extend(("--ro-bind", str(membership), "/inputs/membership.json"))
         argv.extend(("--ro-bind", str(pins.universe), "/universe.json"))
     if base_stage == "targets":
         if worktree is None or targets_stage is None:

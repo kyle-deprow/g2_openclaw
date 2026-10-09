@@ -222,6 +222,10 @@ def host_execution_ready(store: ResearchStore, attempt_id: str | None) -> str | 
             attempt = store.get_attempt(attempt_id)
             hypothesis = store.get_hypothesis(attempt.hypothesis_id)
             spec = store.root / "hypotheses" / hypothesis.hypothesis_id / "spec.json"
+            optional = {
+                name: Path(binding.path)
+                for name, binding in store.input_bindings(hypothesis.hypothesis_id).items()
+            }
             bwrap_argv(
                 pins,
                 "validate",
@@ -230,6 +234,8 @@ def host_execution_ready(store: ResearchStore, attempt_id: str | None) -> str | 
                 receipt=Path(hypothesis.receipt_path),
                 spec=spec,
                 dividends=Path(hypothesis.dividends_path),
+                earnings=optional.get("earnings"),
+                membership=optional.get("membership"),
             )
         else:
             bwrap_argv(

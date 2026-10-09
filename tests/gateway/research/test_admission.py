@@ -824,15 +824,65 @@ def test_fresh_equivalent_admission_is_deterministic(payload: dict[str, object])
 def test_stock_without_trusted_earnings_is_refused_but_etf_is_allowed(
     payload: dict[str, object],
 ) -> None:
-    stock = _admit(_document(payload), bounds=_bounds(instrument_class=InstrumentClass.STOCK))
+    stock = _admit(
+        _document(payload), bounds=_bounds(instrument_class=InstrumentClass.COMMON_STOCK)
+    )
     etf = _admit(_document(payload), bounds=_bounds(instrument_class=InstrumentClass.ETF))
-    covered = _bounds(instrument_class=InstrumentClass.STOCK)
+    covered = _bounds(instrument_class=InstrumentClass.COMMON_STOCK)
     covered = replace(covered, earnings_coverage=EarningsCoverage(EarningsCoverageStatus.TRUSTED))
     stock_covered = _admit(_document(payload), bounds=covered)
 
     assert stock.reason is AdmissionReason.STOCK_EARNINGS_UNAVAILABLE
     assert etf.admitted is True
     assert stock_covered.admitted is True
+
+
+def test_instrument_class_values_are_the_evaluator_values() -> None:
+    # quantipy's InstrumentClass values; "stock" was a gateway-only spelling that never parsed.
+    assert InstrumentClass("common_stock") is InstrumentClass.COMMON_STOCK
+    assert InstrumentClass("etf") is InstrumentClass.ETF
+    with pytest.raises(ValueError):
+        InstrumentClass("stock")
+
+
+def test_snapshot_bound_earnings_admit_stock_but_stay_distinct_from_trusted(
+    payload: dict[str, object],
+) -> None:
+    bound = replace(
+        _bounds(instrument_class=InstrumentClass.COMMON_STOCK),
+        earnings_coverage=EarningsCoverage(EarningsCoverageStatus.SNAPSHOT_BOUND),
+    )
+    unknown = replace(
+        _bounds(instrument_class=InstrumentClass.COMMON_STOCK),
+        earnings_coverage=EarningsCoverage(EarningsCoverageStatus.UNKNOWN),
+    )
+
+    assert _admit(_document(payload), bounds=bound).admitted is True
+    assert _admit(_document(payload), bounds=unknown).reason is (
+        AdmissionReason.STOCK_EARNINGS_UNAVAILABLE
+    )
+    assert bound.earnings_coverage.trusted is False
+    assert bound.earnings_coverage.admits_stock is True
+
+
+def test_daily_receipt_instruments_may_be_a_superset_of_the_spec(
+    payload: dict[str, object],
+) -> None:
+    daily = replace(
+        _receipt(),
+        instruments=("AAA", "BBB", "SPY"),
+        contract_version="research-price-panel-daily-v1",
+    )
+    minute = replace(_receipt(), instruments=("AAA", "BBB", "SPY"))
+
+    assert _admit(_document(payload), receipt=daily).admitted is True
+    assert _admit(_document(payload), receipt=minute).reason is (
+        AdmissionReason.INSTRUMENT_SET_MISMATCH
+    )
+    short = replace(daily, instruments=("QQQ",))
+    assert _admit(_document(payload), receipt=short).reason is (
+        AdmissionReason.INSTRUMENT_SET_MISMATCH
+    )
 
 
 def test_receipt_instrument_set_mismatch_is_refused(payload: dict[str, object]) -> None:

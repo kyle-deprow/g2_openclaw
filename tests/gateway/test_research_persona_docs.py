@@ -66,7 +66,10 @@ RULE_STATEMENTS = (
     "read-only main controls",
     "price-panel-only capability",
     "ETF scope",
-    "stock refusal without trusted point-in-time earnings coverage",
+    "stocks are refused unless a hypothesis-bound EDGAR rule-D earnings snapshot "
+    "and membership file are present",
+    "results stay `exploratory_snapshot` (never a single-stock acceptance claim)",
+    "unknown earnings fail closed",
     "trusted panel sessions",
     "immutable receipts, ledger, and evaluator bounds",
     "no alpha claim from smoke or synthetic data",
@@ -89,7 +92,7 @@ def test_bootstrap_contract_stays_under_word_budget() -> None:
     words = re.findall(r"\S+", text)
 
     # Assert
-    assert len(words) <= 1_350
+    assert len(words) <= 1_450
 
 
 def test_runtime_skill_stays_under_line_budget() -> None:

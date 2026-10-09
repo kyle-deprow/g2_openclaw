@@ -27,9 +27,12 @@ route; historical Opus/ACP review evidence stays readable but is not a live path
 
 A hypothesis equals one iteration and each attempt is code → review → run.
 There are at most three attempts; Astra explicitly chooses FINISH, ABANDON, or
-PAUSE after exhaustion. The capability is price-panel-only and ETF-scoped;
-stock work requires trusted point-in-time earnings coverage, unknown earnings
-fail closed, and horizons above sixty sessions are refused. Hedged (long-short)
+PAUSE after exhaustion. The capability is price-panel-only. ETFs run on the
+operator-reviewed trusted universe; common stock runs only with a hypothesis-
+bound SEC EDGAR 8-K earnings snapshot (rule D) and a point-in-time membership
+file, its results stay `exploratory_snapshot` (never a single-stock acceptance
+claim), unknown earnings fail closed, and horizons above sixty sessions are
+refused. Hedged (long-short)
 books are allowed only when the frozen evaluator spec declares
 `long_only: false`, names shortable instruments and a borrow cost, and gross
 exposure stays ≤ 1.0 (no leverage).

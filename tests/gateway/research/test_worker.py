@@ -59,7 +59,9 @@ def test_worker_always_writes_terminal_on_digest_mismatch(tmp_path: Path) -> Non
     assert terminal["status"] == "run_plan_mismatch"
 
 
-def _job(tmp_path: Path, *, sleep: float = 0.0) -> tuple[dict[str, object], Path, Path, str]:
+def _job(
+    tmp_path: Path, *, sleep: float = 0.0, optional: tuple[str, ...] = ()
+) -> tuple[dict[str, object], Path, Path, str]:
     # Reuse the disposable git/script fixture from the job tests.
     worktree, target, evaluator, _commit, eval_spec, digest = __import__(
         "tests.gateway.research.test_jobs", fromlist=["_fixture"]
@@ -85,6 +87,10 @@ def _job(tmp_path: Path, *, sleep: float = 0.0) -> tuple[dict[str, object], Path
         "evaluation_spec": eval_spec,
         "dividends": dividends,
     }
+    for name in optional:
+        bound = tmp_path / name
+        bound.write_text(f'{{"input":"{name}"}}', encoding="utf-8")
+        paths[name] = bound
     digests = {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in paths.items()}
     attempt_id = "H0001-A001"
     targets_argv = (str(pins.shared_python), str(target), "--out", str(targets))
@@ -182,16 +188,30 @@ def test_worker_timeout_writes_terminal(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 def _run_fake_evaluator(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, evaluator_version: str
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    evaluator_version: str,
+    *,
+    optional: tuple[str, ...] = (),
+    validation_extra: dict[str, object] | None = None,
+    result_extra: dict[str, object] | None = None,
+    plans: list[StagePlan] | None = None,
 ) -> tuple[dict[str, object], list[tuple[str, ...]], Path]:
-    """Run the worker with a fake stage runner whose evaluator emits ``evaluator_version``."""
-    job, _evaluator, _eval_spec, _digest = _job(tmp_path)
+    """Run the worker with a fake stage runner whose evaluator emits ``evaluator_version``.
+
+    ``optional`` binds extra input artifacts; unless overridden the fake validator and
+    evaluator echo each bound input's ``<name>_sha256`` like the real quantipy commands.
+    """
+    job, _evaluator, _eval_spec, _digest = _job(tmp_path, optional=optional)
     run_dir = Path(str(job["run_dir"]))
     artifact_digests = job["artifact_digests"]
     assert isinstance(artifact_digests, dict)
+    echoed = {f"{name}_sha256": artifact_digests[name] for name in optional}
     target_commands: list[tuple[str, ...]] = []
 
     def fake_stage(plan: StagePlan, _cwd: Path, out: Path, _deadline: float) -> tuple[int, bool]:
+        if plans is not None:
+            plans.append(plan)
         if plan.stage.startswith("validate"):
             out.write_text(
                 json.dumps(
@@ -203,6 +223,7 @@ def _run_fake_evaluator(
                         "receipt_sha256": artifact_digests["receipt"],
                         "universe_file_sha256": job["universe_sha256"],
                         "dividends_sha256": artifact_digests["dividends"],
+                        **(echoed if validation_extra is None else validation_extra),
                     }
                 ),
                 encoding="utf-8",
@@ -221,6 +242,7 @@ def _run_fake_evaluator(
                         "evaluator_version": evaluator_version,
                         "spec_sha256": "a" * 64,
                         "dividends_sha256": artifact_digests["dividends"],
+                        **(echoed if result_extra is None else result_extra),
                     }
                 ),
                 encoding="utf-8",
@@ -1254,3 +1276,146 @@ def test_worker_interrupt_leaves_cancellation_to_cancel_sidecar(
     with pytest.raises(SystemExit, match="143"):
         run(job)
     assert not (Path(str(job["run_dir"])) / "terminal.json").exists()
+
+
+def _optional_digest(name: str) -> str:
+    """Digest of the fixture content ``_job`` writes for an optional input."""
+    return hashlib.sha256(f'{{"input":"{name}"}}'.encode()).hexdigest()
+
+
+def test_worker_threads_optional_inputs_through_argv_mounts_and_digest_bindings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plans: list[StagePlan] = []
+    outcome, _commands, run_dir = _run_fake_evaluator(
+        tmp_path,
+        monkeypatch,
+        "research-evaluator-v3",
+        optional=("earnings", "membership"),
+        plans=plans,
+    )
+
+    assert outcome["status"] == "succeeded"
+    by_stage = {plan.stage: plan.argv for plan in plans}
+    for stage in ("validate-c000", "evaluate-s000"):
+        argv = by_stage[stage]
+        for flag, target in (
+            ("--earnings-snapshot", "/inputs/earnings.json"),
+            ("--universe-membership", "/inputs/membership.json"),
+        ):
+            assert argv[argv.index(flag) + 1] == target
+            assert argv.count(target) == 2  # the read-only bind and the evaluator flag
+    for stage in ("targets-s000", "analysis"):
+        assert not any("earnings" in token or "membership" in token for token in by_stage[stage])
+    validated = json.loads((run_dir / "validated-inputs.json").read_text(encoding="utf-8"))
+    assert validated["earnings_sha256"] == _optional_digest("earnings")
+    assert validated["membership_sha256"] == _optional_digest("membership")
+
+
+def test_worker_without_optional_inputs_keeps_the_original_argv_and_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plans: list[StagePlan] = []
+    outcome, _commands, run_dir = _run_fake_evaluator(
+        tmp_path, monkeypatch, "research-evaluator-v3", plans=plans
+    )
+
+    assert outcome["status"] == "succeeded"
+    assert not any("--earnings-snapshot" in plan.argv for plan in plans)
+    assert not any("--universe-membership" in plan.argv for plan in plans)
+    validated = json.loads((run_dir / "validated-inputs.json").read_text(encoding="utf-8"))
+    assert "earnings_sha256" not in validated and "membership_sha256" not in validated
+
+
+@pytest.mark.parametrize("name", ["earnings", "membership"])
+@pytest.mark.parametrize("report", ["wrong", "absent"])
+def test_worker_refuses_validation_that_does_not_bind_an_optional_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, report: str
+) -> None:
+    other = "membership" if name == "earnings" else "earnings"
+    reported: dict[str, object] = {f"{other}_sha256": _optional_digest(other)}
+    if report == "wrong":
+        reported[f"{name}_sha256"] = "f" * 64
+    outcome, _commands, _run_dir = _run_fake_evaluator(
+        tmp_path,
+        monkeypatch,
+        "research-evaluator-v3",
+        optional=("earnings", "membership"),
+        validation_extra=reported,
+    )
+
+    assert outcome["status"] == "input_validation_failed"
+
+
+@pytest.mark.parametrize("name", ["earnings", "membership"])
+@pytest.mark.parametrize("report", ["wrong", "absent"])
+def test_worker_refuses_an_evaluator_result_that_does_not_bind_an_optional_input(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, report: str
+) -> None:
+    other = "membership" if name == "earnings" else "earnings"
+    reported: dict[str, object] = {f"{other}_sha256": _optional_digest(other)}
+    if report == "wrong":
+        reported[f"{name}_sha256"] = "f" * 64
+    outcome, _commands, _run_dir = _run_fake_evaluator(
+        tmp_path,
+        monkeypatch,
+        "research-evaluator-v3",
+        optional=("earnings", "membership"),
+        result_extra=reported,
+    )
+
+    assert outcome["status"] == "scenario_failed"
+
+
+def test_p3b_artifacts_accepts_only_known_optional_names_with_matching_digests(
+    tmp_path: Path,
+) -> None:
+    job, *_ = _job(tmp_path, optional=("earnings",))
+    paths, digests = worker._p3b_artifacts(job)
+    assert set(paths) == {"spec", "panel", "receipt", "evaluation_spec", "dividends", "earnings"}
+    assert digests["earnings"] == _optional_digest("earnings")
+
+    changed = {
+        **job,
+        "artifact_digests": {**cast(dict[str, str], job["artifact_digests"]), "earnings": "0" * 64},
+    }
+    with pytest.raises(containment.ContainmentError, match="changed or is not regular: earnings"):
+        worker._p3b_artifacts(changed)
+
+    unknown = {
+        **job,
+        "artifact_paths": {**cast(dict[str, str], job["artifact_paths"]), "extra": "/x"},
+        "artifact_digests": {**cast(dict[str, str], job["artifact_digests"]), "extra": "0" * 64},
+    }
+    with pytest.raises(containment.ContainmentError, match=r"unexpected: \['extra'\]"):
+        worker._p3b_artifacts(unknown)
+
+
+def test_in_sandbox_commands_add_the_optional_flags_only_when_bound(tmp_path: Path) -> None:
+    from tests.gateway.research.test_containment import _runtime
+
+    pins, *_ = _runtime(tmp_path)
+    base_validate = worker.validate_inputs_command(pins)
+    base_evaluate = worker.evaluate_command(pins)
+    assert "--earnings-snapshot" not in base_validate + base_evaluate
+    assert "--universe-membership" not in base_validate + base_evaluate
+
+    validate = worker.validate_inputs_command(pins, earnings=True, membership=True)
+    evaluate = worker.evaluate_command(pins, earnings=True)
+    assert validate[: len(base_validate)] == base_validate
+    assert validate[len(base_validate) :] == (
+        "--earnings-snapshot",
+        "/inputs/earnings.json",
+        "--universe-membership",
+        "/inputs/membership.json",
+    )
+    assert "--universe-membership" not in evaluate
+    assert evaluate[-6:] == (
+        "--earnings-snapshot",
+        "/inputs/earnings.json",
+        "--out",
+        "/stage/out",
+        "--require-source-root",
+        "/snapshot/src",
+    )
+    assert evaluate[: len(base_evaluate) - 4] == base_evaluate[:-4]

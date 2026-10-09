@@ -51,6 +51,8 @@ it with the read-only `power-check --events N --sd-bps S`. The SD must come
 from outside the scored test period; create refuses designs whose MDE exceeds
 a plausible effect.
 
+Stock specs need `hypothesis-create --earnings FILE`; daily-panel receipts need `--membership FILE`.
+
 Reserve with `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY
 --owner-key OWNER_KEY --openclaw-database
 /home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`.
@@ -71,9 +73,9 @@ managed-root database paths
 and
 `/home/dev/.openclaw/agents/research-orchestrator/agent/codex-home/state_5.sqlite`,
 and pass the latter as `--codex-state-database` to review-reconcile,
-review-collect, and review-cancel. The CLI derives these paths from the managed OpenClaw root that contains `--root` (the wake text renders them concretely) and rejects any other path. `prompt_sha256` is
-reservation-side only: the host spawn message is encrypted, so binding rests on
-the exact task name, host role/model/effort, and the strict verdict. Collect trusts the child's rollout; an `announce:codex-native` callback is optional but must agree. Unfinished stays pending, never FAIL. A failed, errored, or aborted reviewer child makes the attempt a terminal REVIEW_FAILED with the host reason as the sole finding, with no supersession or re-review; it is distinct from a reviewer FAIL verdict but final for the attempt. Limitation:
+review-collect, and review-cancel. The CLI derives these paths from the managed OpenClaw root containing `--root` (the wake text renders them) and rejects any other path. `prompt_sha256` is
+reservation-side only (the spawn message is encrypted); binding rests on
+the task name, host role/model/effort, and the strict verdict. Collect trusts the child's rollout; any `announce:codex-native` callback must agree. Unfinished stays pending, never FAIL. A failed, errored, or aborted reviewer child makes the attempt a terminal REVIEW_FAILED with the host reason as the sole finding, with no supersession or re-review; it is distinct from a reviewer FAIL verdict. Limitation:
 after the owner yields, `chat.abort` cannot stop a running reviewer
 (`owner_run_inactive_no_supported_child_cancel`); it ends on its own terminal
 evidence. Do not use the retired `--core-database`, ACPX, or Claude-project

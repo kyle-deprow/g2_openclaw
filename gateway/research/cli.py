@@ -41,6 +41,7 @@ from .containment import RuntimePins, runtime_pins_from_record
 from .contracts import (
     MAX_RUN_TIMEOUT_SECONDS,
     MAX_STAGE_RSS_MB,
+    OPTIONAL_INPUT_NAMES,
     RUN_OVERHEAD_SECONDS,
     Attempt,
     AttemptDecision,
@@ -50,6 +51,7 @@ from .contracts import (
     HypothesisSpec,
     HypothesisState,
     ImplementationRecord,
+    InputBinding,
     RunOutcome,
     RunPlan,
     SubmissionInput,
@@ -77,7 +79,10 @@ from .readiness import (
     native_execution_ready,
     register_native_runtime_record,
 )
+from .receipt_sessions import daily_receipt_view as _daily_receipt_view
+from .receipt_sessions import decode_daily_sessions as _decode_daily_sessions
 from .receipt_sessions import decode_panel_sessions as _decode_panel_sessions
+from .receipt_sessions import is_daily_receipt_wire as _is_daily_receipt_wire
 from .receipt_sessions import strict_object as _strict_object
 from .review_evidence import (
     REVIEW_EFFORT,
@@ -250,6 +255,17 @@ def hypothesis_create(
     dividends: Path = typer.Option(..., "--dividends"),
     base_commit: str = typer.Option(..., "--base-commit"),
     evaluation_spec_set: list[Path] = typer.Option([], "--evaluation-spec-set"),
+    earnings: Path | None = typer.Option(
+        None,
+        "--earnings",
+        help="earnings-snapshot-v1 file; required when any spec instrument is common_stock.",
+    ),
+    membership: Path | None = typer.Option(
+        None,
+        "--membership",
+        help="pit-universe-membership-v1 file; required when the receipt is a "
+        "research-price-panel-daily-v1 daily panel.",
+    ),
 ) -> None:
     try:
         if len(evaluation_spec_set) > 1:
@@ -263,6 +279,8 @@ def hypothesis_create(
             base_commit,
             dividends=dividends,
             evaluation_spec_set=evaluation_spec_set[0] if evaluation_spec_set else None,
+            earnings=earnings,
+            membership=membership,
         )
         typer.echo(spec.hypothesis_id)
     except Exception as exc:
@@ -577,7 +595,9 @@ class _AdmissionInputError(ValueError):
 
 
 def _parse_evaluator_bounds(
-    path: Path, evaluation_spec_sha256: str, panel_sessions: tuple[str, ...]
+    path: Path,
+    evaluation_spec_sha256: str,
+    panel_sessions: tuple[str, ...],
 ) -> EvaluatorBounds:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -742,6 +762,35 @@ def _same_evaluator_bounds(left: EvaluatorBounds, right: EvaluatorBounds) -> boo
     )
 
 
+def _spec_session_range(path: Path) -> tuple[str | None, str | None]:
+    """The ``start_session``/``end_session`` of an evaluator spec; ``None`` when unreadable.
+
+    Unreadable or malformed specs are refused by ``_parse_evaluator_bounds`` right after.
+    """
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        start, end = document["start_session"], document["end_session"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None, None
+    return (start, end) if isinstance(start, str) and isinstance(end, str) else (None, None)
+
+
+def _bound_input_bytes(binding: InputBinding | None, name: str) -> bytes:
+    """Read one optional bound input and require its stored digest; fail closed."""
+    if binding is None:
+        raise ValueError(f"a daily panel receipt requires a bound {name} input")
+    path = Path(binding.path)
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"bound {name} input is not a regular file")
+        data = path.read_bytes()
+    except OSError as exc:
+        raise ValueError(f"bound {name} input is unreadable: {exc}") from exc
+    if hashlib.sha256(data).hexdigest() != binding.sha256:
+        raise ValueError(f"bound {name} input digest differs from the frozen binding")
+    return data
+
+
 def _admission_for_hypothesis(store: ResearchStore, hypothesis_id: str) -> AdmissionDecision:
     hypothesis_spec = store.get_hypothesis(hypothesis_id)
     try:
@@ -756,16 +805,34 @@ def _admission_for_hypothesis(store: ResearchStore, hypothesis_id: str) -> Admis
     receipt_sha = hashlib.sha256(receipt_bytes).hexdigest()
     if receipt_sha != hypothesis_spec.receipt_sha256:
         raise _AdmissionInputError("RECEIPT_DIGEST_MISMATCH", "stored receipt digest differs")
+    bindings = store.input_bindings(hypothesis_id)
+    daily = False
     try:
         receipt_wire = _strict_object(json.loads(receipt_bytes.decode("utf-8")), "receipt")
-        receipt = ValidationReceipt.from_wire(
-            receipt_wire,
-            acceptance_class="wire",
-            receipt_sha256=receipt_sha,
-        )
-        panel_sessions = _decode_panel_sessions(receipt_wire, receipt)
+        if _is_daily_receipt_wire(receipt_wire):
+            daily = True
+            membership_bytes = _bound_input_bytes(bindings.get("membership"), "membership")
+            receipt = _daily_receipt_view(
+                receipt_wire, receipt_sha256=receipt_sha, membership_bytes=membership_bytes
+            )
+            panel_sessions = _decode_daily_sessions(receipt_wire)
+        else:
+            receipt = ValidationReceipt.from_wire(
+                receipt_wire,
+                acceptance_class="wire",
+                receipt_sha256=receipt_sha,
+            )
+            panel_sessions = _decode_panel_sessions(receipt_wire, receipt)
     except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise _AdmissionInputError("RECEIPT_REJECTED", str(exc)) from exc
+    earnings_coverage = EarningsCoverage(EarningsCoverageStatus.UNAVAILABLE)
+    if "earnings" in bindings:
+        try:
+            _bound_input_bytes(bindings["earnings"], "earnings")
+        except ValueError as exc:
+            raise _AdmissionInputError("EARNINGS_DIGEST_MISMATCH", str(exc)) from exc
+        # An operator-bound snapshot is exploratory replay, never trusted provider coverage.
+        earnings_coverage = EarningsCoverage(EarningsCoverageStatus.SNAPSHOT_BOUND)
     evaluation_path = Path(hypothesis_spec.evaluation_spec_path)
     try:
         evaluation_bytes = evaluation_path.read_bytes()
@@ -775,8 +842,19 @@ def _admission_for_hypothesis(store: ResearchStore, hypothesis_id: str) -> Admis
         raise _AdmissionInputError(
             "EVALUATION_SPEC_DIGEST_MISMATCH", "stored evaluator spec digest differs"
         )
-    bounds = _parse_evaluator_bounds(
-        evaluation_path, hypothesis_spec.evaluation_spec_sha256, panel_sessions
+    if daily:
+        # A daily panel carries post-range tail sessions so held lots keep marks; the admission
+        # panel is the spec's own range, checked against what the evaluator will see there.
+        spec_start, spec_end = _spec_session_range(evaluation_path)
+        try:
+            panel_sessions = _decode_daily_sessions(receipt_wire, start=spec_start, end=spec_end)
+        except ValueError as exc:
+            raise _AdmissionInputError("RECEIPT_REJECTED", str(exc)) from exc
+    bounds = replace(
+        _parse_evaluator_bounds(
+            evaluation_path, hypothesis_spec.evaluation_spec_sha256, panel_sessions
+        ),
+        earnings_coverage=earnings_coverage,
     )
     try:
         spec_set = store.evaluation_spec_set(hypothesis_id)
@@ -1461,18 +1539,9 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
         ):
             return reject("review_gate_unavailable")
         hypothesis = store.get_hypothesis(attempt.hypothesis_id)
+        frozen_paths, frozen_digests = store.frozen_inputs(hypothesis)
         expected_artifacts = {
-            "spec": (
-                str(store.root / "hypotheses" / hypothesis.hypothesis_id / "spec.json"),
-                hypothesis.spec_sha256,
-            ),
-            "panel": (hypothesis.panel_path, hypothesis.panel_sha256),
-            "receipt": (hypothesis.receipt_path, hypothesis.receipt_sha256),
-            "evaluation_spec": (
-                hypothesis.evaluation_spec_path,
-                hypothesis.evaluation_spec_sha256,
-            ),
-            "dividends": (hypothesis.dividends_path, hypothesis.dividends_sha256),
+            key: (str(path), frozen_digests[key]) for key, path in frozen_paths.items()
         }
         queued_paths = payload.get("artifact_paths")
         queued_digests = payload.get("artifact_digests")
@@ -1481,6 +1550,9 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
         if any(
             str(queued_paths.get(key)) != path or str(queued_digests.get(key)) != digest
             for key, (path, digest) in expected_artifacts.items()
+        ) or any(
+            (key in queued_paths or key in queued_digests) and key not in expected_artifacts
+            for key in OPTIONAL_INPUT_NAMES
         ):
             return reject("input_binding_mismatch")
         if (

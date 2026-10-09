@@ -160,6 +160,13 @@ def _probe_locked(store: ResearchStore, hypothesis_id: str) -> ComputeProbe:
     panel = _regular(Path(hypothesis.panel_path), hypothesis.panel_sha256, "panel")
     receipt = _regular(Path(hypothesis.receipt_path), hypothesis.receipt_sha256, "receipt")
     dividends = _regular(Path(hypothesis.dividends_path), hypothesis.dividends_sha256, "dividends")
+    optional_paths: dict[str, Path] = {}
+    optional_digests: dict[str, str] = {}
+    for name, binding in store.input_bindings(hypothesis_id).items():
+        optional_paths[name] = _regular(Path(binding.path), binding.sha256, name)
+        optional_digests[f"{name}_sha256"] = binding.sha256
+    earnings, membership = optional_paths.get("earnings"), optional_paths.get("membership")
+    flags = {"earnings": earnings is not None, "membership": membership is not None}
     specs = [
         (entry.spec_id, _regular(Path(entry.path), entry.sha256, f"spec {entry.spec_id}"), entry)
         for entry in spec_set.specs
@@ -195,11 +202,13 @@ def _probe_locked(store: ResearchStore, hypothesis_id: str) -> ComputeProbe:
                 job_id,
                 stage,
                 MAX_STAGE_RSS_MB,
-                validate_inputs_command(pins),
+                validate_inputs_command(pins, **flags),
                 panel=panel,
                 receipt=receipt,
                 spec=spec_path,
                 dividends=dividends,
+                earnings=earnings,
+                membership=membership,
             )
             stages.append(_run_stage(plan, probe_dir, stage, spec_id, deadline, hint))
             _check_validation(
@@ -211,6 +220,7 @@ def _probe_locked(store: ResearchStore, hypothesis_id: str) -> ComputeProbe:
                     "receipt_sha256": hypothesis.receipt_sha256,
                     "universe_file_sha256": pins.universe_sha256,
                     "dividends_sha256": hypothesis.dividends_sha256,
+                    **optional_digests,
                 },
             )
 
@@ -226,11 +236,13 @@ def _probe_locked(store: ResearchStore, hypothesis_id: str) -> ComputeProbe:
             job_id,
             "evaluate-s000",
             MAX_STAGE_RSS_MB,
-            evaluate_command(pins),
+            evaluate_command(pins, **flags),
             panel=panel,
             receipt=receipt,
             spec=first_path,
             dividends=dividends,
+            earnings=earnings,
+            membership=membership,
             evaluator_stage=evaluator_dir,
             targets_file=empty_targets,
             provenance_dir=provenance_dir,

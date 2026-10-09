@@ -223,6 +223,8 @@ _PROBE_INPUT_KEYS = {
     "panel_sha256",
     "receipt_sha256",
 }
+# Bound only when the hypothesis carries the matching optional input (stock campaigns).
+_PROBE_OPTIONAL_INPUT_KEYS = {"earnings_sha256", "membership_sha256"}
 # Headroom the probe requires over the measured values (see ``compute_requirements``).
 PROBE_RSS_HEADROOM_NUMERATOR = 5
 PROBE_RSS_HEADROOM_DENOMINATOR = 4
@@ -296,13 +298,15 @@ class ComputeProbe:
             raise ValueError("unsupported compute probe contract")
         _check_id(self.probe_id, _PROBE_ID, "probe_id")
         _check_id(self.hypothesis_id, _H, "hypothesis_id")
-        for name, mapping, keys in (
-            ("pins", self.pins, _PROBE_PIN_KEYS),
-            ("inputs", self.inputs, _PROBE_INPUT_KEYS),
-        ):
-            data = require_keys_exact(mapping, keys, name)
-            for key, digest in data.items():
-                require_sha256(digest, f"{name}.{key}")
+        data = require_keys_exact(self.pins, _PROBE_PIN_KEYS, "pins")
+        for key, digest in data.items():
+            require_sha256(digest, f"pins.{key}")
+        if not isinstance(self.inputs, dict):
+            raise ValueError("inputs must be an object")
+        optional = set(self.inputs) & _PROBE_OPTIONAL_INPUT_KEYS
+        data = require_keys_exact(self.inputs, _PROBE_INPUT_KEYS | optional, "inputs")
+        for key, digest in data.items():
+            require_sha256(digest, f"inputs.{key}")
         if not isinstance(self.stages, tuple) or len(self.stages) < 2:
             raise ValueError("probe stages must contain validate stages and one evaluate stage")
         if any(not isinstance(item, ProbeStage) for item in self.stages):
@@ -816,6 +820,36 @@ class SubmissionInput:
 # wire-record names above as the canonical public API.
 SpecEntry = EvaluationSpecEntry
 Scenario = RunScenario
+
+
+#: Optional bound hypothesis inputs, persisted as insert-only ``hypothesis_evidence`` rows so
+#: the key-exact ``HypothesisSpec`` row never widens.  Artifact name -> evidence kind.
+INPUT_BINDING_KINDS: dict[str, str] = {
+    "earnings": "earnings_binding",
+    "membership": "membership_binding",
+}
+OPTIONAL_INPUT_NAMES: tuple[str, ...] = tuple(INPUT_BINDING_KINDS)
+
+
+@dataclass(frozen=True, slots=True)
+class InputBinding:
+    """Path and SHA-256 of one optional frozen input (``earnings`` or ``membership``)."""
+
+    path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        require_str(self.path, "path")
+        require_sha256(self.sha256, "sha256")
+
+    def to_json(self) -> str:
+        return to_json({"path": self.path, "sha256": self.sha256})
+
+    @classmethod
+    def from_json(cls, value: str) -> Self:
+        raw = _json_dict(json.loads(value), "input binding")
+        data = require_keys_exact(raw, {"path", "sha256"}, "input binding")
+        return cls(**data)  # type: ignore[arg-type]
 
 
 @dataclass(frozen=True, slots=True)

@@ -31,7 +31,7 @@ from .containment import (
     validate_targets_argv,
     verify_runtime_pins,
 )
-from .contracts import MAX_RUN_TIMEOUT_SECONDS, MAX_STAGE_RSS_MB, RunPlan
+from .contracts import MAX_RUN_TIMEOUT_SECONDS, MAX_STAGE_RSS_MB, OPTIONAL_INPUT_NAMES, RunPlan
 from .jobs import lifecycle_lock
 from .provenance import ProvenanceError, verify_stage_provenance
 
@@ -269,7 +269,19 @@ def _stage(
         return process.returncode or 0, False
 
 
-def validate_inputs_command(pins: RuntimePins) -> tuple[str, ...]:
+def _optional_input_flags(*, earnings: bool, membership: bool) -> tuple[str, ...]:
+    """Argv for the optional bound inputs, mounted at fixed in-sandbox paths."""
+    flags: tuple[str, ...] = ()
+    if earnings:
+        flags += ("--earnings-snapshot", "/inputs/earnings.json")
+    if membership:
+        flags += ("--universe-membership", "/inputs/membership.json")
+    return flags
+
+
+def validate_inputs_command(
+    pins: RuntimePins, *, earnings: bool = False, membership: bool = False
+) -> tuple[str, ...]:
     """The one in-sandbox ``validate-inputs`` command (shared with the compute probe)."""
     return (
         str(pins.shared_python),
@@ -288,10 +300,13 @@ def validate_inputs_command(pins: RuntimePins) -> tuple[str, ...]:
         "/inputs/dividends.json",
         "--universe",
         "/universe.json",
+        *_optional_input_flags(earnings=earnings, membership=membership),
     )
 
 
-def evaluate_command(pins: RuntimePins) -> tuple[str, ...]:
+def evaluate_command(
+    pins: RuntimePins, *, earnings: bool = False, membership: bool = False
+) -> tuple[str, ...]:
     """The one in-sandbox ``evaluate`` command (shared with the compute probe)."""
     return (
         str(pins.shared_python),
@@ -310,6 +325,7 @@ def evaluate_command(pins: RuntimePins) -> tuple[str, ...]:
         "/targets.json",
         "--dividends",
         "/inputs/dividends.json",
+        *_optional_input_flags(earnings=earnings, membership=membership),
         "--out",
         "/stage/out",
         "--require-source-root",
@@ -369,8 +385,15 @@ def _p3b_artifacts(job: dict[str, object]) -> tuple[dict[str, Path], dict[str, s
     paths = {str(key): Path(str(value)) for key, value in raw_paths.items()}
     digests = {str(key): str(value) for key, value in raw_digests.items()}
     required = {"spec", "panel", "receipt", "evaluation_spec", "dividends"}
+    required |= set(paths) & set(OPTIONAL_INPUT_NAMES)
     if set(paths) != required or set(digests) != required:
-        raise ContainmentError("panel, receipt, spec, evaluator spec, and dividends are required")
+        missing = sorted(required - set(paths) | required - set(digests))
+        unexpected = sorted(set(paths) - required | set(digests) - required)
+        raise ContainmentError(
+            "frozen input artifacts must be spec, panel, receipt, evaluation_spec and dividends "
+            f"plus optional {', '.join(OPTIONAL_INPUT_NAMES)}"
+            f" (missing: {missing or 'none'}; unexpected: {unexpected or 'none'})"
+        )
     for key, path in paths.items():
         if path.is_symlink() or not path.is_file() or not _digest_matches(path, digests.get(key)):
             raise ContainmentError(f"frozen input changed or is not regular: {key}")
@@ -510,6 +533,11 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             raise ContainmentError("invalid resource limits")
         deadline = time.monotonic() + float(timeout_value)
         panel, receipt, dividends = artifacts["panel"], artifacts["receipt"], artifacts["dividends"]
+        # Optional stock-campaign inputs; their digests are bound like the mandatory ones.
+        earnings, membership = artifacts.get("earnings"), artifacts.get("membership")
+        optional_digests = {
+            f"{name}_sha256": digests[name] for name in OPTIONAL_INPUT_NAMES if name in digests
+        }
         spec_paths = {
             key.removeprefix("evaluation:"): path
             for key, path in artifacts.items()
@@ -535,7 +563,9 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             raise ContainmentError("run plan stage timeouts exceed the job timeout")
         semantic_by_spec: dict[str, str] = {}
         for spec_id, spec_path in sorted(spec_paths.items()):
-            validation_command = validate_inputs_command(pins)
+            validation_command = validate_inputs_command(
+                pins, earnings=earnings is not None, membership=membership is not None
+            )
             stage_name = f"validate-{spec_id}"
             validation_plan = stage_plan(
                 pins,
@@ -547,6 +577,8 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 receipt=receipt,
                 spec=spec_path,
                 dividends=dividends,
+                earnings=earnings,
+                membership=membership,
             )
             tick = time.monotonic()
             validation_exit, timed_out = _stage(
@@ -580,6 +612,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 "receipt_sha256": digests["receipt"],
                 "universe_file_sha256": pins.universe_sha256,
                 "dividends_sha256": digests["dividends"],
+                **optional_digests,
             }
             if any(validation.get(key) != value for key, value in expected.items()):
                 status = "input_validation_failed"
@@ -598,6 +631,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 "panel_sha256": digests["panel"],
                 "receipt_sha256": digests["receipt"],
                 "dividends_sha256": digests["dividends"],
+                **optional_digests,
                 "snapshot_sha256": pins.snapshot_sha256,
                 "universe_sha256": pins.universe_sha256,
             },
@@ -692,7 +726,9 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             _require_empty_directory(evaluator_dir, "scenario evaluator stage")
             evaluator_provenance_dir = evaluator_dir / "provenance"
             _owned_directory(evaluator_provenance_dir, "evaluator provenance")
-            evaluator_command = evaluate_command(pins)
+            evaluator_command = evaluate_command(
+                pins, earnings=earnings is not None, membership=membership is not None
+            )
             evaluator_plan = stage_plan(
                 pins,
                 str(job["job_id"]),
@@ -703,6 +739,8 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 receipt=receipt,
                 spec=spec_paths[scenario.spec_id],
                 dividends=dividends,
+                earnings=earnings,
+                membership=membership,
                 evaluator_stage=evaluator_dir,
                 targets_file=target_path,
                 provenance_dir=evaluator_provenance_dir,
@@ -757,6 +795,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
                 or result.get("evaluator_version") not in ACCEPTED_EVALUATOR_VERSIONS
                 or result.get("spec_sha256") != semantic_by_spec[scenario.spec_id]
                 or result.get("dividends_sha256") != digests["dividends"]
+                or any(result.get(key) != value for key, value in optional_digests.items())
             ):
                 status = "scenario_failed"
                 raise ContainmentError(

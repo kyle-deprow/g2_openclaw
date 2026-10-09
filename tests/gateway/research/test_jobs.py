@@ -87,6 +87,7 @@ def _launch(
     before_launch: Callable[[], None] | None = None,
     extra_target_args: Callable[[Path, Path], tuple[str, ...]] | None = None,
     entrypoint: Callable[..., Any] = launch,
+    optional_inputs: tuple[str, ...] = (),
 ) -> tuple[Any, Path]:
     worktree, target, _evaluator, commit, eval_spec, _digest = _fixture(
         tmp_path, sleep=sleep, mutate=mutate
@@ -160,6 +161,11 @@ def _launch(
         "evaluation_spec": eval_spec,
         "dividends": dividends,
     }
+    for name in optional_inputs:
+        bound = tmp_path / f"{name}.json"
+        bound.write_text(f'{{"input":"{name}"}}', encoding="utf-8")
+        bound.chmod(0o444)
+        artifact_paths[name] = bound
     artifact_digests = {
         key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in artifact_paths.items()
     }
@@ -402,6 +408,62 @@ def test_validate_launch_accepts_pinned_inputs_without_mutating(tmp_path: Path) 
     # The fixture pre-creates only run/logs; validation must add nothing else.
     assert sorted(path.name for path in (attempt_dir / "run").iterdir()) == ["logs"]
     assert list((attempt_dir / "run" / "logs").iterdir()) == []
+
+
+@pytest.mark.parametrize("optional", [("earnings",), ("membership",), ("earnings", "membership")])
+def test_validate_launch_accepts_optional_stock_inputs_and_checks_their_digests(
+    tmp_path: Path, optional: tuple[str, ...]
+) -> None:
+    _launch(
+        tmp_path / "optional-ok",
+        extra_target_args=_pinned_inputs,
+        entrypoint=validate_launch,
+        optional_inputs=optional,
+    )
+
+
+@pytest.mark.parametrize("name", ["earnings", "membership"])
+def test_validate_launch_rejects_a_changed_or_missing_optional_input(
+    tmp_path: Path, name: str
+) -> None:
+    root = tmp_path / "optional-changed"
+
+    def tamper() -> None:
+        bound = root / f"{name}.json"
+        bound.chmod(0o644)
+        bound.write_text("tampered", encoding="utf-8")
+
+    with pytest.raises(JobError, match=f"{name} digest does not match frozen artifact"):
+        _launch(
+            root,
+            extra_target_args=_pinned_inputs,
+            entrypoint=validate_launch,
+            optional_inputs=(name,),
+            before_launch=tamper,
+        )
+
+    def remove() -> None:
+        (tmp_path / "optional-missing" / f"{name}.json").unlink()
+
+    with pytest.raises(JobError, match=f"{name} file is missing or not regular"):
+        _launch(
+            tmp_path / "optional-missing",
+            extra_target_args=_pinned_inputs,
+            entrypoint=validate_launch,
+            optional_inputs=(name,),
+            before_launch=remove,
+        )
+
+
+def test_validate_launch_rejects_an_unbound_artifact_name(tmp_path: Path) -> None:
+    root = tmp_path / "optional-unknown"
+    with pytest.raises(JobError, match="all frozen input artifacts and digests are required"):
+        _launch(
+            root,
+            extra_target_args=_pinned_inputs,
+            entrypoint=validate_launch,
+            optional_inputs=("dividends_extra",),
+        )
 
 
 def test_validate_launch_accepts_the_28800_second_and_16384_mb_bounds(tmp_path: Path) -> None:

@@ -10,9 +10,10 @@ attempts; native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) reviews once.
 OpenAI/Codex remains the provider. Do not invent a route, silently switch providers, or claim a result
 from an unproven acknowledgement.
 
-The scientific boundary is price-panel-only and ETF-scoped. Stock work is
-refused without trusted point-in-time earnings coverage; unknown earnings fail
-closed. A horizon above sixty sessions is refused; hedged (long-short) books
+The scientific boundary is price-panel-only and ETF-scoped. Stocks are
+refused unless a hypothesis-bound EDGAR rule-D earnings snapshot and membership
+file are present; results stay `exploratory_snapshot` (never a single-stock
+acceptance claim); unknown earnings fail closed. A horizon above sixty sessions is refused; hedged (long-short) books
 are allowed only when the frozen evaluator spec declares `long_only: false`,
 names shortable instruments and a borrow cost, and gross exposure stays
 ≤ 1.0 (no leverage). Trusted panel sessions,

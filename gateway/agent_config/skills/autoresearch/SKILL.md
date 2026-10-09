@@ -90,6 +90,17 @@ charter's stop condition applies: `gateway-cli research pause --root ROOT --owne
 is owner-authorized for it (for example after consecutive underpowered refusals, pause with a
 summary); never resume yourself.
 
+Stock inputs: `hypothesis-create` also takes optional `--earnings FILE`
+(earnings-snapshot-v1) and `--membership FILE` (pit-universe-membership-v1); each path and
+digest is bound as insert-only evidence, and the compute probe, queue, worker and
+submission preflight use them. `--earnings` is required when any evaluator spec lists a
+`common_stock` instrument (else create is refused with `trusted universe cannot contain
+common stock until an earnings calendar source exists`). `--membership` is required when
+the receipt is a `research-price-panel-daily-v1` daily panel, and must be the file the
+receipt's `membership_sha256` names. Admission records a bound snapshot as `SNAPSHOT_BOUND`,
+not trusted coverage; stock results are `exploratory_snapshot` only, never single-stock
+acceptance.
+
 Freeze sequence: create → `compute-probe HYPOTHESIS_ID --root ROOT` (owner or
 operator; DRAFT only; recorded once; it needs the non-blocking run lock, so it
 is refused while a dispatch or run command holds that lock, and it can take
@@ -218,8 +229,9 @@ target path or another scenario's stage.
 
 The initial capability is price-panel-only and ETF-scoped. Require trusted
 panel sessions, immutable receipts, the exposure ledger, and evaluator bounds.
-Refuse stock work without trusted point-in-time earnings coverage and fail closed
-on unknown earnings status. A holding horizon above sixty sessions is refused;
+Stocks are refused unless a hypothesis-bound EDGAR rule-D earnings snapshot and
+membership file are present; results stay `exploratory_snapshot` (never a single-stock
+acceptance claim); unknown earnings fail closed. A holding horizon above sixty sessions is refused;
 hedged (long-short) books are allowed only when the frozen evaluator spec
 declares `long_only: false`, names shortable instruments and a borrow cost, and
 gross exposure stays ≤ 1.0 (no leverage). Hedge legs exist to remove

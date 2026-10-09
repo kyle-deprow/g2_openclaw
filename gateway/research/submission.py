@@ -367,20 +367,7 @@ def _launch_check(
         / attempt.attempt_id
         / "run"
     )
-    artifact_paths = {
-        "spec": store.root / "hypotheses" / hypothesis.hypothesis_id / "spec.json",
-        "panel": Path(hypothesis.panel_path),
-        "receipt": Path(hypothesis.receipt_path),
-        "evaluation_spec": Path(hypothesis.evaluation_spec_path),
-        "dividends": Path(hypothesis.dividends_path),
-    }
-    artifact_digests = {
-        "spec": hypothesis.spec_sha256,
-        "panel": hypothesis.panel_sha256,
-        "receipt": hypothesis.receipt_sha256,
-        "evaluation_spec": hypothesis.evaluation_spec_sha256,
-        "dividends": hypothesis.dividends_sha256,
-    }
+    artifact_paths, artifact_digests = store.frozen_inputs(hypothesis)
     entries = {
         entry.spec_id: entry for entry in store.evaluation_spec_set(hypothesis.hypothesis_id).specs
     }

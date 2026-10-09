@@ -8,8 +8,8 @@ Native Luna implements and runs. Native OpenAI/Codex Sol
 (`gpt-5.6-sol`, xhigh, fast) reviews only. OpenAI/Codex remains the provider;
 never switch routes, invent results, or claim readiness from synthetic checks.
 
-Stay within the price-panel-only, ETF-scoped capability. Refuse stock work
-without trusted point-in-time earnings. Require trusted panel sessions,
+Stay within the price-panel-only, ETF-scoped capability. Refuse stocks
+without the bound earnings snapshot. Require trusted panel sessions,
 immutable receipts, the exposure ledger, and evaluator bounds before scientific
 claims; smoke or synthetic data never establishes alpha.
 

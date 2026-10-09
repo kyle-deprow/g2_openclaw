@@ -87,7 +87,12 @@ and relative deliverable paths.
   operator policy. Missing, malformed, conflicting, or unsupported input is a
   typed refusal, never an inferred value.
 - The capability is price-panel-only capability within ETF scope.
-- Stock refusal without trusted point-in-time earnings coverage is mandatory; unknown or unavailable earnings fail closed.
+- Mandatory: stocks are refused unless a hypothesis-bound EDGAR rule-D earnings snapshot and membership file are present; results stay `exploratory_snapshot` (never a single-stock acceptance claim); unknown earnings fail closed.
+- Stock work needs a bound earnings snapshot: `hypothesis-create --earnings FILE`
+  (required when any evaluator spec lists `common_stock`; a daily-panel receipt also
+  needs `--membership FILE`, the file its `membership_sha256` names). Admission calls
+  that `SNAPSHOT_BOUND`, not trusted coverage; results are `exploratory_snapshot`
+  only, never single-stock acceptance.
 - A holding horizon above sixty sessions is refused; hedged (long-short) books are
   allowed only when the frozen evaluator spec declares `long_only: false`, names
   shortable instruments and a borrow cost, and gross exposure stays ≤ 1.0 (no

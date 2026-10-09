@@ -41,7 +41,9 @@
 
 ## Scientific boundary
 
-- Capability is price-panel-only and ETF-scoped. Refuse stock work without
-  trusted point-in-time earnings and fail closed on unknown earnings. Require
+- Capability is price-panel-only and ETF-scoped. Stocks are refused unless a
+  hypothesis-bound EDGAR rule-D earnings snapshot and membership file are present;
+  results stay `exploratory_snapshot` (never a single-stock acceptance claim);
+  unknown earnings fail closed. Require
   trusted panel sessions, immutable receipts, the exposure ledger, and
   evaluator bounds; smoke or synthetic data never establishes alpha.

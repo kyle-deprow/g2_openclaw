@@ -921,7 +921,7 @@ def test_admission_rejects_missing_malformed_mutated_or_symlinked_spec_set(
     [
         ("etf", "panel", None),
         ("etf", "reddit", "INPUT_CAPABILITY_UNSUPPORTED"),
-        ("stock", "panel", "STOCK_EARNINGS_UNAVAILABLE"),
+        ("common_stock", "panel", "STOCK_EARNINGS_UNAVAILABLE"),
     ],
 )
 def test_attempt_open_cli_wires_capability_and_earnings_refusals(

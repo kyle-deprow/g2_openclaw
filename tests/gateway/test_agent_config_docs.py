@@ -270,8 +270,11 @@ def test_current_scientific_boundary_preserves_earnings_etf_and_horizon_policy()
     text = " ".join(path.read_text(encoding="utf-8") for path in _owner_docs()).lower()
     assert "price-panel-only" in text
     assert "etf scope" in text
-    assert "stock refusal without trusted point-in-time earnings coverage" in text
-    assert "unknown or unavailable earnings fail closed" in text
+    assert (
+        "stocks are refused unless a hypothesis-bound edgar rule-d earnings snapshot and "
+        "membership file are present; results stay `exploratory_snapshot` (never a single-stock "
+        "acceptance claim); unknown earnings fail closed"
+    ) in text
     assert "holding horizon above sixty sessions is refused" in text
     assert "hedged (long-short) books are allowed only when the frozen evaluator spec" in text
     assert "declares `long_only: false`" in text
@@ -452,7 +455,7 @@ def test_readiness_window_and_route_terms_remain_explicit_in_active_contract() -
     assert "immutable spec/panel/receipt" in text
     assert "evaluator bounds" in text
     assert "supplied capability" in text
-    assert "unknown or unavailable earnings fail closed" in text
+    assert "unknown earnings fail closed" in text
     assert "make no alpha claim from smoke or synthetic data" in text.lower()
 
 

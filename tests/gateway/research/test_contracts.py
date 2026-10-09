@@ -423,3 +423,25 @@ def test_historical_run_plan_shapes_still_parse(tmp_path: Path) -> None:
         reloaded = RunPlan.from_json(plan.to_json())
         assert reloaded == plan
         assert reloaded.stage_budget_seconds <= 28800
+
+
+def test_input_binding_round_trips_and_is_key_exact() -> None:
+    from gateway.research.contracts import INPUT_BINDING_KINDS, InputBinding
+
+    binding = InputBinding("/inputs/earnings.json", "a" * 64)
+
+    assert InputBinding.from_json(binding.to_json()) == binding
+    assert binding.to_json() == '{"path":"/inputs/earnings.json","sha256":"' + "a" * 64 + '"}'
+    assert INPUT_BINDING_KINDS == {
+        "earnings": "earnings_binding",
+        "membership": "membership_binding",
+    }
+    for bad in (
+        '{"path":"/x"}',
+        '{"path":"/x","sha256":"' + "a" * 64 + '","extra":1}',
+        '{"path":"","sha256":"' + "a" * 64 + '"}',
+        '{"path":"/x","sha256":"nope"}',
+        "[]",
+    ):
+        with pytest.raises(ValueError):
+            InputBinding.from_json(bad)

@@ -26,7 +26,7 @@ from .containment import (
     validate_targets_argv,
     verify_configured_runtime_pins,
 )
-from .contracts import MAX_RUN_TIMEOUT_SECONDS, MAX_STAGE_RSS_MB, RunPlan
+from .contracts import MAX_RUN_TIMEOUT_SECONDS, MAX_STAGE_RSS_MB, OPTIONAL_INPUT_NAMES, RunPlan
 
 
 class JobError(RuntimeError):
@@ -372,10 +372,19 @@ def validate_launch(
     if not dividends_path.is_file():
         raise JobError("dividends file is missing")
     required_artifacts = {"spec", "panel", "receipt", "evaluation_spec", "dividends"}
+    # Stock campaigns additionally bind an earnings snapshot and/or a universe membership.
+    required_artifacts |= set(artifact_paths) & set(OPTIONAL_INPUT_NAMES)
     if set(artifact_paths) != required_artifacts or set(artifact_digests) != required_artifacts:
         raise JobError("all frozen input artifacts and digests are required")
     if artifact_digests.get("dividends") != _sha(dividends_path):
         raise JobError("dividends digest does not match frozen artifact")
+    for name in OPTIONAL_INPUT_NAMES:
+        if name in artifact_paths:
+            bound = artifact_paths[name]
+            if bound.is_symlink() or not bound.is_file():
+                raise JobError(f"{name} file is missing or not regular")
+            if artifact_digests.get(name) != _sha(bound):
+                raise JobError(f"{name} digest does not match frozen artifact")
     if run_plan.attempt_id != attempt_dir.name:
         raise JobError("run plan attempt_id does not match launch directory")
     if run_plan.commit != expected_commit:

@@ -72,8 +72,14 @@ or proof that a current-price ETF feed is installed.
   inputs, or lost job. Do not clear a readiness pause autonomously. Invalid
   inputs remain refusals.
 - The capability is price-panel-only capability within ETF scope.
-- Stock refusal without trusted point-in-time earnings coverage is mandatory;
-  unknown or unavailable earnings fail closed.
+- Mandatory: stocks are refused unless a hypothesis-bound EDGAR rule-D earnings
+  snapshot and membership file are present; results stay `exploratory_snapshot`
+  (never a single-stock acceptance claim); unknown earnings fail closed.
+- Stock work needs a bound earnings snapshot: `hypothesis-create --earnings FILE`
+  (required when any evaluator spec lists `common_stock`; a daily-panel receipt also
+  needs `--membership FILE`, the file its `membership_sha256` names). Admission calls
+  that `SNAPSHOT_BOUND`, not trusted coverage; results are `exploratory_snapshot`
+  only, never single-stock acceptance.
 - Scientific boundary: price-panel-only capability, ETF scope, trusted panel
   sessions, and immutable receipts/ledger/evaluator bounds.
 - Preserve typed admission refusals and trusted panel sessions as caller

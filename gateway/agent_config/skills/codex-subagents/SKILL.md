@@ -67,9 +67,10 @@ exhaustion. Typed admission refusals, policy-unset pause, exhausted-attempt
 completion, owner wake, exact cancel, and read-only main controls are durable
 contract behavior.
 
-The scientific boundary is price-panel-only and ETF-scoped. Refuse stock work
-without trusted point-in-time earnings coverage; unknown earnings and horizons
-above sixty sessions fail closed. Hedged (long-short) books need a frozen spec
+The scientific boundary is price-panel-only and ETF-scoped. Stocks are refused
+unless a hypothesis-bound EDGAR rule-D earnings snapshot and membership file are
+present; results stay `exploratory_snapshot` (never a single-stock acceptance
+claim); unknown earnings and horizons above sixty sessions fail closed. Hedged (long-short) books need a frozen spec
 with `long_only: false`, shortable instruments, a borrow cost, and gross
 exposure ≤ 1.0 (no leverage). Require trusted panel sessions, immutable
 receipts, the exposure ledger, and evaluator bounds. Smoke or synthetic data

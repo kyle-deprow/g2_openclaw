@@ -868,3 +868,71 @@ def test_contained_worker_runs_fixed_stages_and_binds_v2_result(
     terminal = json.loads((run_dir / "terminal.json").read_text())
     assert terminal["status"] == expected_status
     assert (run_dir / "validated-inputs.json").is_file() is not (failure_mode == "validate")
+
+
+def test_bwrap_validate_and_evaluate_mount_optional_stock_inputs_read_only(
+    tmp_path: Path,
+) -> None:
+    pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
+    panel, receipt, spec, dividends, earnings, membership = (
+        tmp_path / name for name in ("panel", "receipt", "spec", "dividends", "earn", "member")
+    )
+    for path in (panel, receipt, spec, dividends, earnings, membership):
+        path.write_text("{}")
+    evaluator_stage = tmp_path / "evaluator-stage"
+    provenance = evaluator_stage / "provenance"
+    provenance.mkdir(parents=True)
+    command = (str(pins.shared_python), "-P", "-s", str(pins.evaluator), "research")
+    plain = bwrap_argv(
+        pins, "validate", command, panel=panel, receipt=receipt, spec=spec, dividends=dividends
+    )
+    validate = bwrap_argv(
+        pins,
+        "validate",
+        command,
+        panel=panel,
+        receipt=receipt,
+        spec=spec,
+        dividends=dividends,
+        earnings=earnings,
+        membership=membership,
+    )
+    evaluate = bwrap_argv(
+        pins,
+        "evaluate",
+        command,
+        panel=panel,
+        receipt=receipt,
+        spec=spec,
+        dividends=dividends,
+        earnings=earnings,
+        membership=membership,
+        evaluator_stage=evaluator_stage,
+        targets_file=tmp_path / "targets.json",
+        provenance_dir=provenance,
+    )
+
+    for argv in (validate, evaluate):
+        for source, target in (
+            (earnings, "/inputs/earnings.json"),
+            (membership, "/inputs/membership.json"),
+        ):
+            index = argv.index(target)
+            assert tuple(argv[index - 2 : index + 1]) == ("--ro-bind", str(source), target)
+    # Absent inputs add no mount, so the pre-stock argv is byte-identical.
+    assert "/inputs/earnings.json" not in plain and "/inputs/membership.json" not in plain
+
+
+@pytest.mark.parametrize("stage", ["targets", "analysis"])
+@pytest.mark.parametrize("name", ["earnings", "membership"])
+def test_bwrap_refuses_stock_inputs_outside_validate_and_evaluate(
+    tmp_path: Path, stage: str, name: str
+) -> None:
+    pins, _snapshot, _evaluator, _universe, _venv = _runtime(tmp_path)
+    bound = tmp_path / "bound"
+    bound.write_text("{}")
+    with pytest.raises(ContainmentError, match="only mounted in validation/evaluation"):
+        if name == "earnings":
+            bwrap_argv(pins, stage, ("python",), earnings=bound)
+        else:
+            bwrap_argv(pins, stage, ("python",), membership=bound)

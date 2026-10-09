@@ -7,10 +7,12 @@ anything.  The produced files are accepted by the real ``implementation-submit``
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 from collections.abc import Callable
@@ -164,10 +166,11 @@ def make_env(
     *,
     probe_wall: float | None = 0.5,
     scenario_timeout: float = SCENARIO_TIMEOUT,
+    stock: bool = False,
 ) -> Env:
     from gateway.research.containment import runtime_pins_from_record
 
-    draft = golden_draft(tmp_path)
+    draft = golden_draft(tmp_path, stock=stock)
     store, source, hypothesis = draft.store, draft.source, draft.hypothesis
     hypothesis_id = hypothesis.hypothesis_id
     if probe_wall is None:
@@ -818,6 +821,11 @@ def test_preflight_requires_an_existing_store(env: Env, tmp_path: Path) -> None:
 
 def _snapshot(env: Env) -> dict[str, object]:
     store_root = env.store.root
+    # Fold any WAL pages into the database file first: a connection kept alive by a reference
+    # cycle checkpoints when the cyclic GC finally closes it, which can land between two
+    # snapshots and change the raw file bytes without any store write.
+    with contextlib.closing(sqlite3.connect(store_root / "state.sqlite3")) as conn:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     return {
         "db": hashlib.sha256((store_root / "state.sqlite3").read_bytes()).hexdigest(),
         "entries": sorted(
@@ -991,3 +999,30 @@ def test_dry_build_cleans_its_scratch_directory_on_failure(
     with pytest.raises(review_evidence.BundleError, match="malformed"):
         dry_build_review_bundle(env.store, env.attempt_id, candidate)
     assert created and not any(path.exists() for path in created)
+
+
+def test_stock_hypothesis_builds_and_passes_the_launch_check_with_its_bound_inputs(
+    tmp_path: Path,
+) -> None:
+    env = make_env(tmp_path, stock=True)
+    bindings = env.store.input_bindings(env.draft.hypothesis.hypothesis_id)
+    assert set(bindings) == {"earnings", "membership"}
+
+    output = build(env)
+
+    assert "launch" in output and "FAIL" not in output
+    submit_cli(env)
+
+
+def test_changed_bound_earnings_fails_the_submission_launch_check(tmp_path: Path) -> None:
+    env = make_env(tmp_path, stock=True)
+    build(env)
+    earnings = Path(env.store.input_bindings(env.draft.hypothesis.hypothesis_id)["earnings"].path)
+    earnings.chmod(0o644)
+    earnings.write_text("{}", encoding="utf-8")
+
+    code, output = preflight_cli(env)
+
+    assert code != 0
+    assert statuses(output)["launch"] == "FAIL"
+    assert "earnings digest does not match frozen artifact" in output

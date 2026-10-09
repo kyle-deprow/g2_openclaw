@@ -34,6 +34,10 @@ def _semantic_sha256(spec_path: str) -> str:
 MAX_SESSIONS = 60
 BORROW_COST_MISSING_REASON = "long_only is false but costs.borrow_bps_annual is not set above zero"
 NO_SHORTABLE_REASON = "long_only is false but no instrument is shortable"
+COMMON_STOCK_REFUSAL = (
+    "trusted universe cannot contain common stock until an earnings calendar source exists"
+)
+DAILY_RECEIPT_CONTRACT = "research-price-panel-daily-v1"
 
 
 def _spec_refusal(spec_path: str) -> str | None:
@@ -67,8 +71,34 @@ def _short_refusal(spec: dict[str, Any], positions: list[dict[str, Any]]) -> str
     return None
 
 
+def _has_common_stock(spec_path: str) -> bool:
+    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    return any(
+        item.get("instrument_class") == "common_stock" for item in spec.get("instruments", [])
+    )
+
+
+def _cost_bps(spec: dict[str, Any]) -> int:
+    """The golden specs carry ``cost_bps``; stock specs use the real ``costs`` block."""
+    if "cost_bps" in spec:
+        return int(spec["cost_bps"])
+    return int(spec["costs"]["half_spread_bps"])
+
+
+def _optional_digests(args: argparse.Namespace) -> dict[str, str]:
+    """Mirror the real validate-inputs / evaluator: report the digest of each bound input."""
+    digests: dict[str, str] = {}
+    if args.earnings_snapshot:
+        digests["earnings_sha256"] = _sha256(args.earnings_snapshot)
+    if args.universe_membership:
+        digests["membership_sha256"] = _sha256(args.universe_membership)
+    return digests
+
+
 def _validate_inputs(args: argparse.Namespace) -> int:
     refusal = _spec_refusal(args.spec)
+    if refusal is None and _has_common_stock(args.spec) and not args.earnings_snapshot:
+        refusal = COMMON_STOCK_REFUSAL
     if refusal is not None:
         print(json.dumps({"verdict": "FAIL", "reasons": [refusal]}, sort_keys=True))
         return 1
@@ -83,6 +113,7 @@ def _validate_inputs(args: argparse.Namespace) -> int:
                 "receipt_sha256": _sha256(args.receipt),
                 "universe_file_sha256": _sha256(args.universe),
                 "dividends_sha256": _sha256(args.dividends),
+                **_optional_digests(args),
             },
             sort_keys=True,
         )
@@ -110,7 +141,15 @@ def _evaluate(args: argparse.Namespace) -> int:
         print(f"output directory already exists: {out}", file=sys.stderr)
         return 1
     out.mkdir(parents=True)
-    cost_bps = int(spec["cost_bps"])
+    stock = _has_common_stock(args.spec)
+    if stock and not args.earnings_snapshot:
+        print(f"golden evaluator: {COMMON_STOCK_REFUSAL}", file=sys.stderr)
+        return 1
+    daily = args.receipt is not None and (
+        json.loads(Path(args.receipt).read_text(encoding="utf-8")).get("contract")
+        == DAILY_RECEIPT_CONTRACT
+    )
+    cost_bps = _cost_bps(spec)
     # The strategy fixture writes "positions"; the compute probe's empty targets file uses
     # the real evaluator's {"targets": []} shape.
     sessions = len(targets.get("positions", targets.get("targets", [])))
@@ -124,19 +163,23 @@ def _evaluate(args: argparse.Namespace) -> int:
     # weights (not from the spec alone): a long-only target set accrues none.
     short_notional = sum(-item["weight"] for item in positions if item["weight"] < 0)
     net_exposure = round(sum(item["weight"] for item in positions) / max(len(positions), 1), 12)
-    result = {
+    result: dict[str, Any] = {
         "evaluator_version": "research-evaluator-v3",
         "spec_sha256": _semantic_sha256(args.spec),
         "dividends_sha256": _sha256(args.dividends),
         "compliant": True,
         "zero_trade": False,
         "metrics_available": True,
-        "acceptance_class": "accepted",
-        "earnings_provenance": "unavailable",
+        # Stock results are exploratory snapshot replay, never provider-backed acceptance.
+        "acceptance_class": "exploratory_snapshot" if stock else "accepted",
+        "earnings_provenance": "snapshot" if args.earnings_snapshot else "unavailable",
         "dividend_payable_total": 0.0,
         "sessions": sessions,
         "mean_net_return": round(0.001 - cost_bps / 10000, 6),
+        **_optional_digests(args),
     }
+    if daily:
+        result["delisting_policy"] = {"long_haircut": 0.3, "max_stale_sessions": 5}
     (out / "result.json").write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
     # The sandbox interpreter has no parquet library, so these are marker-framed
     # placeholders; the worker and host only bind their names, sizes and digests.
@@ -156,7 +199,17 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("group")
     parser.add_argument("command")
-    for option in ("panel", "receipt", "spec", "dividends", "universe", "targets", "out"):
+    for option in (
+        "panel",
+        "receipt",
+        "spec",
+        "dividends",
+        "universe",
+        "targets",
+        "out",
+        "earnings-snapshot",
+        "universe-membership",
+    ):
         parser.add_argument(f"--{option}")
     parser.add_argument("--require-source-root")
     args = parser.parse_args(argv)
