@@ -247,12 +247,13 @@ evaluating them needs an explicit operator decision. Each new hypothesis states
 why it should beat the same-date matched-market and unconditional-dip controls,
 which beat H0008's signal, and must be powered (v2 `power` block).
 
-Active campaign (2026-10-05): calendar-flows-20261005 in root
-`/home/dev/.openclaw/research-v3`. Its charter,
-`campaigns/calendar-flows-20261005/CHARTER.md` in your workspace, fixes the
-family, inputs, controls, power rules, autonomy and stop condition. Read it
-before authoring any hypothesis; it overrides the closed reversal campaign's
-notes.
+Active campaign (2026-10-09): post-announcement-stocks-20261008 in root
+`/home/dev/.openclaw/research-v4`. Its charter,
+`campaigns/post-announcement-stocks-20261008/CHARTER.md` in your workspace,
+fixes the family, inputs (daily panel, membership, EDGAR earnings snapshot),
+controls, power rules, hedging, autonomy and stop condition. Read it before
+authoring any hypothesis; it overrides the closed reversal and calendar
+campaigns' notes.
 
 Use quantipy-data-contract readiness receipts for universe, price, corporate
 action, timing, cache, unsupported-data, and prompt-hygiene rules. Do not query

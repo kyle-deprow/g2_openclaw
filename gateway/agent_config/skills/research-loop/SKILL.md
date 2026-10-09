@@ -210,8 +210,9 @@ instruments × evaluation sessions ÷ `forward_label_sessions`, and a
 training→evaluation gap shorter than `forward_label_sessions` panel sessions.
 The sector-ETF residual reversal family (H0001–H0008) is
 closed, and sessions after 2026-07-31 are a reserved holdout. The active
-campaign is calendar-flows-20261005 (root `research-v3`); its workspace
-`campaigns/calendar-flows-20261005/CHARTER.md` governs authoring. Before
+campaign is post-announcement-stocks-20261008 (root `research-v4`); its
+workspace `campaigns/post-announcement-stocks-20261008/CHARTER.md` governs
+authoring. Before
 `implementation-submit`, `submission-build` derives the record, run plan and
 provenance index and `submission-preflight` must PASS; never hand-compute
 digests or targets argv. `run-reverify` and `operator-note` are operator-only.

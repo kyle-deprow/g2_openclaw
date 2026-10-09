@@ -148,11 +148,11 @@ or proof that a current-price ETF feed is installed.
   `run_evidence_mismatch`) and `operator-note` (counted in
   `operatorInterventions`) are operator mutations.
 
-- **Active campaign (2026-10-05).** calendar-flows-20261005 runs in root
-  `/home/dev/.openclaw/research-v3`, on 15 ETFs from 2021-11 to 2026-07 with
-  the quantipy 7a2ce40 evaluator. Its charter is Astra's workspace file
-  `campaigns/calendar-flows-20261005/CHARTER.md` (a read-only original sits in
-  the campaign input root).
+- **Active campaign (2026-10-09).** post-announcement-stocks-20261008 runs in
+  root `/home/dev/.openclaw/research-v4` on a point-in-time top-1500 US stock
+  universe (daily bars 2017–2026-07, EDGAR rule-D earnings snapshot, SPY/IWM/QQQ
+  hedges) with the quantipy evaluator at 8e581c3+. Its charter is Astra's
+  workspace file `campaigns/post-announcement-stocks-20261008/CHARTER.md`.
 
 ## Frozen fields and proof boundary
 
