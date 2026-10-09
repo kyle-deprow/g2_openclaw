@@ -43,7 +43,10 @@ the implementation callback, which submits and stops before the next wake.
 
 The initial scientific capability is price-panel-only and ETF-scoped. Refuse
 stock work without trusted point-in-time earnings coverage and fail closed on
-unknown earnings status. A holding horizon above five sessions is refused.
+unknown earnings status. A holding horizon above sixty sessions is refused;
+hedged (long-short) books are allowed only when the frozen evaluator spec
+declares `long_only: false`, names shortable instruments and a borrow cost, and
+gross exposure stays ≤ 1.0 (no leverage).
 Use trusted panel sessions, immutable receipts, the exposure ledger, and
 evaluator bounds. Smoke or synthetic data never establishes installed
 readiness or an alpha claim.

@@ -1,0 +1,69 @@
+{
+  "costs": {
+    "commission_bps": 3.0,
+    "half_spread_bps": 3.0,
+    "slippage_bps": 9.0
+  },
+  "end_session": "2026-07-31",
+  "execution": {
+    "decision_at": "regular_close",
+    "fill_at": "next_regular_open"
+  },
+  "holding": {
+    "exit_at": "session_close",
+    "max_sessions": 5
+  },
+  "instruments": [
+    {
+      "instrument_class": "etf",
+      "ticker": "SPY"
+    },
+    {
+      "instrument_class": "etf",
+      "ticker": "XLB"
+    },
+    {
+      "instrument_class": "etf",
+      "ticker": "XLC"
+    },
+    {
+      "instrument_class": "etf",
+      "ticker": "XLE"
+    },
+    {
+      "instrument_class": "etf",
+      "ticker": "XLF"
+    },
+    {
+      "instrument_class": "etf",
+      "ticker": "XLI"
+    },
+    {
+      "instrument_class": "etf",
+      "ticker": "XLK"
+    },
+    {
+      "instrument_class": "etf",
+      "ticker": "XLP"
+    },
+    {
+      "instrument_class": "etf",
+      "ticker": "XLRE"
+    },
+    {
+      "instrument_class": "etf",
+      "ticker": "XLU"
+    },
+    {
+      "instrument_class": "etf",
+      "ticker": "XLV"
+    },
+    {
+      "instrument_class": "etf",
+      "ticker": "XLY"
+    }
+  ],
+  "long_only": true,
+  "max_gross_exposure": 1.0,
+  "start_session": "2021-10-01"
+}

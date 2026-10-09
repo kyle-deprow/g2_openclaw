@@ -21,7 +21,12 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, TextIO, cast
 
-from .admission import AdmissionDecision, CampaignPolicy
+from .admission import (
+    AdmissionDecision,
+    CampaignPolicy,
+    evaluator_spec_bound_error,
+    panel_design_error,
+)
 from .codec import to_json
 from .containment import ContainmentError, runtime_pins
 from .contracts import (
@@ -63,6 +68,7 @@ from .machine import (
 from .machine import (
     open_attempt as machine_open_attempt,
 )
+from .receipt_sessions import panel_sessions_from_receipt_bytes
 from .refusals import REFUSED_KIND, read_create_refusals
 
 
@@ -230,6 +236,27 @@ def _require_powered_design(spec_json: str) -> None:
             "spec is not in canonical form; re-serialize it so every number keeps the type the "
             "contract emits (for example compute.max_wall_seconds as 120.0, not 120) and retry"
         )
+
+
+def _require_panel_supports_design(
+    document: HypothesisDocument, receipt: Path, primary_spec: Path
+) -> None:
+    """Refuse at create what admission would refuse forever: purge gap and event capacity.
+
+    Uses the receipt's trusted panel sessions and the primary spec's instrument count. An
+    unreadable receipt or spec is left to admission, which stays the backstop.
+    """
+    try:
+        sessions = panel_sessions_from_receipt_bytes(receipt.read_bytes())
+        instruments = json.loads(primary_spec.read_text(encoding="utf-8"))["instruments"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    if not isinstance(instruments, list):
+        return
+    count = len(instruments)
+    error = panel_design_error(document, sessions, count)
+    if error is not None:
+        raise ValueError(f"{error[0].value}: {error[1]}")
 
 
 class ResearchStore:
@@ -852,6 +879,8 @@ class ResearchStore:
         raw = json.loads(spec_file.read_text(encoding="utf-8"))
         spec_json = to_json(raw)
         _require_powered_design(spec_json)
+        document = HypothesisDocument.from_json(spec_json)
+        forward_label_sessions = document.forward_label_sessions
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
@@ -876,13 +905,23 @@ class ResearchStore:
             )
             if sha256_file(eval_spec) != parsed_primary.sha256:
                 raise ValueError("primary evaluation spec does not match immutable set")
+            _require_panel_supports_design(document, receipt, eval_spec)
+            # Verify every spec against the hypothesis before copying any of them.
+            contents: dict[str, bytes] = {}
+            for entry in parsed_set.specs:
+                content = Path(entry.path).read_bytes()
+                if hashlib.sha256(content).hexdigest() != entry.sha256:
+                    raise ValueError(f"evaluation spec digest mismatch: {entry.spec_id}")
+                bound_error = evaluator_spec_bound_error(
+                    forward_label_sessions, content.decode("utf-8", errors="replace")
+                )
+                if bound_error is not None:
+                    raise ValueError(f"evaluation spec {entry.spec_id}: {bound_error}")
+                contents[entry.spec_id] = content
             owned_dir = self.root / "hypotheses" / hid / "evaluation-specs"
             owned_entries: list[EvaluationSpecEntry] = []
             for entry in parsed_set.specs:
-                source = Path(entry.path)
-                content = source.read_bytes()
-                if hashlib.sha256(content).hexdigest() != entry.sha256:
-                    raise ValueError(f"evaluation spec digest mismatch: {entry.spec_id}")
+                content = contents[entry.spec_id]
                 owned_path = owned_dir / f"{entry.spec_id}.json"
                 self._projection_bytes(owned_path, content)
                 owned_path.chmod(0o444)

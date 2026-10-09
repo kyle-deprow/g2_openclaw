@@ -69,7 +69,9 @@ contract behavior.
 
 The scientific boundary is price-panel-only and ETF-scoped. Refuse stock work
 without trusted point-in-time earnings coverage; unknown earnings and horizons
-above five sessions fail closed. Require trusted panel sessions, immutable
+above sixty sessions fail closed. Hedged (long-short) books need a frozen spec
+with `long_only: false`, shortable instruments, a borrow cost, and gross
+exposure ≤ 1.0 (no leverage). Require trusted panel sessions, immutable
 receipts, the exposure ledger, and evaluator bounds. Smoke or synthetic data
 proves contracts only.
 

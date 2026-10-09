@@ -203,6 +203,7 @@ def test_document_keys_are_closed(document_payload: dict[str, object], mutation:
         (("variants",), ["same", "same"]),
         (("purpose",), "FINAL"),
         (("forward_label_sessions",), -1),
+        (("forward_label_sessions",), 61),
         (("minimum_evidence", "sessions"), 0),
         (("minimum_evidence", "trades"), -1),
         (("null_tests",), []),
@@ -221,6 +222,16 @@ def test_types_and_bounds_are_rejected(
 
     with pytest.raises(ValueError):
         HypothesisDocument.from_json(_json(changed))
+
+
+@pytest.mark.parametrize("sessions", [0, 1, 20, 60])
+def test_forward_label_horizon_accepts_zero_through_sixty(
+    document_payload: dict[str, object], sessions: int
+) -> None:
+    changed = copy.deepcopy(document_payload)
+    changed["forward_label_sessions"] = sessions
+
+    assert HypothesisDocument.from_json(_json(changed)).forward_label_sessions == sessions
 
 
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])

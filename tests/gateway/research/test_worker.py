@@ -181,10 +181,10 @@ def test_worker_timeout_writes_terminal(tmp_path: Path, monkeypatch: pytest.Monk
     assert terminal["status"] == "timed_out"
 
 
-def test_worker_rewrites_target_output_for_generated_stage_bind(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The real rewrite and bwrap argv must agree on the target stage root."""
+def _run_fake_evaluator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, evaluator_version: str
+) -> tuple[dict[str, object], list[tuple[str, ...]], Path]:
+    """Run the worker with a fake stage runner whose evaluator emits ``evaluator_version``."""
     job, _evaluator, _eval_spec, _digest = _job(tmp_path)
     run_dir = Path(str(job["run_dir"]))
     artifact_digests = job["artifact_digests"]
@@ -218,7 +218,7 @@ def test_worker_rewrites_target_output_for_generated_stage_bind(
             (output / "result.json").write_text(
                 json.dumps(
                     {
-                        "evaluator_version": "research-evaluator-v2",
+                        "evaluator_version": evaluator_version,
                         "spec_sha256": "a" * 64,
                         "dividends_sha256": artifact_digests["dividends"],
                     }
@@ -234,7 +234,34 @@ def test_worker_rewrites_target_output_for_generated_stage_bind(
         return 0, False
 
     monkeypatch.setattr(worker, "_stage", fake_stage)
-    outcome = run(job)
+    return run(job), target_commands, run_dir
+
+
+@pytest.mark.parametrize("version", ["research-evaluator-v2", "research-evaluator-v3"])
+def test_worker_accepts_v2_and_v3_evaluator_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    outcome, _commands, _run_dir = _run_fake_evaluator(tmp_path, monkeypatch, version)
+
+    assert outcome["status"] == "succeeded"
+
+
+@pytest.mark.parametrize("version", ["research-evaluator-v1", "research-evaluator-v4", ""])
+def test_worker_refuses_other_evaluator_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, version: str
+) -> None:
+    outcome, _commands, _run_dir = _run_fake_evaluator(tmp_path, monkeypatch, version)
+
+    assert outcome["status"] != "succeeded"
+
+
+def test_worker_rewrites_target_output_for_generated_stage_bind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real rewrite and bwrap argv must agree on the target stage root."""
+    outcome, target_commands, run_dir = _run_fake_evaluator(
+        tmp_path, monkeypatch, "research-evaluator-v2"
+    )
 
     assert outcome["status"] == "succeeded"
     assert len(target_commands) == 1

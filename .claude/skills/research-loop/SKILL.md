@@ -93,16 +93,20 @@ or proof that a current-price ETF feed is installed.
   in dated-evidence-supported liquid, unlevered equity-sector ETFs. ETF
   eligibility does not remove earnings exposure; cache availability and a
   retrospectively successful ticker list are not universe evidence.
-- Decide at the close, enter at the next regular open, hold long or cash, and
-  exit by session five; do not credit the close-to-next-open rebound. Fit all
-  betas and scalers on earlier data only. A longer horizon is refused.
+- The closed H0001–H0008 family decided at the close, entered at the next
+  regular open, held long or cash, and exited by session five; do not credit the
+  close-to-next-open rebound. Fit all betas and scalers on earlier data only.
+- A holding horizon above sixty sessions is refused; hedged (long-short) books
+  are allowed only when the frozen evaluator spec declares `long_only: false`,
+  names shortable instruments and a borrow cost, and gross exposure stays
+  ≤ 1.0 (no leverage).
 - Use one simple baseline and no more than two predeclared volume/regime
   variants. Indicators are features, not independent confirmations.
 - Compare unconditional dip-buying, cash, and exposure-matched passive
   baselines; report net costs, 2x/3x costs, folds, drawdown, concentration,
-  counts, block-aware uncertainty/nulls, a five-session overlap purge, and the
-  exposure ledger. Development exposure is not a fresh final holdout; unknown
-  history blocks FINAL_HOLDOUT.
+  counts, block-aware uncertainty/nulls, an overlap purge of at least the
+  holding horizon, and the exposure ledger. Development exposure is not a fresh
+  final holdout; unknown history blocks FINAL_HOLDOUT.
 - News, Reddit, and regularized ML are later incremental hypotheses requiring
   supported point-in-time inputs. Historical final engagement or edited-post
   fields are leakage. Missing news is not no-news evidence; any future
@@ -124,7 +128,10 @@ or proof that a current-price ETF feed is installed.
 - **Power.** New hypotheses use contract `research-hypothesis-v2` with a
   `power` block. The SD basis must come from outside the scored test period;
   `research power-check` computes the MDE. Create refuses non-canonical specs
-  and designs whose MDE exceeds the declared plausible effect.
+  and designs whose MDE exceeds the declared plausible effect. Create and
+  admission also refuse `power.expected_events` above instruments × evaluation
+  sessions ÷ `forward_label_sessions`, and a training→evaluation gap shorter
+  than `forward_label_sessions` panel sessions.
 - **Compute.** Run `compute-probe` after create (it can take tens of minutes to
   hours), then `hypothesis-set-compute` from its requirements, then freeze. A
   DRAFT that cannot be frozen is abandoned with `hypothesis-decide ... ABANDONED`.
@@ -160,7 +167,10 @@ The exact document fields are `contract`, `mechanism`, `prediction`, `target`,
 
 Exposure counting uses a digest-matched immutable ledger and the classifications
 NONE, KNOWN_EXPOSED, and UNKNOWN_HISTORY. Unknown history blocks FINAL_HOLDOUT;
-development may record it. A holding horizon above five sessions is refused.
+development may record it. A holding horizon above sixty sessions is refused;
+hedged (long-short) books are allowed only when the frozen evaluator spec
+declares `long_only: false`, names shortable instruments and a borrow cost, and
+gross exposure stays ≤ 1.0 (no leverage).
 
 Reserve the immutable review bundle before the one native Sol review; reconcile
 the official child run and collect a strict verdict bound to the child task,

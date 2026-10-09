@@ -34,6 +34,8 @@ _PURPOSES = {"DEVELOPMENT_VALIDATION", "FINAL_HOLDOUT"}
 _MAX_TEXT_LENGTH = 16_384
 _MAX_COLLECTION_LENGTH = 1_024
 _MAX_INTEGER = 1_000_000_000
+# The one definition of the evaluator holding / forward-label limit (contract v3).
+MAX_HOLDING_SESSIONS = 60
 
 _FEATURE_KEYS = {"name", "source", "as_of_rule", "lookback_sessions"}
 _DATE_RANGE_KEYS = {"start", "end"}
@@ -443,7 +445,12 @@ def _validate_document(document: HypothesisDocument) -> None:
     _integer(document.search_budget_evaluations, "search_budget_evaluations", minimum=1)
     if document.search_budget_evaluations < len(document.variants):
         raise ValueError("search_budget_evaluations must cover all variants")
-    _integer(document.forward_label_sessions, "forward_label_sessions", minimum=0)
+    _integer(
+        document.forward_label_sessions,
+        "forward_label_sessions",
+        minimum=0,
+        maximum=MAX_HOLDING_SESSIONS,
+    )
     if not isinstance(document.analysis, DateRange) or not isinstance(
         document.evaluation, DateRange
     ):

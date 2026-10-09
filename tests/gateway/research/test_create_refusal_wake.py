@@ -25,7 +25,12 @@ from gateway.research.wake import _FREEZE_SEQUENCE, compose_wake
 from typer.testing import CliRunner
 
 from tests.gateway.research.conftest import freeze_with_probe
-from tests.gateway.research.test_admission import _payload, _payload_v1, _power_block
+from tests.gateway.research.test_admission import (
+    _payload,
+    _payload_v1,
+    _power_block,
+    _set_events,
+)
 from tests.gateway.research.test_status_control import _configured_store
 
 runner = CliRunner()
@@ -561,3 +566,210 @@ def test_cli_pause_owner_flag_records_astra_and_default_records_operator(
     )
     assert operator.exit_code == 0, operator.output
     assert store.events()[-1].actor == "operator"
+
+
+def _bounded_create(
+    campaign: Campaign,
+    tmp_path: Path,
+    evaluator_specs: list[dict[str, object]],
+    forward_label_sessions: int,
+    *,
+    payload_changes: dict[str, object] | None = None,
+    receipt: Path | None = None,
+) -> str | None:
+    """Create H0002 against a spec set; return the refusal text, or None on success."""
+    store = _decided(campaign)
+    hypothesis = campaign[2]
+    payload = _payload()
+    payload["forward_label_sessions"] = forward_label_sessions
+    payload.update(payload_changes or {})
+    spec_file = _spec_file(tmp_path, payload)
+    paths = []
+    for index, document in enumerate(evaluator_specs):
+        path = tmp_path / f"bounded-eval-{index}.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        paths.append(path)
+    spec_set = tmp_path / "bounded-set.json"
+    spec_set.write_text(
+        EvaluationSpecSet(
+            "research-evaluation-spec-set-v1",
+            "H0002",
+            "c000",
+            tuple(
+                EvaluationSpecEntry(
+                    f"c{index:03d}", str(path), hashlib.sha256(path.read_bytes()).hexdigest()
+                )
+                for index, path in enumerate(paths)
+            ),
+            "2026-01-01T00:00:00Z",
+        ).to_json(),
+        encoding="utf-8",
+    )
+    try:
+        store.create_hypothesis(
+            "bounded",
+            spec_file,
+            Path(hypothesis.panel_path),
+            receipt or Path(hypothesis.receipt_path),
+            paths[0],
+            "b" * 40,
+            dividends=Path(hypothesis.dividends_path),
+            evaluation_spec_set=spec_set,
+        )
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def _evaluator_spec(
+    max_sessions: int,
+    *,
+    long_only: bool = True,
+    shortable: bool = False,
+    borrow_bps_annual: float | None = None,
+) -> dict[str, object]:
+    document: dict[str, object] = {
+        "instruments": [{"ticker": "SPY", "instrument_class": "etf", "shortable": shortable}],
+        "start_session": "2025-09-15",
+        "end_session": "2025-09-26",
+        "holding": {"max_sessions": max_sessions},
+        "long_only": long_only,
+    }
+    if borrow_bps_annual is not None:
+        document["costs"] = {"borrow_bps_annual": borrow_bps_annual}
+    return document
+
+
+def test_create_refuses_forward_label_beyond_the_spec_max_sessions(
+    campaign: Campaign, tmp_path: Path
+) -> None:
+    message = _bounded_create(campaign, tmp_path, [_evaluator_spec(5)], 6)
+
+    assert message == (
+        "evaluation spec c000: forward_label_sessions 6 exceeds the evaluator spec "
+        "holding.max_sessions 5"
+    )
+    assert [item["reason"] for item in _refusal_events(campaign[0])] == [message]
+
+
+def test_create_refuses_hedged_spec_without_a_shortable_instrument(
+    campaign: Campaign, tmp_path: Path
+) -> None:
+    spec = _evaluator_spec(20, long_only=False, borrow_bps_annual=50.0)
+
+    message = _bounded_create(campaign, tmp_path, [spec], 20)
+
+    assert message == "evaluation spec c000: long_only is false but no instrument is shortable"
+
+
+@pytest.mark.parametrize("borrow", [None, 0.0, -1.0])
+def test_create_refuses_hedged_spec_without_a_borrow_cost(
+    campaign: Campaign, tmp_path: Path, borrow: float | None
+) -> None:
+    spec = _evaluator_spec(20, long_only=False, shortable=True, borrow_bps_annual=borrow)
+
+    message = _bounded_create(campaign, tmp_path, [spec], 20)
+
+    assert message == (
+        "evaluation spec c000: long_only is false but costs.borrow_bps_annual is not set above zero"
+    )
+
+
+def test_create_checks_every_spec_before_copying_any(campaign: Campaign, tmp_path: Path) -> None:
+    good = _evaluator_spec(20, long_only=False, shortable=True, borrow_bps_annual=50.0)
+    no_borrow = _evaluator_spec(20, long_only=False, shortable=True)
+
+    message = _bounded_create(campaign, tmp_path, [good, no_borrow], 20)
+
+    assert message is not None and message.startswith("evaluation spec c001: ")
+    assert not (campaign[0].root / "hypotheses" / "H0002").exists()
+
+
+@pytest.mark.parametrize("sessions", [5, 20, 60])
+def test_create_accepts_matching_horizon_and_shortable_hedged_spec(
+    campaign: Campaign, tmp_path: Path, sessions: int
+) -> None:
+    spec = _evaluator_spec(sessions, long_only=False, shortable=True, borrow_bps_annual=50.0)
+
+    message = _bounded_create(campaign, tmp_path, [spec], sessions)
+
+    assert message is None
+    assert [h.hypothesis_id for h in campaign[0].hypotheses()] == ["H0001", "H0002"]
+
+
+RECEIPT_FIXTURE = Path(__file__).parent / "fixtures" / "receipt.json"
+
+
+def _panel_design(
+    forward: int, events: int, *, training: bool = True, sd_bps: float = 10.0
+) -> dict[str, object]:
+    """A design inside the 10-session receipt panel (2025-09-15..26) with a chosen power block.
+
+    Training ends 2025-09-16 and evaluation covers 2025-09-22..26 (5 sessions), leaving the
+    3 sessions 09-17, 09-18 and 09-19 between them.
+    """
+    payload = _payload()
+    _set_events(payload, events, sd_bps)
+    return {
+        "analysis": {"start": "2025-09-15", "end": "2025-09-26"},
+        "evaluation": {"start": "2025-09-22", "end": "2025-09-26"},
+        "training": {"start": "2025-09-15", "end": "2025-09-16"} if training else None,
+        "power": payload["power"],
+        "forward_label_sessions": forward,
+    }
+
+
+def _create_on_panel(campaign: Campaign, tmp_path: Path, changes: dict[str, object]) -> str | None:
+    forward = changes["forward_label_sessions"]
+    assert isinstance(forward, int)
+    return _bounded_create(
+        campaign,
+        tmp_path,
+        [_evaluator_spec(60)],
+        forward,
+        payload_changes=changes,
+        receipt=RECEIPT_FIXTURE,
+    )
+
+
+@pytest.mark.parametrize(("forward", "refused"), [(3, False), (4, True)])
+def test_create_refuses_a_purge_gap_shorter_than_the_forward_label(
+    campaign: Campaign, tmp_path: Path, forward: int, refused: bool
+) -> None:
+    message = _create_on_panel(campaign, tmp_path, _panel_design(forward, 1))
+
+    if refused:
+        assert message == (
+            "PURGE_GAP_INSUFFICIENT: only 3 panel sessions separate training from evaluation; "
+            "the 4-session forward label needs at least that many"
+        )
+        assert [item["reason"] for item in _refusal_events(campaign[0])] == [message]
+        assert not (campaign[0].root / "hypotheses" / "H0002").exists()
+    else:
+        assert message is None
+
+
+@pytest.mark.parametrize(("events", "refused"), [(5, False), (6, True)])
+def test_create_refuses_expected_events_above_the_panel_capacity(
+    campaign: Campaign, tmp_path: Path, events: int, refused: bool
+) -> None:
+    changes = _panel_design(1, events, training=False)
+
+    message = _create_on_panel(campaign, tmp_path, changes)
+
+    if refused:
+        assert message == (
+            "POWER_EVENTS_EXCEED_CAPACITY: power.expected_events 6 exceeds the non-overlapping "
+            "capacity of 5 (instruments x evaluation sessions / forward_label_sessions)"
+        )
+        assert [item["reason"] for item in _refusal_events(campaign[0])] == [message]
+    else:
+        assert message is None
+
+
+def test_create_capacity_divides_by_the_forward_label(campaign: Campaign, tmp_path: Path) -> None:
+    changes = _panel_design(2, 3, training=False)  # capacity 5 / 2 = 2.5 < 3
+
+    message = _create_on_panel(campaign, tmp_path, changes)
+
+    assert message is not None and message.startswith("POWER_EVENTS_EXCEED_CAPACITY: ")

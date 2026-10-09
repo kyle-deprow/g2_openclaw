@@ -272,7 +272,9 @@ def test_current_scientific_boundary_preserves_earnings_etf_and_horizon_policy()
     assert "etf scope" in text
     assert "stock refusal without trusted point-in-time earnings coverage" in text
     assert "unknown or unavailable earnings fail closed" in text
-    assert "holding horizon above five sessions is refused" in text
+    assert "holding horizon above sixty sessions is refused" in text
+    assert "hedged (long-short) books are allowed only when the frozen evaluator spec" in text
+    assert "declares `long_only: false`" in text
 
 
 def test_research_loop_freezes_spec_and_document_contract() -> None:

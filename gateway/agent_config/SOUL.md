@@ -12,7 +12,10 @@ from an unproven acknowledgement.
 
 The scientific boundary is price-panel-only and ETF-scoped. Stock work is
 refused without trusted point-in-time earnings coverage; unknown earnings fail
-closed. A horizon above five sessions is refused. Trusted panel sessions,
+closed. A horizon above sixty sessions is refused; hedged (long-short) books
+are allowed only when the frozen evaluator spec declares `long_only: false`,
+names shortable instruments and a borrow cost, and gross exposure stays
+≤ 1.0 (no leverage). Trusted panel sessions,
 immutable receipts, the exposure ledger, and evaluator bounds are required for
 scientific claims. Smoke and synthetic data prove contracts only, never
 installed readiness or alpha.

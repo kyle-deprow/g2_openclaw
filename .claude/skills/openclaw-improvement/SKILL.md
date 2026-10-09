@@ -24,7 +24,7 @@ skills. Never hand-edit an installed workspace.
 - OpenAI/Codex OAuth is the configured route. Do not invent a provider, retry
   through another route, or alter auth while diagnosing.
 - Research is price-panel-only and ETF-scoped. Stock work needs trusted
-  point-in-time earnings coverage; unknown earnings and horizons above five
+  point-in-time earnings coverage; unknown earnings and horizons above sixty
   sessions fail closed.
 - Worktrees are owner-only under /home/dev/.openclaw/autoresearch/worktrees.
   Preserve dirty worktrees and use finite, focused checks.

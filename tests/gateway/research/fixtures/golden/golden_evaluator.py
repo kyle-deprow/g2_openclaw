@@ -30,7 +30,48 @@ def _semantic_sha256(spec_path: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# Sandbox code cannot import the gateway; tests assert these mirror the gateway constants.
+MAX_SESSIONS = 60
+BORROW_COST_MISSING_REASON = "long_only is false but costs.borrow_bps_annual is not set above zero"
+NO_SHORTABLE_REASON = "long_only is false but no instrument is shortable"
+
+
+def _spec_refusal(spec_path: str) -> str | None:
+    """Mirror the v3 evaluator's refusals for the hedge fields of a spec, when present."""
+    spec = json.loads(Path(spec_path).read_text(encoding="utf-8"))
+    max_sessions = spec.get("holding", {}).get("max_sessions", 5)
+    if type(max_sessions) is not int or not 1 <= max_sessions <= MAX_SESSIONS:
+        return f"holding.max_sessions must be an integer in 1..{MAX_SESSIONS}"
+    if spec.get("long_only", True) is False and not any(
+        item.get("shortable") is True for item in spec.get("instruments", [])
+    ):
+        return NO_SHORTABLE_REASON
+    borrow = spec.get("costs", {}).get("borrow_bps_annual", 0.0)
+    if isinstance(borrow, bool) or not isinstance(borrow, int | float) or borrow < 0:
+        return "costs.borrow_bps_annual must be non-negative"
+    if spec.get("long_only", True) is False and not borrow > 0:
+        return BORROW_COST_MISSING_REASON
+    return None
+
+
+def _short_refusal(spec: dict[str, Any], positions: list[dict[str, Any]]) -> str | None:
+    """SHORT_NOT_PERMITTED unless the spec is hedged and the shorted ticker is shortable."""
+    shortable = {
+        item.get("ticker") for item in spec.get("instruments", []) if item.get("shortable") is True
+    }
+    for position in positions:
+        if position["weight"] < 0 and (
+            spec.get("long_only", True) is not False or position["symbol"] not in shortable
+        ):
+            return f"SHORT_NOT_PERMITTED: {position['symbol']} target {position['weight']}"
+    return None
+
+
 def _validate_inputs(args: argparse.Namespace) -> int:
+    refusal = _spec_refusal(args.spec)
+    if refusal is not None:
+        print(json.dumps({"verdict": "FAIL", "reasons": [refusal]}, sort_keys=True))
+        return 1
     print(
         json.dumps(
             {
@@ -56,6 +97,10 @@ def _evaluate(args: argparse.Namespace) -> int:
         print(f"quantipy not imported from {source_root}", file=sys.stderr)
         return 4
     spec = json.loads(Path(args.spec).read_text(encoding="utf-8"))
+    refusal = _spec_refusal(args.spec)
+    if refusal is not None:
+        print(f"golden evaluator: {refusal}", file=sys.stderr)
+        return 1
     if spec.get("golden_fail"):
         print("golden evaluator: deliberate genuine failure", file=sys.stderr)
         return 1
@@ -69,8 +114,18 @@ def _evaluate(args: argparse.Namespace) -> int:
     # The strategy fixture writes "positions"; the compute probe's empty targets file uses
     # the real evaluator's {"targets": []} shape.
     sessions = len(targets.get("positions", targets.get("targets", [])))
+    positions = [item for item in targets.get("positions", []) if "weight" in item]
+    short_refusal = _short_refusal(spec, positions)
+    if short_refusal is not None:
+        print(f"golden evaluator: {short_refusal}", file=sys.stderr)
+        return 1
+    borrow_bps_annual = float(spec.get("costs", {}).get("borrow_bps_annual", 0.0))
+    # Borrow accrues per session on the short notional, so it comes from the targets' short
+    # weights (not from the spec alone): a long-only target set accrues none.
+    short_notional = sum(-item["weight"] for item in positions if item["weight"] < 0)
+    net_exposure = round(sum(item["weight"] for item in positions) / max(len(positions), 1), 12)
     result = {
-        "evaluator_version": "research-evaluator-v2",
+        "evaluator_version": "research-evaluator-v3",
         "spec_sha256": _semantic_sha256(args.spec),
         "dividends_sha256": _sha256(args.dividends),
         "compliant": True,
@@ -78,14 +133,21 @@ def _evaluate(args: argparse.Namespace) -> int:
         "metrics_available": True,
         "acceptance_class": "accepted",
         "earnings_provenance": "unavailable",
+        "dividend_payable_total": 0.0,
         "sessions": sessions,
         "mean_net_return": round(0.001 - cost_bps / 10000, 6),
     }
     (out / "result.json").write_text(json.dumps(result, sort_keys=True), encoding="utf-8")
     # The sandbox interpreter has no parquet library, so these are marker-framed
     # placeholders; the worker and host only bind their names, sizes and digests.
-    for name in ("trades.parquet", "daily.parquet"):
-        body = f"{name}:{cost_bps}:{sessions}".encode()
+    # The v3 daily table carries ``net_exposure`` and ``borrow_costs``.
+    borrow_costs = round(short_notional * borrow_bps_annual / 1e4 / 252, 12)
+    columns = {
+        "trades.parquet": "",
+        "daily.parquet": f":net_exposure={net_exposure}:borrow_costs={borrow_costs}",
+    }
+    for name, extra in columns.items():
+        body = f"{name}:{cost_bps}:{sessions}{extra}".encode()
         (out / name).write_bytes(b"PAR1" + body + b"PAR1")
     return 0
 

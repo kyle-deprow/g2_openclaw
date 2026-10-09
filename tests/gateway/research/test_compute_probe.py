@@ -1081,3 +1081,70 @@ def test_run_stage_reraises_containment_errors_before_the_deadline(
         )
 
     assert raised.value is error
+
+
+def _validation_output(tmp_path: Path, document: object) -> Path:
+    path = tmp_path / "validate-c000.out"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def test_failed_validation_reports_the_validator_reasons(tmp_path: Path) -> None:
+    reasons = ["long_only is false but no instrument is shortable", "universe: SPY not shortable"]
+    stdout = _validation_output(tmp_path, {"verdict": "FAIL", "reasons": reasons})
+
+    with pytest.raises(compute_probe_module.ComputeProbeError) as raised:
+        compute_probe_module._check_validation(stdout, "validate-c000", {})
+
+    message = str(raised.value)
+    assert "validate-c000 did not return verdict PASS" in message
+    assert "reasons: long_only is false but no instrument is shortable; universe: SPY" in message
+    assert str(stdout) in message
+
+
+def test_failed_validation_reasons_are_bounded(tmp_path: Path) -> None:
+    reasons = [f"reason-{index}" + "x" * 400 for index in range(8)]
+    stdout = _validation_output(tmp_path, {"verdict": "FAIL", "reasons": reasons})
+
+    with pytest.raises(compute_probe_module.ComputeProbeError) as raised:
+        compute_probe_module._check_validation(stdout, "validate-c000", {})
+
+    message = str(raised.value)
+    assert "reason-4" in message and "reason-5" not in message
+    assert "(+3 more)" in message
+    assert len(message) < 5 * 320 + 400
+
+
+@pytest.mark.parametrize("document", [{"verdict": "FAIL"}, {"verdict": "FAIL", "reasons": "x"}, []])
+def test_failed_validation_without_usable_reasons_keeps_the_plain_message(
+    tmp_path: Path, document: object
+) -> None:
+    stdout = _validation_output(tmp_path, document)
+
+    with pytest.raises(compute_probe_module.ComputeProbeError) as raised:
+        compute_probe_module._check_validation(stdout, "validate-c000", {})
+
+    assert "reasons" not in str(raised.value)
+
+
+def test_nonzero_validator_exit_still_surfaces_the_stdout_reasons(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "validate-c000.out").write_text(
+        json.dumps({"verdict": "FAIL", "reasons": ["borrow cost missing"]}), encoding="utf-8"
+    )
+    monkeypatch.setattr(compute_probe_module, "run_contained_stage", lambda *_args: (1, False))
+
+    with pytest.raises(compute_probe_module.ComputeProbeError) as raised:
+        compute_probe_module._run_stage(
+            object(),  # type: ignore[arg-type]
+            tmp_path,
+            "validate-c000",
+            "c000",
+            time.monotonic() + 60,
+            "hint",
+        )
+
+    assert "validate-c000 exited 1 (reasons: borrow cost missing)" in str(raised.value)

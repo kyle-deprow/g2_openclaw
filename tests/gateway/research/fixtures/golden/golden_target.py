@@ -20,6 +20,19 @@ def _work_is_writable() -> bool:
     return True
 
 
+def _positions(variant: str) -> list[dict[str, object]]:
+    """Hedged variants short SPY (a negative target); the others stay long-only."""
+    if variant.startswith("hedged"):
+        return [
+            {"date": "2024-01-02", "symbol": "SPY", "weight": -0.3},
+            {"date": "2024-01-03", "symbol": "SPY", "weight": -0.5},
+        ]
+    return [
+        {"date": "2024-01-02", "symbol": "SPY", "weight": 1.0},
+        {"date": "2024-01-03", "symbol": "SPY", "weight": 0.5},
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--panel", required=True)
@@ -36,10 +49,7 @@ def main() -> int:
         "panel_sha256": hashlib.sha256(panel).hexdigest(),
         "receipt_sha256": hashlib.sha256(receipt).hexdigest(),
         "work_writable": _work_is_writable(),
-        "positions": [
-            {"date": "2024-01-02", "symbol": "SPY", "weight": 1.0},
-            {"date": "2024-01-03", "symbol": "SPY", "weight": 0.5},
-        ],
+        "positions": _positions(args.variant),
     }
     Path(args.out).write_text(json.dumps(document, sort_keys=True), encoding="utf-8")
     return 0

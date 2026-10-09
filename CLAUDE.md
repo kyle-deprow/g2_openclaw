@@ -29,7 +29,10 @@ A hypothesis equals one iteration and each attempt is code → review → run.
 There are at most three attempts; Astra explicitly chooses FINISH, ABANDON, or
 PAUSE after exhaustion. The capability is price-panel-only and ETF-scoped;
 stock work requires trusted point-in-time earnings coverage, unknown earnings
-fail closed, and horizons above five sessions are refused.
+fail closed, and horizons above sixty sessions are refused. Hedged (long-short)
+books are allowed only when the frozen evaluator spec declares
+`long_only: false`, names shortable instruments and a borrow cost, and gross
+exposure stays ≤ 1.0 (no leverage).
 
 G2 is agent:main:g2. Research-owner traffic is
 agent:research-orchestrator:autoresearch:quantipy-v2, served by

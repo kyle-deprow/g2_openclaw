@@ -23,6 +23,7 @@ policy, the wake sender and owner-poll network edges, and the review verdict.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -36,6 +37,10 @@ import pytest
 from gateway.cli import app
 from gateway.research import cli as research_cli
 from gateway.research import jobs
+from gateway.research.admission import (
+    BORROW_COST_MISSING_REASON,
+    NO_SHORTABLE_INSTRUMENT_REASON,
+)
 from gateway.research.contracts import (
     AnalysisPlan,
     AttemptState,
@@ -48,15 +53,24 @@ from gateway.research.contracts import (
     RunPlan,
     RunScenario,
 )
+from gateway.research.hypothesis import MAX_HOLDING_SESSIONS
 from gateway.research.status import read_status
 from gateway.research.store import ResearchStore
 from typer.testing import CliRunner, Result
 
 from tests.gateway.research.conftest import provenance_evidence, review, verified_review
-from tests.gateway.research.test_admission import _admit, _document, _payload
+from tests.gateway.research.test_admission import (
+    _admit,
+    _bounds,
+    _document,
+    _payload,
+    _set_events,
+)
 from tests.gateway.research.test_readiness import configure_real_readiness
 
 FIXTURES = Path(__file__).parent / "fixtures" / "golden"
+HEDGED_SESSIONS = 20
+HEDGED_BORROW_BPS = 50.0
 SCENARIO_TIMEOUT_SECONDS = 30.0
 ANALYSIS_TIMEOUT_SECONDS = 30.0
 RUN_OVERHEAD_SECONDS = 300.0
@@ -102,8 +116,43 @@ class GoldenDraft:
     specs: tuple[Path, ...]
 
 
+def _hedged_payload() -> dict[str, object]:
+    """The golden hypothesis with a 20-session forward label (above the old five-session cap)."""
+    payload = _payload()
+    payload["forward_label_sessions"] = HEDGED_SESSIONS
+    # 262 evaluation sessions x 1 instrument / 20 = 13 non-overlapping events at most.
+    _set_events(payload, 10)
+    return payload
+
+
+def _borrow_bps(cost_bps: int) -> float:
+    """c000 (cost 1x) carries the base borrow; c001 (cost 3x) scales it with every cost."""
+    return HEDGED_BORROW_BPS * cost_bps
+
+
+def _spec_text(cost_bps: int, *, failing: bool, hedged: bool) -> str:
+    """Golden evaluator spec; ``hedged`` makes it a v3 long-short spec with a 20-session hold."""
+    document: dict[str, object] = {"cost_bps": cost_bps}
+    if failing:
+        document["golden_fail"] = True
+    if hedged:
+        document.update(
+            {
+                "instruments": [{"ticker": "SPY", "instrument_class": "etf", "shortable": True}],
+                "long_only": False,
+                "holding": {"max_sessions": HEDGED_SESSIONS},
+                "costs": {"borrow_bps_annual": _borrow_bps(cost_bps)},
+            }
+        )
+    return json.dumps(document, separators=(",", ":"))
+
+
 def golden_draft(
-    tmp_path: Path, *, failing_second_spec: bool = False, failing_first_spec: bool = False
+    tmp_path: Path,
+    *,
+    failing_second_spec: bool = False,
+    failing_first_spec: bool = False,
+    hedged: bool = False,
 ) -> GoldenDraft:
     """Configure real runtime pins and create (without freezing) the golden hypothesis."""
     inputs = tmp_path / "inputs"
@@ -131,15 +180,15 @@ def golden_draft(
     receipt = _write_readonly(inputs / "receipt.json", '{"contract":"golden-receipt"}')
     dividends = _write_readonly(inputs / "dividends.json", '{"contract":"trusted-dividends-v2"}')
     spec = inputs / "spec.json"
-    spec.write_text(json.dumps(_payload()), encoding="utf-8")
+    spec.write_text(json.dumps(_hedged_payload() if hedged else _payload()), encoding="utf-8")
     specs = (
         _write_readonly(
             inputs / "eval-c000.json",
-            '{"cost_bps":1,"golden_fail":true}' if failing_first_spec else '{"cost_bps":1}',
+            _spec_text(1, failing=failing_first_spec, hedged=hedged),
         ),
         _write_readonly(
             inputs / "eval-c001.json",
-            '{"cost_bps":3,"golden_fail":true}' if failing_second_spec else '{"cost_bps":3}',
+            _spec_text(3, failing=failing_second_spec, hedged=hedged),
         ),
     )
     spec_set = inputs / "evaluation-spec-set.json"
@@ -192,10 +241,14 @@ def freeze_golden(draft: GoldenDraft) -> None:
 
 
 def _build_golden(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, failing_second_spec: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    failing_second_spec: bool,
+    hedged: bool = False,
 ) -> Golden:
     """Configure, freeze, implement, review and admit a two-scenario attempt."""
-    draft = golden_draft(tmp_path, failing_second_spec=failing_second_spec)
+    draft = golden_draft(tmp_path, failing_second_spec=failing_second_spec, hedged=hedged)
     store, source, hypothesis, venv = draft.store, draft.source, draft.hypothesis, draft.venv
     panel, receipt = draft.panel, draft.receipt
     freeze_golden(draft)
@@ -216,6 +269,9 @@ def _build_golden(
     _git(source, "commit", "-qm", "golden implementation")
     commit = _git(source, "rev-parse", "HEAD")
 
+    # Hedged variants short SPY, so the evaluator only accepts them under a hedged spec.
+    baseline, wider = ("hedged", "hedged-wider") if hedged else ("baseline", "wider")
+
     def targets_argv(scenario_id: str, variant: str) -> tuple[str, ...]:
         return (
             str(venv / "bin" / "python"),
@@ -233,7 +289,7 @@ def _build_golden(
     record = ImplementationRecord(
         attempt.attempt_id,
         commit,
-        targets_argv("s000", "baseline"),
+        targets_argv("s000", baseline),
         "/tmp/evidence.json",
         "reported-coder",
         "high",
@@ -251,7 +307,7 @@ def _build_golden(
         "s000",
         (
             RunScenario("s000", record.targets_argv, "c000", entries["c000"].sha256),
-            RunScenario("s001", targets_argv("s001", "wider"), "c001", entries["c001"].sha256),
+            RunScenario("s001", targets_argv("s001", wider), "c001", entries["c001"].sha256),
         ),
         AnalysisPlan("golden_analysis", (), ("analysis/result.json",), 1 << 20),
         SCENARIO_TIMEOUT_SECONDS,
@@ -268,9 +324,20 @@ def _build_golden(
 
     # Synthetic typed admission and native readiness record, as in the dispatch tests.
     decision = _admit(
-        _document(_payload()),
+        _document(_hedged_payload() if hedged else _payload()),
+        bounds=(
+            _bounds(
+                max_holding=HEDGED_SESSIONS,
+                long_only=False,
+                shortable=True,
+                borrow_bps_annual=HEDGED_BORROW_BPS,
+            )
+            if hedged
+            else None
+        ),
         evaluation_spec_set_sha256=hashlib.sha256(set_value.to_json().encode()).hexdigest(),
     )
+    assert decision.admitted, decision.detail
     store.insert_admission_decision(attempt.attempt_id, decision)
     monkeypatch.setattr(research_cli, "_admission_for_hypothesis", lambda *_args: decision)
     configure_real_readiness(store, tmp_path, monkeypatch)
@@ -478,3 +545,152 @@ def test_golden_genuine_evaluator_failure_is_a_worker_reported_failure(
     status = read_status(store.root, unit_state=None)
     assert status.boundary_failure == "scenario_failed"
     assert all(event.kind != "run_reverified" for event in store.events())
+
+
+def test_golden_hedged_twenty_session_spec_runs_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A v3 spec (long_only false, one shortable instrument, 20 sessions) is accepted throughout.
+
+    Create (spec-set bounds), compute probe and freeze, typed admission, submit, run, host
+    verification, close and decide all run on the hedged spec; the fixture evaluator emits
+    ``research-evaluator-v3`` with ``dividend_payable_total`` and the new daily columns.
+    """
+    golden = _build_golden(tmp_path, monkeypatch, failing_second_spec=False, hedged=True)
+    store = golden.store
+    assert json.loads(golden.hypothesis.spec_json)["forward_label_sessions"] == HEDGED_SESSIONS
+    job_id = _queue_via_cli(golden)
+
+    _drive_to_terminal(golden, monkeypatch, job_id)
+
+    attempt = store.get_attempt(golden.attempt_id)
+    assert attempt.state == AttemptState.RUN_SUCCEEDED, attempt.run_outcome
+    assert attempt.run_outcome is not None
+    assert json.loads(attempt.run_outcome)["status"] == "succeeded"
+    for scenario_id, cost_bps in (("s000", 1), ("s001", 3)):
+        scenario_dir = golden.run_dir / "scenarios" / scenario_id
+        targets = json.loads((scenario_dir / "targets-stage" / "targets.json").read_text())
+        weights = [item["weight"] for item in targets["positions"]]
+        assert weights == [-0.3, -0.5]  # the run really carried a short SPY target
+        out = scenario_dir / "evaluator-stage" / "out"
+        result = json.loads((out / "result.json").read_text(encoding="utf-8"))
+        assert result["evaluator_version"] == "research-evaluator-v3"
+        assert result["dividend_payable_total"] == 0.0
+        # Borrow follows the 0.8 total short weight at the scenario's own annual rate.
+        borrow = round(0.8 * _borrow_bps(cost_bps) / 1e4 / 252, 12)
+        daily = (out / "daily.parquet").read_bytes()
+        assert f":net_exposure=-0.4:borrow_costs={borrow}".encode() in daily
+    _call(
+        store.root, "attempt-close", golden.attempt_id, "--decision", "FINISH", "--reason", "golden"
+    )
+    _call(
+        store.root,
+        "hypothesis-decide",
+        golden.hypothesis.hypothesis_id,
+        "--decision",
+        "FINISHED",
+        "--reason",
+        "golden",
+    )
+    assert store.get_hypothesis(golden.hypothesis.hypothesis_id).state == HypothesisState.DECIDED
+
+
+def _fake_evaluator(
+    tmp_path: Path, spec: dict[str, object], weight: float
+) -> subprocess.CompletedProcess[str]:
+    """Run the golden fake evaluator directly on one SPY target of ``weight``."""
+    files = {
+        "spec.json": json.dumps(spec),
+        "targets.json": json.dumps(
+            {"positions": [{"date": "2024-01-02", "symbol": "SPY", "weight": weight}]}
+        ),
+        "dividends.json": "{}",
+    }
+    for name, text in files.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    stub = tmp_path / "stub" / "quantipy"
+    stub.mkdir(parents=True)
+    (stub / "__init__.py").write_text("", encoding="utf-8")
+    return subprocess.run(
+        [
+            sys.executable,
+            str(FIXTURES / "golden_evaluator.py"),
+            "research",
+            "evaluate",
+            "--spec",
+            str(tmp_path / "spec.json"),
+            "--targets",
+            str(tmp_path / "targets.json"),
+            "--dividends",
+            str(tmp_path / "dividends.json"),
+            "--out",
+            str(tmp_path / "out"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, "PYTHONPATH": str(tmp_path / "stub")},
+    )
+
+
+def _hedged_spec(**changes: object) -> dict[str, object]:
+    spec: dict[str, object] = {
+        "cost_bps": 1,
+        "instruments": [{"ticker": "SPY", "instrument_class": "etf", "shortable": True}],
+        "long_only": False,
+        "holding": {"max_sessions": 20},
+        "costs": {"borrow_bps_annual": 50.0},
+    }
+    spec.update(changes)
+    return spec
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        {"cost_bps": 1},
+        _hedged_spec(long_only=True),
+        _hedged_spec(instruments=[{"ticker": "SPY", "instrument_class": "etf"}, {"ticker": "X"}]),
+        _hedged_spec(instruments=[{"ticker": "XLF", "instrument_class": "etf", "shortable": True}]),
+    ],
+)
+def test_fake_evaluator_refuses_a_short_target_unless_hedged_and_shortable(
+    tmp_path: Path, spec: dict[str, object]
+) -> None:
+    completed = _fake_evaluator(tmp_path, spec, -0.3)
+
+    assert completed.returncode == 1
+    assert "SHORT_NOT_PERMITTED" in completed.stderr or "no instrument is shortable" in (
+        completed.stderr
+    )
+
+
+def test_fake_evaluator_accepts_a_short_target_under_a_hedged_spec(tmp_path: Path) -> None:
+    completed = _fake_evaluator(tmp_path, _hedged_spec(), -0.3)
+
+    assert completed.returncode == 0, completed.stderr
+    daily = (tmp_path / "out" / "daily.parquet").read_bytes()
+    assert f"borrow_costs={round(0.3 * 50.0 / 1e4 / 252, 12)}".encode() in daily
+
+
+@pytest.mark.parametrize("costs", [{}, {"borrow_bps_annual": 0.0}])
+def test_fake_evaluator_refuses_a_hedged_spec_without_borrow(
+    tmp_path: Path, costs: dict[str, object]
+) -> None:
+    completed = _fake_evaluator(tmp_path, _hedged_spec(costs=costs), -0.3)
+
+    assert completed.returncode == 1
+    assert "costs.borrow_bps_annual is not set above zero" in completed.stderr
+
+
+def test_fake_evaluator_mirrors_the_gateway_constants() -> None:
+    fixture = importlib.util.spec_from_file_location(
+        "golden_evaluator", FIXTURES / "golden_evaluator.py"
+    )
+    assert fixture is not None and fixture.loader is not None
+    module = importlib.util.module_from_spec(fixture)
+    fixture.loader.exec_module(module)
+
+    assert module.MAX_SESSIONS == MAX_HOLDING_SESSIONS
+    assert module.BORROW_COST_MISSING_REASON == BORROW_COST_MISSING_REASON
+    assert module.NO_SHORTABLE_REASON == NO_SHORTABLE_INSTRUMENT_REASON

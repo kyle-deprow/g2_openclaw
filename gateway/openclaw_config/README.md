@@ -60,10 +60,11 @@ re-enabled by a machine-local entry.
 
 The initial capability is price-panel-only and ETF-scoped. Stock work requires
 trusted point-in-time earnings coverage and fails closed on unknown earnings.
-A holding horizon above five sessions is refused. Trusted panel sessions,
-immutable receipts, the exposure ledger, and evaluator bounds are mandatory for
-scientific statements. Smoke or synthetic data does not prove installed
-readiness or alpha.
+A holding horizon above sixty sessions is refused; hedged books need a frozen
+spec with `long_only: false`, shortable instruments and a borrow cost, and gross
+exposure ≤ 1.0. Trusted panel sessions, immutable receipts, the exposure
+ledger, and evaluator bounds are mandatory for scientific statements. Smoke or
+synthetic data does not prove installed readiness or alpha.
 
 ## Guarded publication
 

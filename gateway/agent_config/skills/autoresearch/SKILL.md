@@ -33,15 +33,16 @@ in liquid, unlevered equity-sector ETFs. Use dated platform evidence for the
 universe; cache availability or a retrospectively successful ticker list is not
 evidence, and ETF eligibility does not remove earnings exposure. Decide at the
 close, enter at the next regular open, hold long or cash, and exit by session
-five; do not credit the close-to-next-open rebound, and fit betas/scalers only
-from earlier data. Use a simple baseline plus at most two predeclared
-volume/regime variants. Compare unconditional dip-buying, cash, and
+five (the closed H0001–H0008 family; a longer or hedged design must satisfy the
+scientific boundary below); do not credit the close-to-next-open rebound, and
+fit betas/scalers only from earlier data. Use a simple baseline plus at most two
+predeclared volume/regime variants. Compare unconditional dip-buying, cash, and
 exposure-matched passive baselines with net costs and 2x/3x sensitivity; report
-folds, drawdown, concentration, counts, block-aware uncertainty/nulls, a
-five-session overlap purge, and the exposure ledger. Development history is not
-a fresh final holdout; unknown history blocks FINAL_HOLDOUT. News, Reddit, and
-regularized ML are optional incremental hypotheses only after baseline evidence
-and supported point-in-time inputs; missing news is not no-news evidence.
+folds, drawdown, concentration, counts, block-aware uncertainty/nulls, an
+overlap purge of at least the holding horizon, and the exposure ledger.
+Development history is not a fresh final holdout; unknown history blocks
+FINAL_HOLDOUT. News, Reddit, and regularized ML are optional incremental
+hypotheses only after baseline evidence and supported point-in-time inputs; missing news is not no-news evidence.
 Non-earnings continuation, scheduled macro-event, and crypto funding/basis
 ideas are later hypotheses, not silently enabled capability. Reject and
 inconclusive results are useful; smoke, API, process, or zero-trade success is
@@ -79,6 +80,9 @@ Power gate: a new hypothesis uses contract `research-hypothesis-v2`, which adds 
 must match within 0.5 bp, and `expected_events` must cover `minimum_evidence.trades`).
 The SD must come from outside the scored test period. `hypothesis-create` refuses v1
 specs and any design whose MDE exceeds the plausible effect (`underpowered design`).
+Create and admission also refuse `power.expected_events` above instruments x evaluation
+sessions / `forward_label_sessions`, and a training->evaluation gap shorter than
+`forward_label_sessions` panel sessions.
 A refused create writes no hypothesis but records a `hypothesis_create_refused` event;
 the NO_HYPOTHESIS/ALL_DECIDED wake then re-fires once per new refusal with the latest reason
 and the count since the last create, decide or resume (status `createRefusals`). The campaign
@@ -215,8 +219,13 @@ target path or another scenario's stage.
 The initial capability is price-panel-only and ETF-scoped. Require trusted
 panel sessions, immutable receipts, the exposure ledger, and evaluator bounds.
 Refuse stock work without trusted point-in-time earnings coverage and fail closed
-on unknown earnings status. A holding horizon above five sessions is refused.
-Do not claim alpha from smoke or synthetic data.
+on unknown earnings status. A holding horizon above sixty sessions is refused;
+hedged (long-short) books are allowed only when the frozen evaluator spec
+declares `long_only: false`, names shortable instruments and a borrow cost, and
+gross exposure stays ≤ 1.0 (no leverage). Hedge legs exist to remove
+uncompensated market variance; report hedged results against the unhedged long
+leg and the hedge instrument alone. Do not claim alpha from smoke or synthetic
+data.
 
 Campaign record (2026-10-04): the single-slot sector-ETF residual reversal
 family (H0001–H0008) is closed after H0008 FINISHED as REJECT_FOR_THIS_DESIGN;

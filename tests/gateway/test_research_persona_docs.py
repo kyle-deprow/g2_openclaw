@@ -151,3 +151,23 @@ def test_command_examples_are_members_of_frozen_help_appendix() -> None:
 
     # Assert
     assert not missing
+
+
+def test_runtime_and_claude_mirror_state_the_sixty_session_hedge_boundary() -> None:
+    # Arrange
+    required = (
+        "holding horizon above sixty sessions is refused",
+        "declares `long_only: false`",
+        "(no leverage)",
+    )
+
+    # Act
+    problems = []
+    for path in (RUNTIME_SKILL, CLAUDE_MIRROR):
+        text = _normalized(path.read_text(encoding="utf-8"))
+        problems += [f"{path} lacks {item!r}" for item in required if item not in text]
+        if "above five sessions" in text:
+            problems.append(f"{path} keeps the five-session limit")
+
+    # Assert
+    assert not problems

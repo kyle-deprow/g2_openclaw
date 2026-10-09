@@ -15,6 +15,7 @@ parsed with its exact key sets.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from dataclasses import dataclass
 from datetime import date
@@ -24,7 +25,7 @@ from typing import Self, cast
 
 from .codec import require_keys_exact, require_sha256, require_str, to_json
 from .contracts import HypothesisSpec
-from .hypothesis import HypothesisDocument
+from .hypothesis import MAX_HOLDING_SESSIONS, HypothesisDocument
 
 
 class AdmissionPurpose(StrEnum):
@@ -59,6 +60,10 @@ class AdmissionReason(StrEnum):
     HOLDING_HORIZON_EXCEEDS_LIMIT = "HOLDING_HORIZON_EXCEEDS_LIMIT"
     SEARCH_BUDGET_INSUFFICIENT = "SEARCH_BUDGET_INSUFFICIENT"
     STOCK_EARNINGS_UNAVAILABLE = "STOCK_EARNINGS_UNAVAILABLE"
+    SHORTABLE_INSTRUMENT_MISSING = "SHORTABLE_INSTRUMENT_MISSING"
+    BORROW_COST_MISSING = "BORROW_COST_MISSING"
+    PURGE_GAP_INSUFFICIENT = "PURGE_GAP_INSUFFICIENT"
+    POWER_EVENTS_EXCEED_CAPACITY = "POWER_EVENTS_EXCEED_CAPACITY"
 
 
 class InstrumentClass(StrEnum):
@@ -93,6 +98,42 @@ def _positive_int(value: object, name: str) -> int:
     return value
 
 
+NO_SHORTABLE_INSTRUMENT_REASON = "long_only is false but no instrument is shortable"
+BORROW_COST_MISSING_REASON = "long_only is false but costs.borrow_bps_annual is not set above zero"
+
+
+def evaluator_spec_bound_error(forward_label_sessions: int, spec_text: str) -> str | None:
+    """Return a refusal reason when one evaluator spec cannot carry the hypothesis, else None.
+
+    Lenient on shape: a spec without the bounded keys is left to the strict admission parser.
+    """
+    try:
+        document = json.loads(spec_text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(document, dict):
+        return None
+    holding = document.get("holding")
+    if isinstance(holding, dict):
+        max_sessions = holding.get("max_sessions")
+        if type(max_sessions) is int and forward_label_sessions > max_sessions:
+            return (
+                f"forward_label_sessions {forward_label_sessions} exceeds the evaluator spec "
+                f"holding.max_sessions {max_sessions}"
+            )
+    if document.get("long_only", True) is False:
+        instruments = document.get("instruments")
+        if not isinstance(instruments, list) or not any(
+            isinstance(item, dict) and item.get("shortable") is True for item in instruments
+        ):
+            return NO_SHORTABLE_INSTRUMENT_REASON
+        costs = document.get("costs")
+        borrow = costs.get("borrow_bps_annual") if isinstance(costs, dict) else None
+        if isinstance(borrow, bool) or not isinstance(borrow, (int, float)) or not borrow > 0:
+            return BORROW_COST_MISSING_REASON
+    return None
+
+
 def _nonnegative_int(value: object, name: str) -> int:
     if type(value) is not int or value < 0:
         raise ValueError(f"{name} must be a non-negative integer")
@@ -105,11 +146,14 @@ class Instrument:
 
     ticker: str
     instrument_class: InstrumentClass
+    shortable: bool = False
 
     def __post_init__(self) -> None:
         require_str(self.ticker, "instrument.ticker")
         if not isinstance(self.instrument_class, InstrumentClass):
             raise ValueError("instrument.instrument_class must be an InstrumentClass")
+        if not isinstance(self.shortable, bool):
+            raise ValueError("instrument.shortable must be boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +187,14 @@ class EvaluatorBounds:
     execution_fill_at: str = "next_regular_open"
     max_gross_exposure: float = 1.0
     long_only: bool = True
+    # Borrow is a cost field: this is the primary spec's value, not compared across the spec
+    # set. A hedged candidate's own borrow cost is checked per spec at the wiring boundary.
+    borrow_bps_annual: float = 0.0
+
+    @property
+    def shortable_tickers(self) -> frozenset[str]:
+        """Tickers the evaluator spec declares shortable."""
+        return frozenset(item.ticker for item in self.instruments if item.shortable)
 
     def __post_init__(self) -> None:
         panel_start = _date(self.panel_start, "evaluator.panel_start")
@@ -187,6 +239,13 @@ class EvaluatorBounds:
             raise ValueError("evaluator.max_gross_exposure must be in (0, 1]")
         if not isinstance(self.long_only, bool):
             raise ValueError("evaluator.long_only must be boolean")
+        if (
+            isinstance(self.borrow_bps_annual, bool)
+            or not isinstance(self.borrow_bps_annual, (int, float))
+            or not math.isfinite(float(self.borrow_bps_annual))
+            or self.borrow_bps_annual < 0
+        ):
+            raise ValueError("evaluator.borrow_bps_annual must be a finite non-negative number")
 
 
 @dataclass(frozen=True, slots=True)
@@ -720,6 +779,46 @@ def _ledger_classification(
     return OverlapClassification.NONE
 
 
+def panel_design_error(
+    hypothesis: HypothesisDocument, panel_sessions: tuple[str, ...], instrument_count: int
+) -> tuple[AdmissionReason, str] | None:
+    """Refusal for a design the trusted panel cannot support, shared by create and admission.
+
+    * ``PURGE_GAP_INSUFFICIENT``: when training is set, fewer panel sessions strictly between
+      ``training.end`` and ``evaluation.start`` than ``forward_label_sessions``.
+    * ``POWER_EVENTS_EXCEED_CAPACITY``: ``power.expected_events`` above instruments x evaluation
+      sessions / ``forward_label_sessions``.
+    """
+    if hypothesis.training is not None:
+        gap = sum(
+            1
+            for item in panel_sessions
+            if hypothesis.training.end < item < hypothesis.evaluation.start
+        )
+        if gap < hypothesis.forward_label_sessions:
+            return (
+                AdmissionReason.PURGE_GAP_INSUFFICIENT,
+                f"only {gap} panel sessions separate training from evaluation; the "
+                f"{hypothesis.forward_label_sessions}-session forward label needs at least "
+                "that many",
+            )
+    if hypothesis.power is not None:
+        sessions = sum(
+            1
+            for item in panel_sessions
+            if hypothesis.evaluation.start <= item <= hypothesis.evaluation.end
+        )
+        capacity = instrument_count * sessions / max(hypothesis.forward_label_sessions, 1)
+        if hypothesis.power.expected_events > capacity:
+            return (
+                AdmissionReason.POWER_EVENTS_EXCEED_CAPACITY,
+                f"power.expected_events {hypothesis.power.expected_events} exceeds the "
+                f"non-overlapping capacity of {capacity:g} (instruments x evaluation "
+                "sessions / forward_label_sessions)",
+            )
+    return None
+
+
 def admit_hypothesis(
     hypothesis: HypothesisDocument,
     hypothesis_spec: HypothesisSpec,
@@ -1050,15 +1149,63 @@ def admit_hypothesis(
             evaluation_spec_set_sha256=evaluation_spec_set_sha256,
         )
     if (
-        hypothesis.forward_label_sessions > 5
-        or evaluator_bounds.max_holding_sessions > 5
+        hypothesis.forward_label_sessions > MAX_HOLDING_SESSIONS
+        or evaluator_bounds.max_holding_sessions > MAX_HOLDING_SESSIONS
         or hypothesis.forward_label_sessions > evaluator_bounds.max_holding_sessions
     ):
         return _decision(
             admitted=False,
             purpose=purpose,
             reason=AdmissionReason.HOLDING_HORIZON_EXCEEDS_LIMIT,
-            detail="holding horizon exceeds the fixed five-session evaluator limit",
+            detail="holding horizon exceeds the sixty-session evaluator limit",
+            hypothesis=hypothesis,
+            spec=hypothesis_spec,
+            receipt=receipt,
+            ledger=exposure_ledger,
+            overlap=overlap,
+            capability=execution_capability,
+            policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
+        )
+    if not evaluator_bounds.long_only and not evaluator_bounds.shortable_tickers:
+        return _decision(
+            admitted=False,
+            purpose=purpose,
+            reason=AdmissionReason.SHORTABLE_INSTRUMENT_MISSING,
+            detail=NO_SHORTABLE_INSTRUMENT_REASON,
+            hypothesis=hypothesis,
+            spec=hypothesis_spec,
+            receipt=receipt,
+            ledger=exposure_ledger,
+            overlap=overlap,
+            capability=execution_capability,
+            policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
+        )
+    if not evaluator_bounds.long_only and not evaluator_bounds.borrow_bps_annual > 0:
+        return _decision(
+            admitted=False,
+            purpose=purpose,
+            reason=AdmissionReason.BORROW_COST_MISSING,
+            detail=BORROW_COST_MISSING_REASON,
+            hypothesis=hypothesis,
+            spec=hypothesis_spec,
+            receipt=receipt,
+            ledger=exposure_ledger,
+            overlap=overlap,
+            capability=execution_capability,
+            policy=campaign_policy,
+            evaluation_spec_set_sha256=evaluation_spec_set_sha256,
+        )
+    design_error = panel_design_error(
+        hypothesis, evaluator_bounds.panel_sessions, len(evaluator_bounds.instruments)
+    )
+    if design_error is not None:
+        return _decision(
+            admitted=False,
+            purpose=purpose,
+            reason=design_error[0],
+            detail=design_error[1],
             hypothesis=hypothesis,
             spec=hypothesis_spec,
             receipt=receipt,

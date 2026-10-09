@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 from dataclasses import replace
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,7 @@ from gateway.research.admission import (
     admit_hypothesis,
 )
 from gateway.research.contracts import HypothesisSpec
-from gateway.research.hypothesis import HypothesisDocument
+from gateway.research.hypothesis import HypothesisDocument, minimum_detectable_effect_bps
 
 RAW_EVAL_SHA = hashlib.sha256(b"raw evaluator spec").hexdigest()
 SEMANTIC_EVAL_SHA = hashlib.sha256(b"semantic evaluator spec").hexdigest()
@@ -53,6 +54,17 @@ def _power_block() -> dict[str, object]:
         "plausible_effect_bps": 30.0,
         "plausibility_basis": "gross reversal edge reported for liquid ETFs in the literature",
     }
+
+
+def _set_events(payload: dict[str, object], events: int, sd_bps: float = 20.0) -> None:
+    """Re-declare ``power`` for ``events`` events with an MDE that matches the recomputation."""
+    power = _power_block()
+    power["expected_events"] = events
+    power["per_event_sd_bps"] = sd_bps
+    power["minimum_detectable_effect_bps"] = round(
+        minimum_detectable_effect_bps(events, sd_bps, 0.05, 0.8, "one"), 3
+    )
+    payload["power"] = power
 
 
 def _payload() -> dict[str, object]:
@@ -86,7 +98,7 @@ def _payload_v1() -> dict[str, object]:
         "search_budget_evaluations": 2,
         "analysis": {"start": "2020-01-01", "end": "2024-12-31"},
         "evaluation": {"start": "2024-01-01", "end": "2024-12-31"},
-        "training": {"start": "2020-01-01", "end": "2023-12-31"},
+        "training": {"start": "2020-01-01", "end": "2023-11-30"},
         "purpose": "DEVELOPMENT_VALIDATION",
         "forward_label_sessions": 1,
         "purge_rule": "Purge at least the maximum declared forward label horizon.",
@@ -136,17 +148,34 @@ def _receipt() -> ValidationReceipt:
     )
 
 
+def _weekday_sessions(start: date, end: date) -> tuple[str, ...]:
+    """Every weekday from ``start`` through ``end``: a synthetic trusted panel calendar."""
+    days = (start + timedelta(days=offset) for offset in range((end - start).days + 1))
+    return tuple(day.isoformat() for day in days if day.weekday() < 5)
+
+
+PANEL_SESSIONS = _weekday_sessions(date(2019, 1, 1), date(2024, 12, 31))
+SPARSE_SESSIONS = ("2019-01-01", "2020-01-01", "2024-12-31")
+
+
 def _bounds(
-    *, instrument_class: InstrumentClass = InstrumentClass.ETF, max_holding: int = 5
+    *,
+    instrument_class: InstrumentClass = InstrumentClass.ETF,
+    max_holding: int = 5,
+    long_only: bool = True,
+    shortable: bool = False,
+    borrow_bps_annual: float = 0.0,
 ) -> EvaluatorBounds:
     return EvaluatorBounds(
         panel_start="2019-01-01",
         panel_end="2024-12-31",
-        instruments=(Instrument("SPY", instrument_class),),
+        instruments=(Instrument("SPY", instrument_class, shortable),),
         semantic_spec_sha256=SEMANTIC_EVAL_SHA,
         max_holding_sessions=max_holding,
         earnings_coverage=EarningsCoverage(EarningsCoverageStatus.UNAVAILABLE),
-        panel_sessions=("2019-01-01", "2020-01-01", "2024-12-31"),
+        panel_sessions=PANEL_SESSIONS,
+        long_only=long_only,
+        borrow_bps_annual=borrow_bps_annual,
     )
 
 
@@ -558,10 +587,156 @@ def test_bounds_and_exact_five_session_limit(
 def test_five_session_horizon_is_inclusive(payload: dict[str, object]) -> None:
     changed = copy.deepcopy(payload)
     changed["forward_label_sessions"] = 5
+    _set_events(changed, 50)
 
     result = _admit(_document(changed), bounds=_bounds(max_holding=5))
 
     assert result.admitted is True
+
+
+@pytest.mark.parametrize("sessions", [20, 60])
+def test_long_horizons_up_to_sixty_sessions_are_admitted(
+    payload: dict[str, object], sessions: int
+) -> None:
+    changed = copy.deepcopy(payload)
+    changed["forward_label_sessions"] = sessions
+    changed["training"] = None
+    _set_events(changed, 4)
+
+    result = _admit(_document(changed), bounds=_bounds(max_holding=sessions))
+
+    assert result.admitted is True
+
+
+def test_sixty_one_session_horizon_is_refused_by_the_bounds(payload: dict[str, object]) -> None:
+    changed = copy.deepcopy(payload)
+    changed["forward_label_sessions"] = 60
+
+    result = _admit(_document(changed), bounds=_bounds(max_holding=61))
+
+    assert result.reason is AdmissionReason.HOLDING_HORIZON_EXCEEDS_LIMIT
+    assert "sixty-session" in (result.detail or "")
+
+
+def test_sixty_one_session_hypothesis_never_parses(payload: dict[str, object]) -> None:
+    changed = copy.deepcopy(payload)
+    changed["forward_label_sessions"] = 61
+
+    with pytest.raises(ValueError, match="forward_label_sessions"):
+        _document(changed)
+
+
+def test_sixty_one_session_label_is_refused_even_if_a_document_bypasses_parsing(
+    payload: dict[str, object],
+) -> None:
+    document = _document(payload)
+    object.__setattr__(document, "forward_label_sessions", 61)
+
+    result = _admit(document, bounds=_bounds(max_holding=60))
+
+    assert result.reason is AdmissionReason.HOLDING_HORIZON_EXCEEDS_LIMIT
+
+
+def test_forward_label_beyond_the_spec_holding_limit_is_refused(
+    payload: dict[str, object],
+) -> None:
+    changed = copy.deepcopy(payload)
+    changed["forward_label_sessions"] = 21
+
+    result = _admit(_document(changed), bounds=_bounds(max_holding=20))
+
+    assert result.reason is AdmissionReason.HOLDING_HORIZON_EXCEEDS_LIMIT
+
+
+def test_hedged_spec_with_a_shortable_instrument_is_admitted(payload: dict[str, object]) -> None:
+    result = _admit(
+        _document(payload),
+        bounds=_bounds(max_holding=20, long_only=False, shortable=True, borrow_bps_annual=50.0),
+    )
+
+    assert result.admitted is True
+
+
+def test_hedged_spec_without_a_shortable_instrument_is_refused(
+    payload: dict[str, object],
+) -> None:
+    result = _admit(_document(payload), bounds=_bounds(long_only=False, shortable=False))
+
+    assert result.reason is AdmissionReason.SHORTABLE_INSTRUMENT_MISSING
+    assert result.detail == "long_only is false but no instrument is shortable"
+
+
+@pytest.mark.parametrize("borrow", [0.0, 0])
+def test_hedged_spec_without_a_borrow_cost_is_refused(
+    payload: dict[str, object], borrow: float
+) -> None:
+    result = _admit(
+        _document(payload),
+        bounds=_bounds(long_only=False, shortable=True, borrow_bps_annual=borrow),
+    )
+
+    assert result.reason is AdmissionReason.BORROW_COST_MISSING
+    assert result.detail == "long_only is false but costs.borrow_bps_annual is not set above zero"
+
+
+def test_long_only_spec_needs_no_borrow_cost(payload: dict[str, object]) -> None:
+    assert _admit(_document(payload), bounds=_bounds(borrow_bps_annual=0.0)).admitted is True
+
+
+@pytest.mark.parametrize(("forward", "events", "admitted"), [(21, 12, True), (22, 11, False)])
+def test_purge_gap_must_cover_the_forward_label(
+    payload: dict[str, object], forward: int, events: int, admitted: bool
+) -> None:
+    # Training ends 2023-11-30 and evaluation starts 2024-01-01: 21 weekday sessions between.
+    changed = copy.deepcopy(payload)
+    changed["forward_label_sessions"] = forward
+    _set_events(changed, events)
+
+    result = _admit(_document(changed), bounds=_bounds(max_holding=forward))
+
+    assert result.admitted is admitted
+    if not admitted:
+        assert result.reason is AdmissionReason.PURGE_GAP_INSUFFICIENT
+
+
+def test_purge_gap_is_not_checked_without_training(payload: dict[str, object]) -> None:
+    changed = copy.deepcopy(payload)
+    changed["training"] = None
+    changed["forward_label_sessions"] = 30
+    _set_events(changed, 8)
+
+    assert _admit(_document(changed), bounds=_bounds(max_holding=30)).admitted is True
+
+
+@pytest.mark.parametrize(("events", "admitted"), [(262, True), (263, False)])
+def test_power_events_cannot_exceed_the_evaluation_window_capacity(
+    payload: dict[str, object], events: int, admitted: bool
+) -> None:
+    # One instrument x 262 evaluation sessions in 2024 / 1-session label = 262 events.
+    changed = copy.deepcopy(payload)
+    _set_events(changed, events)
+
+    result = _admit(_document(changed))
+
+    assert result.admitted is admitted
+    if not admitted:
+        assert result.reason is AdmissionReason.POWER_EVENTS_EXCEED_CAPACITY
+
+
+def test_power_capacity_divides_by_the_forward_label(payload: dict[str, object]) -> None:
+    changed = copy.deepcopy(payload)
+    changed["forward_label_sessions"] = 5
+    _set_events(changed, 53)  # capacity floor(262 / 5) = 52.4
+
+    result = _admit(_document(changed), bounds=_bounds(max_holding=5))
+
+    assert result.reason is AdmissionReason.POWER_EVENTS_EXCEED_CAPACITY
+
+
+def test_evaluator_bounds_reject_a_malformed_borrow_cost() -> None:
+    for bad in (-1.0, float("nan"), float("inf"), True, "5"):
+        with pytest.raises(ValueError, match="borrow_bps_annual"):
+            _bounds(borrow_bps_annual=bad)  # type: ignore[arg-type]
 
 
 def test_panel_boundary_dates_are_inclusive(payload: dict[str, object]) -> None:
@@ -586,7 +761,7 @@ def test_one_session_too_many_for_lookback_is_refused(payload: dict[str, object]
     changed = copy.deepcopy(payload)
     changed["features"][0]["lookback_sessions"] = 2  # type: ignore[index]
 
-    result = _admit(_document(changed))
+    result = _admit(_document(changed), bounds=replace(_bounds(), panel_sessions=SPARSE_SESSIONS))
 
     assert result.reason is AdmissionReason.FEATURE_LOOKBACK_OUTSIDE_PANEL
 
@@ -596,7 +771,7 @@ def test_missing_analysis_session_is_refused(payload: dict[str, object]) -> None
     changed["analysis"] = {"start": "2020-01-02", "end": "2024-12-31"}
     changed["training"] = None
 
-    result = _admit(_document(changed))
+    result = _admit(_document(changed), bounds=replace(_bounds(), panel_sessions=SPARSE_SESSIONS))
 
     assert result.reason is AdmissionReason.FEATURE_LOOKBACK_OUTSIDE_PANEL
 
@@ -606,6 +781,7 @@ def test_holiday_gap_uses_exact_sessions_not_calendar_days(payload: dict[str, ob
     changed["analysis"] = {"start": "2019-01-03", "end": "2019-01-03"}
     changed["evaluation"] = {"start": "2019-01-03", "end": "2019-01-03"}
     changed["training"] = None
+    _set_events(changed, 1)
     bounds = replace(
         _bounds(),
         panel_sessions=("2019-01-01", "2019-01-03", "2024-12-31"),
@@ -633,7 +809,7 @@ def test_panel_session_tuple_must_be_ordered_unique_and_bound_to_panel(
 
 
 def test_evaluator_maximum_holding_horizon_is_refused(payload: dict[str, object]) -> None:
-    result = _admit(_document(payload), bounds=_bounds(max_holding=6))
+    result = _admit(_document(payload), bounds=_bounds(max_holding=61))
 
     assert result.reason is AdmissionReason.HOLDING_HORIZON_EXCEEDS_LIMIT
 

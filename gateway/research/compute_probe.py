@@ -88,10 +88,35 @@ def _run_stage(
     if timed_out:
         raise ComputeProbeError(deadline_message)
     if exit_code != 0:
-        raise ComputeProbeError(f"{stage} exited {exit_code}; inspect {err}; {hint}")
+        reasons = _validator_reasons(_read_json(probe_dir / "logs" / f"{stage}.out"))
+        raise ComputeProbeError(f"{stage} exited {exit_code}{reasons}; inspect {err}; {hint}")
     if peak.peak_bytes <= 0:
         raise ComputeProbeError(f"{stage} peak memory could not be measured")
     return ProbeStage(stage, spec_id, exit_code, max(wall, 1e-6), peak.peak_mb)
+
+
+MAX_REPORTED_REASONS = 5
+MAX_REASON_CHARS = 300
+
+
+def _validator_reasons(validation: object) -> str:
+    """The validator's own refusal reasons (bounded), so the owner sees why it refused."""
+    reasons = validation.get("reasons") if isinstance(validation, dict) else None
+    if not isinstance(reasons, list):
+        return ""
+    texts = [str(item)[:MAX_REASON_CHARS] for item in reasons if isinstance(item, str)]
+    if not texts:
+        return ""
+    more = len(texts) - MAX_REPORTED_REASONS
+    suffix = f" (+{more} more)" if more > 0 else ""
+    return f" (reasons: {'; '.join(texts[:MAX_REPORTED_REASONS])}{suffix})"
+
+
+def _read_json(path: Path) -> object:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 def _check_validation(stdout: Path, stage: str, expected: dict[str, str]) -> None:
@@ -100,7 +125,9 @@ def _check_validation(stdout: Path, stage: str, expected: dict[str, str]) -> Non
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ComputeProbeError(f"{stage} output is not JSON") from exc
     if not isinstance(validation, dict) or validation.get("verdict") != "PASS":
-        raise ComputeProbeError(f"{stage} did not return verdict PASS; inspect {stdout}")
+        raise ComputeProbeError(
+            f"{stage} did not return verdict PASS{_validator_reasons(validation)}; inspect {stdout}"
+        )
     if any(validation.get(key) != value for key, value in expected.items()):
         raise ComputeProbeError(f"{stage} digests do not bind the hypothesis inputs")
 

@@ -155,6 +155,8 @@ def _stop(process: subprocess.Popen[Any], scope_unit: str | None = None) -> None
 
 
 _ACTIVE_STAGE: subprocess.Popen[Any] | None = None
+# Old pinned roots still emit v2; the v3 evaluator adds hedged books and 60-session holds.
+ACCEPTED_EVALUATOR_VERSIONS = frozenset({"research-evaluator-v2", "research-evaluator-v3"})
 _WORKER_INTERRUPTED = False
 
 
@@ -752,7 +754,7 @@ def _contained_run_plan(job: dict[str, object]) -> dict[str, object]:
             result = json.loads(result_path.read_text(encoding="utf-8"))
             if (
                 not isinstance(result, dict)
-                or result.get("evaluator_version") != "research-evaluator-v2"
+                or result.get("evaluator_version") not in ACCEPTED_EVALUATOR_VERSIONS
                 or result.get("spec_sha256") != semantic_by_spec[scenario.spec_id]
                 or result.get("dividends_sha256") != digests["dividends"]
             ):

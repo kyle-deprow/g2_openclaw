@@ -17,9 +17,10 @@ from gateway.research.admission import (
 from gateway.research.cli import (
     _admission_for_hypothesis,
     _AdmissionInputError,
-    _decode_panel_sessions,
+    _parse_evaluator_bounds,
     _parse_exposure_ledger,
     _record_admission_refusal,
+    _same_evaluator_bounds,
 )
 from gateway.research.contracts import (
     AttemptDecision,
@@ -32,6 +33,7 @@ from gateway.research.contracts import (
     RunOutcome,
     RunPlan,
 )
+from gateway.research.receipt_sessions import decode_panel_sessions
 from gateway.research.store import MAX_EXPOSURE_LEDGER_BYTES, ResearchStore, StoreConflict
 from gateway.research.wake import compose_wake
 from typer.testing import CliRunner
@@ -45,7 +47,7 @@ from tests.gateway.research.conftest import (
     verified_review,
 )
 from tests.gateway.research.native_review_fixtures import prepare_review
-from tests.gateway.research.test_admission import _admit, _document, _payload
+from tests.gateway.research.test_admission import _admit, _document, _payload, _set_events
 
 LEDGER_FIXTURE = Path(__file__).parent / "fixtures" / "exposure-ledger.json"
 RECEIPT_FIXTURE = Path(__file__).parent / "fixtures" / "receipt.json"
@@ -58,11 +60,13 @@ def _wired_spec(
     *,
     instrument_class: str = "etf",
     feature_source: str = "panel",
+    evaluator_document: dict[str, object] | None = None,
 ) -> HypothesisSpec:
     eval_spec = tmp_path / f"evaluator-{instrument_class}.json"
     eval_spec.write_text(
         json.dumps(
-            {
+            evaluator_document
+            or {
                 "instruments": [{"ticker": "SPY", "instrument_class": instrument_class}],
                 "start_session": "2025-09-15",
                 "end_session": "2025-09-26",
@@ -77,6 +81,7 @@ def _wired_spec(
     document_payload["evaluation"] = {"start": "2025-09-15", "end": "2025-09-26"}
     document_payload["training"] = None
     document_payload["features"][0]["lookback_sessions"] = 0  # type: ignore[index]
+    _set_events(document_payload, 5)  # a 10-session window cannot hold the default 100 events
     document_payload["features"][0]["source"] = feature_source  # type: ignore[index]
     document = _document(document_payload)
     return replace(
@@ -452,7 +457,7 @@ def test_pinned_receipt_supplies_ordered_sessions_without_calendar_inference() -
         receipt_sha256=hashlib.sha256(RECEIPT_FIXTURE.read_bytes()).hexdigest(),
     )
 
-    sessions = _decode_panel_sessions(raw, receipt)
+    sessions = decode_panel_sessions(raw, receipt)
 
     assert sessions == (
         "2025-09-15",
@@ -491,6 +496,7 @@ def test_wired_admission_uses_registered_policy_ledger_and_receipt_sessions(
     document_payload["evaluation"] = {"start": "2025-09-15", "end": "2025-09-26"}
     document_payload["training"] = None
     document_payload["features"][0]["lookback_sessions"] = 0  # type: ignore[index]
+    _set_events(document_payload, 5)  # a 10-session window cannot hold the default 100 events
     document = _document(document_payload)
     spec = replace(
         stored_hypothesis,
@@ -518,6 +524,145 @@ def test_wired_admission_uses_registered_policy_ledger_and_receipt_sessions(
     assert (
         decision.receipt.receipt_sha256 == hashlib.sha256(RECEIPT_FIXTURE.read_bytes()).hexdigest()
     )
+
+
+SESSIONS = ("2025-09-15", "2025-09-16", "2025-09-26")
+SEMANTIC = "a" * 64
+SESSIONS_H0008 = ("2021-10-01", "2021-10-04", "2026-07-31")
+
+
+def _write_evaluator(tmp_path: Path, name: str, document: dict[str, object]) -> Path:
+    path = tmp_path / name
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def _v1_evaluator_document() -> dict[str, object]:
+    return {
+        "instruments": [{"ticker": "SPY", "instrument_class": "etf"}],
+        "start_session": "2025-09-15",
+        "end_session": "2025-09-26",
+        "holding": {"max_sessions": 5},
+        "costs": {"half_spread_bps": 1, "slippage_bps": 3, "commission_bps": 1},
+    }
+
+
+def _v3_evaluator_document(**changes: object) -> dict[str, object]:
+    document = _v1_evaluator_document()
+    document["instruments"] = [
+        {"ticker": "SPY", "instrument_class": "etf", "shortable": True},
+        {"ticker": "XLF", "instrument_class": "etf"},
+    ]
+    document["holding"] = {"max_sessions": 60}
+    document["long_only"] = False
+    document["costs"] = {
+        "half_spread_bps": 1,
+        "slippage_bps": 3,
+        "commission_bps": 1,
+        "borrow_bps_annual": 75.5,
+    }
+    document.update(changes)
+    return document
+
+
+def test_v1_evaluator_spec_parses_unchanged_and_compares_equal_to_itself(
+    tmp_path: Path,
+) -> None:
+    path = _write_evaluator(tmp_path, "v1.json", _v1_evaluator_document())
+
+    left = _parse_evaluator_bounds(path, SEMANTIC, SESSIONS)
+    right = _parse_evaluator_bounds(path, SEMANTIC, SESSIONS)
+
+    assert left.long_only is True
+    assert left.borrow_bps_annual == 0.0
+    assert left.shortable_tickers == frozenset()
+    assert left.max_holding_sessions == 5
+    assert all(item.shortable is False for item in left.instruments)
+    assert _same_evaluator_bounds(left, right)
+
+
+def test_v3_evaluator_fields_round_trip_into_the_bounds(tmp_path: Path) -> None:
+    path = _write_evaluator(tmp_path, "v3.json", _v3_evaluator_document())
+
+    bounds = _parse_evaluator_bounds(path, SEMANTIC, SESSIONS)
+
+    assert bounds.long_only is False
+    assert bounds.borrow_bps_annual == 75.5
+    assert bounds.max_holding_sessions == 60
+    assert bounds.shortable_tickers == frozenset({"SPY"})
+    assert _same_evaluator_bounds(bounds, _parse_evaluator_bounds(path, SEMANTIC, SESSIONS))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {
+            "instruments": [
+                {"ticker": "SPY", "instrument_class": "etf"},
+                {"ticker": "XLF", "instrument_class": "etf", "shortable": True},
+            ]
+        },
+        {"long_only": True},
+    ],
+)
+def test_spec_set_equality_compares_shortable_and_long_only(
+    tmp_path: Path, changes: dict[str, object]
+) -> None:
+    base = _parse_evaluator_bounds(
+        _write_evaluator(tmp_path, "base.json", _v3_evaluator_document()), SEMANTIC, SESSIONS
+    )
+    other = _parse_evaluator_bounds(
+        _write_evaluator(tmp_path, "other.json", _v3_evaluator_document(**changes)),
+        SEMANTIC,
+        SESSIONS,
+    )
+
+    assert not _same_evaluator_bounds(base, other)
+
+
+def test_borrow_is_a_cost_field_and_does_not_break_spec_set_equality(tmp_path: Path) -> None:
+    base = _parse_evaluator_bounds(
+        _write_evaluator(tmp_path, "base.json", _v3_evaluator_document()), SEMANTIC, SESSIONS
+    )
+    doubled = _parse_evaluator_bounds(
+        _write_evaluator(
+            tmp_path,
+            "doubled.json",
+            _v3_evaluator_document(
+                costs={
+                    "half_spread_bps": 2,
+                    "slippage_bps": 6,
+                    "commission_bps": 2,
+                    "borrow_bps_annual": 151.0,
+                }
+            ),
+        ),
+        SEMANTIC,
+        SESSIONS,
+    )
+
+    assert doubled.borrow_bps_annual == 151.0
+    assert _same_evaluator_bounds(base, doubled)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"costs": {"borrow_bps_annual": -1}},
+        {"costs": {"borrow_bps_annual": True}},
+        {"costs": {"borrow_bps_annual": "5"}},
+        {"costs": {"unknown_bps": 1}},
+        {"instruments": [{"ticker": "SPY", "instrument_class": "etf", "shortable": "yes"}]},
+        {"long_only": "no"},
+    ],
+)
+def test_malformed_v3_evaluator_fields_are_refused(
+    tmp_path: Path, changes: dict[str, object]
+) -> None:
+    path = _write_evaluator(tmp_path, "bad.json", _v3_evaluator_document(**changes))
+
+    with pytest.raises(_AdmissionInputError):
+        _parse_evaluator_bounds(path, SEMANTIC, SESSIONS)
 
 
 def test_admission_rejects_second_spec_non_cost_bound_change(
@@ -555,6 +700,147 @@ def test_admission_rejects_second_spec_non_cost_bound_change(
     monkeypatch.setattr(store, "evaluation_spec_set", lambda _hypothesis_id: manifest)
     with pytest.raises(_AdmissionInputError, match="non-cost bound"):
         _admission_for_hypothesis(store, spec.hypothesis_id)
+
+
+def _hedged_evaluator_document(
+    *, scale: int = 1, borrow: float | None = 50.0, shortable: bool = True
+) -> dict[str, object]:
+    """A real-shaped hedged spec; ``scale`` multiplies every cost, borrow included."""
+    document: dict[str, object] = {
+        "instruments": [{"ticker": "SPY", "instrument_class": "etf", "shortable": shortable}],
+        "start_session": "2025-09-15",
+        "end_session": "2025-09-26",
+        "holding": {"max_sessions": 5},
+        "long_only": False,
+        "costs": {
+            "half_spread_bps": 1.0 * scale,
+            "slippage_bps": 3.0 * scale,
+            "commission_bps": 1.0 * scale,
+        },
+    }
+    if borrow is not None:
+        document["costs"]["borrow_bps_annual"] = borrow * scale  # type: ignore[index]
+    return document
+
+
+def _wire_candidate_set(
+    store: ResearchStore,
+    stored: HypothesisSpec,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    documents: list[dict[str, object]],
+) -> HypothesisSpec:
+    """Wire a spec set whose c000 is the primary and the rest are candidates."""
+    spec = _wired_spec(stored, tmp_path, evaluator_document=documents[0])
+    entries = [EvaluationSpecEntry("c000", spec.evaluation_spec_path, spec.evaluation_spec_sha256)]
+    for index, document in enumerate(documents[1:], start=1):
+        path = tmp_path / f"candidate-{index}.json"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        entries.append(
+            EvaluationSpecEntry(
+                f"c{index:03d}", str(path), hashlib.sha256(path.read_bytes()).hexdigest()
+            )
+        )
+    manifest = EvaluationSpecSet(
+        "research-evaluation-spec-set-v1",
+        spec.hypothesis_id,
+        "c000",
+        tuple(entries),
+        "2026-01-01T00:00:00Z",
+    )
+    monkeypatch.setattr(store, "get_hypothesis", lambda _hypothesis_id: spec)
+    monkeypatch.setattr(store, "evaluation_spec_set", lambda _hypothesis_id: manifest)
+    store.set_campaign_policy(3, None, "operator-test")
+    store.register_exposure_ledger(
+        LEDGER_FIXTURE, hashlib.sha256(LEDGER_FIXTURE.read_bytes()).hexdigest()
+    )
+    return spec
+
+
+def test_wired_hedged_spec_set_with_cost_scaled_borrow_is_admitted(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _source, stored = campaign
+    documents = [_hedged_evaluator_document(), _hedged_evaluator_document(scale=2)]
+    spec = _wire_candidate_set(store, stored, tmp_path, monkeypatch, documents)
+
+    decision = _admission_for_hypothesis(store, spec.hypothesis_id)
+
+    assert decision.admitted, decision.detail
+
+
+def test_wired_hedged_primary_without_borrow_is_refused_with_the_typed_code(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _source, stored = campaign
+    spec = _wire_candidate_set(
+        store, stored, tmp_path, monkeypatch, [_hedged_evaluator_document(borrow=None)]
+    )
+
+    # The per-spec loop covers the primary too, so the wiring boundary refuses first.
+    with pytest.raises(_AdmissionInputError, match="c000") as refusal:
+        _admission_for_hypothesis(store, spec.hypothesis_id)
+
+    assert refusal.value.reason == AdmissionReason.BORROW_COST_MISSING.value
+
+
+def test_wired_hedged_candidate_without_borrow_is_refused_even_if_the_primary_has_it(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _source, stored = campaign
+    documents = [_hedged_evaluator_document(), _hedged_evaluator_document(scale=2, borrow=None)]
+    spec = _wire_candidate_set(store, stored, tmp_path, monkeypatch, documents)
+
+    with pytest.raises(_AdmissionInputError, match="c001") as refusal:
+        _admission_for_hypothesis(store, spec.hypothesis_id)
+
+    assert refusal.value.reason == "BORROW_COST_MISSING"
+
+
+def test_wired_hedged_spec_without_a_shortable_instrument_is_refused(
+    campaign: tuple[ResearchStore, Path, HypothesisSpec],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _source, stored = campaign
+    spec = _wire_candidate_set(
+        store, stored, tmp_path, monkeypatch, [_hedged_evaluator_document(shortable=False)]
+    )
+
+    decision = _admission_for_hypothesis(store, spec.hypothesis_id)
+
+    assert decision.reason is AdmissionReason.SHORTABLE_INSTRUMENT_MISSING
+
+
+H0008_SPECS = Path(__file__).parent / "fixtures" / "h0008-evaluation-specs"
+
+
+def test_real_h0008_evaluator_specs_stay_long_only_and_compare_equal() -> None:
+    # Copies of the three frozen H0008 specs: costs 1x/2x/3x are the only variation.
+    parsed = [
+        _parse_evaluator_bounds(H0008_SPECS / f"c00{index}.json", SEMANTIC, SESSIONS_H0008)
+        for index in range(3)
+    ]
+
+    for bounds in parsed:
+        assert bounds.long_only is True
+        assert bounds.borrow_bps_annual == 0.0
+        assert bounds.shortable_tickers == frozenset()
+        assert bounds.max_holding_sessions == 5
+        assert len(bounds.instruments) == 12
+    assert _same_evaluator_bounds(parsed[0], parsed[1])
+    assert _same_evaluator_bounds(parsed[0], parsed[2])
+    costs = [
+        json.loads((H0008_SPECS / f"c00{index}.json").read_text(encoding="utf-8"))["costs"]
+        for index in range(3)
+    ]
+    assert [item["half_spread_bps"] for item in costs] == [1.0, 2.0, 3.0]
 
 
 @pytest.mark.parametrize("mutation", ["missing", "malformed", "mutated", "symlink"])

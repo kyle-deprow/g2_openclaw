@@ -30,7 +30,10 @@ reserved before review and binds the child, attempt, commit, and spec digest.
 
 The initial capability is price-panel-only and ETF-scoped. Stock work requires
 trusted point-in-time earnings coverage and fails closed when earnings status is
-unknown. A holding horizon above five sessions is refused. Trusted panel
+unknown. A holding horizon above sixty sessions is refused; hedged (long-short)
+books are allowed only when the frozen evaluator spec declares
+`long_only: false`, names shortable instruments and a borrow cost, and gross
+exposure stays ≤ 1.0 (no leverage). Trusted panel
 sessions, immutable receipts, the exposure ledger, and evaluator bounds are
 required for a scientific statement. Smoke or synthetic data proves contracts,
 not installed readiness or alpha.

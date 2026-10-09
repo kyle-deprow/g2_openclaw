@@ -35,17 +35,20 @@ available.
   open-to-close shock, normalized by earlier volatility, reverses over the next
   five trading sessions when temporary selling pressure rather than new
   information is plausible. Fit betas and scalers only on earlier data.
-- Decide at the regular close, enter at the next regular open, hold long or
-  cash, and exit by the fifth session. Do not credit the close-to-next-open
-  rebound to the post-entry result. A holding horizon above five sessions is
-  refused.
+- The closed H0001–H0008 family decided at the regular close, entered at the
+  next regular open, held long or cash, and exited by the fifth session. Do not
+  credit the close-to-next-open rebound to the post-entry result.
+- A holding horizon above sixty sessions is refused; hedged (long-short) books
+  are allowed only when the frozen evaluator spec declares `long_only: false`,
+  names shortable instruments and a borrow cost, and gross exposure stays
+  ≤ 1.0 (no leverage).
 - Use a simple baseline and at most two predeclared volume or regime variants.
   Indicators are features, not independent alpha claims; correlated RSI,
   bands, and returns are not independent confirmations.
 - Compare unconditional dip-buying, cash, and exposure-matched passive
   baselines. Report net costs and 2x/3x cost sensitivity, chronological fold
   results, drawdown, concentration, sample counts, block-aware uncertainty and
-  nulls, and an overlap purge of at least five sessions. Keep an exposure
+  nulls, and an overlap purge of at least the holding horizon. Keep an exposure
   ledger: prior exposed history is development evidence, never a fresh final
   holdout; unknown history blocks FINAL_HOLDOUT.
 - News, Reddit, and regularized ML are optional incremental hypotheses only
@@ -85,7 +88,10 @@ and relative deliverable paths.
   typed refusal, never an inferred value.
 - The capability is price-panel-only capability within ETF scope.
 - Stock refusal without trusted point-in-time earnings coverage is mandatory; unknown or unavailable earnings fail closed.
-- A holding horizon above five sessions is refused.
+- A holding horizon above sixty sessions is refused; hedged (long-short) books are
+  allowed only when the frozen evaluator spec declares `long_only: false`, names
+  shortable instruments and a borrow cost, and gross exposure stays ≤ 1.0 (no
+  leverage).
 - Preserve typed admission refusals and trusted panel sessions as caller
   evidence. Use immutable receipts, ledger, and evaluator bounds for scientific
   evidence.
@@ -194,7 +200,10 @@ abandoned with `hypothesis-decide HYPOTHESIS_ID --root ROOT --decision ABANDONED
 New hypotheses use contract `research-hypothesis-v2` with a `power` block whose
 SD basis comes from outside the scored test period (`power-check` computes the
 MDE); create refuses non-canonical specs and designs whose MDE exceeds the
-plausible effect. The sector-ETF residual reversal family (H0001–H0008) is
+plausible effect. Create and admission also refuse `power.expected_events` above
+instruments × evaluation sessions ÷ `forward_label_sessions`, and a
+training→evaluation gap shorter than `forward_label_sessions` panel sessions.
+The sector-ETF residual reversal family (H0001–H0008) is
 closed, and sessions after 2026-07-31 are a reserved holdout. The active
 campaign is calendar-flows-20261005 (root `research-v3`); its workspace
 `campaigns/calendar-flows-20261005/CHARTER.md` governs authoring. Before
