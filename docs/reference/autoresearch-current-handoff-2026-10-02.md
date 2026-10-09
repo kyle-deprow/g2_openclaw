@@ -526,6 +526,45 @@ that we need it" → "proceed"; then "I've updated massive, proceed".
 - **Note:** the Q2 commit swept in a formatter-only reflow of
   `src/quantipy/worker/historical_import_handler.py` (pre-existing, harmless).
 
+## Stock platform landed; campaign post-announcement-stocks-20261008 launched (2026-10-09)
+
+- **Quantipy main** `e73c1a3`: evaluator v3 + daily-bar mode (`f454eb1`),
+  iterated timely earnings-exposure rule with 1% exposed-notional tolerance
+  (`a72d396`), research-data tooling (`91ef3bd` merge, pagination fix
+  `f97cd5c`, per-company point-in-time rule-D calibration `8e581c3`,
+  cumulative coverage windows `e73c1a3`), validate-inputs gate accepting
+  chained coverage (`eea9c55`). Every step went through Sonnet implement /
+  Opus adversarial review; notable catches: split-adjusted bars leaking
+  future splits into the universe screen, dividend/split basis mismatch,
+  negative-NAV reduction crash, spec-declared shortability, stale-price
+  restatement after halts, pass-2 lots riding unrecorded events, forward
+  coverage ending at the current block.
+- **g2 main** `ba58d0f`: gateway v3 support (`9a54bd0`), earnings/membership
+  bound inputs + daily receipts + `common_stock` enum fix (`796dfc2`), docs
+  pointing Astra at the new charter.
+- **Inputs** (`/home/dev/autoresearch-stocks-20261008`, locked, backup in
+  `/home/dev/backups/`): 10-year unadjusted grouped-daily store (2,497
+  sessions, delisted names included), 120 monthly PIT listings, splits
+  snapshot, EDGAR submissions for 3,650 CIKs; membership top-1500/month;
+  split-adjusted panel 4.09M rows; rule-D snapshot 2.9M events, 88% coverage,
+  ~8% real-event misses; trusted universe 3,809 stocks + SPY/IWM/QQQ
+  shortable; evaluator snapshot e73c1a3. Smoke: validate PASS (9 GB, 33 s),
+  empty-target evaluate OK. Details and digests in that root's RECIPE.md and
+  CHARTER.md.
+- **Design decisions (measured):** global k=30 blacked out 84% of sessions;
+  per-company k 5–15 keeps 88% coverage at ~8% misses; withholding irregular
+  reporters cost 30–50 points of universe for no gain (default OFF); misses
+  are absorbed by the evaluator's iterated timely rule rather than voiding
+  runs; the 8 tickers with dividend/split-basis disagreement are excluded.
+- **Root** `/home/dev/.openclaw/research-v4` initialised (attempt cap 30,
+  ledger UNKNOWN_HISTORY, native runtime record registered);
+  `RESEARCH_V2_ROOT` and the owner unit point at it; research-owner.service
+  started 2026-10-09. research-v3 (calendar) and research-v2 (reversal) are
+  intact and paused.
+- **Memory note:** a session was lost to host memory pressure from other
+  projects' pytest workers (~33 GB); the user authorised terminating the
+  spine_sense runs.
+
 ## Guardrails (unchanged, plus the 10-02 directive)
 
 OpenAI models only for the research loop. Use no Anthropic, Claude, ACP, or Opus
