@@ -6,18 +6,21 @@ import hashlib
 import json
 import sqlite3
 from dataclasses import dataclass, replace
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import pytest
 from gateway.research import cli as research_cli
 from gateway.research import readiness
+from gateway.research import store as research_store
 from gateway.research.admission import (
     COMMON_STOCK_REFUSAL,
     AdmissionReason,
     EarningsCoverage,
     EarningsCoverageStatus,
     ValidationReceipt,
+    admit_hypothesis,
 )
 from gateway.research.cli import _admission_for_hypothesis, _AdmissionInputError
 from gateway.research.contracts import (
@@ -42,6 +45,7 @@ from tests.gateway.research.stock_fixtures import (
     EVAL_START,
     PANEL_END,
     SESSIONS,
+    _sessions,
     daily_receipt_text,
     earnings_bytes,
     membership_bytes,
@@ -567,24 +571,211 @@ def test_admission_without_a_bound_earnings_snapshot_refuses_the_stock(
     assert decision.reason is AdmissionReason.STOCK_EARNINGS_UNAVAILABLE
 
 
-def test_admission_clips_daily_tail_sessions_to_the_spec_range(
+def _early_receipt(inputs: Inputs, first: str) -> tuple[str, ...]:
+    """Rewrite the receipt so its sessions start at ``first``, before the spec start."""
+    sessions = _sessions(date.fromisoformat(first), date.fromisoformat(PANEL_END))
+    inputs.receipt.write_text(
+        daily_receipt_text(
+            sha256(inputs.panel.read_bytes()),
+            sha256(inputs.membership.read_bytes()),
+            sessions=sessions,
+            start=first,
+        ),
+        encoding="utf-8",
+    )
+    return sessions
+
+
+def test_admission_keeps_pre_spec_sessions_and_clips_the_daily_tail(
     stock: tuple[ResearchStore, Inputs],
 ) -> None:
     store, inputs = stock
+    sessions = _early_receipt(inputs, "2023-11-01")
     inputs.create(store)
-    clipped = decode_daily_sessions(
+    kept = decode_daily_sessions(
         json.loads(inputs.receipt.read_text()), start=EVAL_START, end=EVAL_END
     )
     bounds = research_cli._parse_evaluator_bounds(
-        inputs.eval_spec, sha256(inputs.eval_spec.read_bytes()), clipped
+        inputs.eval_spec, sha256(inputs.eval_spec.read_bytes()), kept, panel_start=kept[0]
     )
 
-    assert bounds.panel_sessions[0] == EVAL_START and bounds.panel_sessions[-1] == EVAL_END
-    assert SESSIONS[-1] > EVAL_END  # the receipt really carries tail sessions
+    assert kept[0] == sessions[0] == "2023-11-01" < EVAL_START
+    assert bounds.panel_sessions[-1] == EVAL_END and bounds.panel_start == "2023-11-01"
+    assert all(item <= EVAL_END for item in bounds.panel_sessions)
+    assert sessions[-1] > EVAL_END  # the receipt really carries tail sessions
+    assert kept == tuple(item for item in sessions if item <= EVAL_END)
+    with pytest.raises(_AdmissionInputError):  # without the override the spec start must match
+        research_cli._parse_evaluator_bounds(
+            inputs.eval_spec, sha256(inputs.eval_spec.read_bytes()), kept
+        )
     with pytest.raises(_AdmissionInputError):  # unclipped, the tail breaks the span check
         research_cli._parse_evaluator_bounds(
-            inputs.eval_spec, sha256(inputs.eval_spec.read_bytes()), tuple(SESSIONS)
+            inputs.eval_spec,
+            sha256(inputs.eval_spec.read_bytes()),
+            tuple(sessions),
+            panel_start=sessions[0],
         )
+
+
+def _early_payload(first: str, training_end: str, forward: int) -> dict[str, object]:
+    payload = stock_payload()
+    payload["analysis"] = {"start": first, "end": EVAL_END}
+    payload["training"] = {"start": first, "end": training_end}
+    payload["forward_label_sessions"] = forward
+    return payload
+
+
+def test_create_counts_pre_spec_sessions_for_the_purge_gap(tmp_path: Path) -> None:
+    training_end = "2023-12-27"
+    sessions = _sessions(date.fromisoformat("2023-12-01"), date.fromisoformat(PANEL_END))
+    gap = sum(1 for item in sessions if training_end < item < EVAL_START)
+    assert gap >= 2
+
+    def build(name: str, forward: int) -> tuple[ResearchStore, Inputs]:
+        store = _configured_store(tmp_path / name / "driver")
+        inputs = make_inputs(
+            tmp_path / name / "inputs", payload=_early_payload("2023-12-01", training_end, forward)
+        )
+        _early_receipt(inputs, "2023-12-01")
+        return store, inputs
+
+    store, inputs = build("exact", gap)
+    assert inputs.create(store).hypothesis_id == "H0001"
+    store, inputs = build("exact-plus", gap - 1)
+    assert inputs.create(store).hypothesis_id == "H0001"
+    store, inputs = build("short", gap + 1)
+    with pytest.raises(ValueError, match=f"PURGE_GAP_INSUFFICIENT: only {gap} panel sessions"):
+        inputs.create(store)
+
+
+def test_admission_admits_an_analysis_start_before_the_spec_start(
+    stock: tuple[ResearchStore, Inputs], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, inputs = stock
+    first = "2023-12-01"
+    inputs.spec.write_text(json.dumps(_early_payload(first, "2023-12-27", 1)), encoding="utf-8")
+    _early_receipt(inputs, first)
+    inputs.create(store)
+    _admission_ready(store)
+    seen: list[Any] = []
+    real = admit_hypothesis  # the same object cli.py imported
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(args[4])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(research_cli, "admit_hypothesis", spy)
+
+    decision = _admission_for_hypothesis(store, "H0001")
+
+    assert decision.reason not in (
+        AdmissionReason.ANALYSIS_OUTSIDE_PANEL,
+        AdmissionReason.FEATURE_LOOKBACK_OUTSIDE_PANEL,
+    ), decision.detail
+    assert decision.admitted, decision.detail
+    bounds = seen[0]
+    assert bounds.panel_sessions[0] == first and bounds.panel_start == first
+    assert bounds.panel_sessions[-1] == EVAL_END == bounds.panel_end
+    assert all(item <= EVAL_END for item in bounds.panel_sessions)
+
+
+def test_admission_lookback_counts_the_pre_spec_sessions(
+    stock: tuple[ResearchStore, Inputs],
+) -> None:
+    first = "2023-12-01"
+    sessions = _early_receipt(stock[1], first)
+    k = 3
+    store, inputs = stock
+    results: dict[int, Any] = {}
+    for lookback in (k, k + 1):
+        store = _configured_store(inputs.root.parent / f"driver-{lookback}")
+        payload = _early_payload(sessions[k], "2023-12-27", 1)
+        payload["features"][0]["lookback_sessions"] = lookback  # type: ignore[index]
+        inputs.spec.write_text(json.dumps(payload), encoding="utf-8")
+        inputs.create(store)
+        _admission_ready(store)
+        results[lookback] = _admission_for_hypothesis(store, "H0001")
+
+    assert results[k].admitted, results[k].detail
+    assert results[k + 1].reason is AdmissionReason.FEATURE_LOOKBACK_OUTSIDE_PANEL
+
+
+@pytest.mark.parametrize(
+    "start",
+    [None, "2024-04-02", "2023-10-02", "2024-01-06", "2024-01-15"],
+    ids=["null", "reversed", "before-receipt", "weekend", "holiday"],
+)
+def test_daily_admission_refuses_an_untrusted_spec_start(
+    stock: tuple[ResearchStore, Inputs], monkeypatch: pytest.MonkeyPatch, start: str | None
+) -> None:
+    store, inputs = stock
+    inputs.create(store)
+    _admission_ready(store)
+    real = research_cli._spec_session_range
+    monkeypatch.setattr(
+        research_cli,
+        "_spec_session_range",
+        lambda path: (start, EVAL_END) if path.name == "c000.json" else real(path),
+    )
+
+    with pytest.raises(_AdmissionInputError) as refused:
+        _admission_for_hypothesis(store, "H0001")
+
+    assert refused.value.reason == "EVALUATION_SPEC_DIGEST_MISMATCH"
+
+
+def test_daily_spec_set_entry_with_a_later_start_changes_a_non_cost_bound(
+    stock: tuple[ResearchStore, Inputs],
+) -> None:
+    store, inputs = stock
+    later = json.loads(inputs.eval_spec.read_text())
+    later["start_session"] = SESSIONS[SESSIONS.index(EVAL_START) + 1]
+    other = inputs.root / "eval-c001.json"
+    other.write_text(json.dumps(later, separators=(",", ":")), encoding="utf-8")
+    inputs.spec_set.write_text(
+        EvaluationSpecSet(
+            "research-evaluation-spec-set-v1",
+            "H0001",
+            "c000",
+            (
+                EvaluationSpecEntry(
+                    "c000", str(inputs.eval_spec), sha256(inputs.eval_spec.read_bytes())
+                ),
+                EvaluationSpecEntry("c001", str(other), sha256(other.read_bytes())),
+            ),
+            "2026-01-01T00:00:00Z",
+        ).to_json(),
+        encoding="utf-8",
+    )
+    inputs.create(store)
+    _admission_ready(store)
+
+    with pytest.raises(_AdmissionInputError) as refused:
+        _admission_for_hypothesis(store, "H0001")
+
+    assert "changes a non-cost bound" in refused.value.detail
+
+
+def test_daily_evaluation_window_must_lie_inside_the_spec_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first, training_end = "2023-12-01", "2023-12-27"
+    payload = _early_payload(first, training_end, 1)
+    payload["evaluation"] = {"start": "2023-12-28", "end": EVAL_END}
+    store = _configured_store(tmp_path / "driver")
+    inputs = make_inputs(tmp_path / "inputs", payload=payload)
+    _early_receipt(inputs, first)
+
+    with pytest.raises(ValueError, match="ANALYSIS_OUTSIDE_PANEL: the evaluation window"):
+        inputs.create(store)  # create refuses what admission would refuse forever
+
+    monkeypatch.setattr(research_store, "_require_panel_supports_design", lambda *a: None)
+    inputs.create(store)
+    _admission_ready(store)
+    with pytest.raises(_AdmissionInputError) as refused:
+        _admission_for_hypothesis(store, "H0001")
+    assert refused.value.reason == AdmissionReason.ANALYSIS_OUTSIDE_PANEL.value
+    assert "inside the evaluator spec range" in refused.value.detail
 
 
 @pytest.mark.parametrize(
@@ -646,32 +837,45 @@ def test_host_readiness_smoke_mounts_the_bound_inputs(
 # -- daily session list must match the evaluator ------------------------------------------
 
 
+def _early_wire(**changes: object) -> dict[str, object]:
+    wire = _wire(**changes)
+    wire["request"] = {**wire["request"], "start": "2023-12-01"}  # type: ignore[dict-item]
+    return wire
+
+
 def test_daily_sessions_inside_the_spec_range_must_all_have_rows_and_none_be_missing() -> None:
     counts = {session: 2 for session in SESSIONS}
     inside = "2024-02-01"
+    before = "2023-12-15"
     outside = SESSIONS[-1]  # a tail session past the evaluation end
-    assert outside > EVAL_END
+    assert before < EVAL_START and outside > EVAL_END
+    counts = {**counts, "2023-12-14": 2, before: 2}
 
-    zero_inside = _wire(session_ticker_counts={**counts, inside: 0})
+    zero_inside = _early_wire(session_ticker_counts={**counts, inside: 0})
     with pytest.raises(ValueError, match="2024-02-01 with no rows inside the evaluation range"):
         decode_daily_sessions(zero_inside, start=EVAL_START, end=EVAL_END)
-    zero_outside = _wire(session_ticker_counts={**counts, outside: 0})
-    clipped = decode_daily_sessions(zero_outside, start=EVAL_START, end=EVAL_END)
-    assert clipped[0] == EVAL_START and clipped[-1] == EVAL_END
-    assert inside in clipped and outside not in clipped
+    zero_outside = _early_wire(session_ticker_counts={**counts, outside: 0})
+    kept_tail = decode_daily_sessions(zero_outside, start=EVAL_START, end=EVAL_END)
+    assert kept_tail[0] == "2023-12-14" and kept_tail[-1] == EVAL_END
+    assert inside in kept_tail and outside not in kept_tail
+    zero_before = _early_wire(session_ticker_counts={**counts, before: 0})
+    tolerated = decode_daily_sessions(zero_before, start=EVAL_START, end=EVAL_END)
+    assert before not in tolerated and tolerated[0] == "2023-12-14"
 
     with pytest.raises(ValueError, match="2024-02-01 missing inside the evaluation range"):
         decode_daily_sessions(
-            _wire(session_ticker_counts=counts, missing_sessions=[inside]),
+            _early_wire(session_ticker_counts=counts, missing_sessions=[inside]),
             start=EVAL_START,
             end=EVAL_END,
         )
-    kept = decode_daily_sessions(
-        _wire(session_ticker_counts=counts, missing_sessions=[outside]),
-        start=EVAL_START,
-        end=EVAL_END,
-    )
-    assert kept[-1] == EVAL_END
+    for tolerated_missing in (outside, before):
+        kept = decode_daily_sessions(
+            _early_wire(session_ticker_counts=counts, missing_sessions=[tolerated_missing]),
+            start=EVAL_START,
+            end=EVAL_END,
+        )
+        assert kept[-1] == EVAL_END and kept[0] == "2023-12-14"
+    assert decode_daily_sessions(_early_wire(session_ticker_counts=counts))[-1] == outside
 
 
 @pytest.mark.parametrize("field", ["session_ticker_counts", "missing_sessions"])

@@ -24,6 +24,7 @@ from typing import Literal, TextIO, cast
 from .admission import (
     COMMON_STOCK_REFUSAL,
     AdmissionDecision,
+    AdmissionReason,
     CampaignPolicy,
     evaluator_spec_bound_error,
     evaluator_spec_has_common_stock,
@@ -284,9 +285,23 @@ def _require_panel_supports_design(
         sessions = panel_sessions_from_receipt_bytes(receipt_bytes, **range_kwargs)
     except (ValueError, KeyError, TypeError) as exc:
         if is_daily:
-            # The daily list must match what the evaluator sees; never left to admission.
+            # The daily list runs from the receipt start to the spec end, strict inside the spec
+            # range; never left to admission.
             raise ValueError(f"invalid daily panel receipt: {exc}") from exc
         return
+    if (
+        is_daily
+        and isinstance(start, str)
+        and isinstance(end, str)
+        and (document.evaluation.start < start or document.evaluation.end > end)
+    ):
+        # Admission refuses an evaluation window outside the spec range (the daily panel now
+        # starts at the receipt start, so the panel bounds no longer enforce it); refuse it here
+        # rather than accept a hypothesis admission would refuse forever.
+        raise ValueError(
+            f"{AdmissionReason.ANALYSIS_OUTSIDE_PANEL.value}: the evaluation window must lie "
+            "inside the evaluator spec range"
+        )
     count = len(instruments)
     error = panel_design_error(document, sessions, count)
     if error is not None:

@@ -176,10 +176,12 @@ def decode_daily_sessions(
 ) -> tuple[str, ...]:
     """The panel sessions a daily receipt lists: every session with a positive row count.
 
-    With ``start`` and ``end`` (the evaluator spec range) the list is clipped to that range and
-    must match what the evaluator will see there: a listed session with no rows, or a
-    ``missing_sessions`` entry, inside the range is refused (the evaluator treats every XNYS
-    session in range as a panel session). Weekend dates are refused anywhere.
+    With ``start`` and ``end`` (the evaluator spec range) the list is strict inside the range
+    and the tail is dropped after it: it runs from the receipt's first positive-count session
+    (training warm-up, purge gap and feature lookback precede ``start``) through ``end``
+    inclusive. A listed session with no rows, or a ``missing_sessions`` entry, inside
+    ``[start, end]`` is refused (the evaluator treats every XNYS session in range as a panel
+    session); such entries before ``start`` are tolerated. Weekend dates are refused anywhere.
     """
     request = daily_request(wire)
     counts = strict_object(wire.get("session_ticker_counts"), "receipt.session_ticker_counts")
@@ -194,6 +196,9 @@ def decode_daily_sessions(
     def in_range(value: str) -> bool:
         return not ranged or (low is not None and high is not None and low <= value <= high)
 
+    def kept(value: str) -> bool:
+        return not ranged or (high is not None and value <= high)
+
     sessions: list[str] = []
     for key, count in counts.items():
         _iso_date(key, "receipt.session_ticker_counts session")
@@ -204,7 +209,7 @@ def decode_daily_sessions(
             raise ValueError(
                 f"daily receipt lists session {key} with no rows inside the evaluation range"
             )
-        if count > 0 and in_range(key):
+        if count > 0 and kept(key):
             sessions.append(key)
     for key in missing:
         _weekday(key, "receipt.missing_sessions entry")
@@ -278,8 +283,9 @@ def panel_sessions_from_receipt_bytes(
 ) -> tuple[str, ...]:
     """Parse receipt bytes (wire JSON) and return its ordered panel sessions.
 
-    ``start``/``end`` (the evaluator spec range) clip and strictly check a daily receipt;
-    minute receipts are unchanged.
+    ``start``/``end`` (the evaluator spec range) check a daily receipt strictly inside the range
+    and drop its tail after ``end``; sessions before ``start`` are kept. Minute receipts are
+    unchanged.
     """
     wire = strict_object(json.loads(receipt_bytes.decode("utf-8")), "receipt")
     if is_daily_receipt_wire(wire):

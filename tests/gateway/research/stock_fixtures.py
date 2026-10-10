@@ -21,8 +21,19 @@ PANEL_START = "2024-01-02"
 PANEL_END = "2024-04-30"
 
 
-# NYSE full-day holidays inside the fixture panel (2024-01-02..2024-04-30).
-NYSE_HOLIDAYS = frozenset({"2024-01-15", "2024-02-19", "2024-03-29"})
+# NYSE full-day holidays inside the fixture panel (2024-01-02..2024-04-30) and the 2023
+# holidays that early-starting test receipts can span.
+NYSE_HOLIDAYS = frozenset(
+    {
+        "2023-09-04",
+        "2023-11-23",
+        "2023-12-25",
+        "2024-01-01",
+        "2024-01-15",
+        "2024-02-19",
+        "2024-03-29",
+    }
+)
 
 
 def _sessions(start: date, end: date) -> tuple[str, ...]:

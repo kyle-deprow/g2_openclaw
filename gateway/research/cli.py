@@ -598,6 +598,8 @@ def _parse_evaluator_bounds(
     path: Path,
     evaluation_spec_sha256: str,
     panel_sessions: tuple[str, ...],
+    *,
+    panel_start: str | None = None,
 ) -> EvaluatorBounds:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -677,7 +679,7 @@ def _parse_evaluator_bounds(
         ):
             raise ValueError("evaluator execution bounds are malformed")
         return EvaluatorBounds(
-            start,
+            start if panel_start is None else panel_start,
             end,
             tuple(instruments),
             evaluation_spec_sha256,
@@ -765,7 +767,8 @@ def _same_evaluator_bounds(left: EvaluatorBounds, right: EvaluatorBounds) -> boo
 def _spec_session_range(path: Path) -> tuple[str | None, str | None]:
     """The ``start_session``/``end_session`` of an evaluator spec; ``None`` when unreadable.
 
-    Unreadable or malformed specs are refused by ``_parse_evaluator_bounds`` right after.
+    The daily admission path refuses a ``None`` start itself (``_require_spec_start_session``);
+    ``_parse_evaluator_bounds`` only sees the start through the ``panel_start`` override there.
     """
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
@@ -773,6 +776,19 @@ def _spec_session_range(path: Path) -> tuple[str | None, str | None]:
     except (OSError, ValueError, KeyError, TypeError):
         return None, None
     return (start, end) if isinstance(start, str) and isinstance(end, str) else (None, None)
+
+
+def _require_spec_start_session(start: str | None, panel_sessions: tuple[str, ...]) -> None:
+    """Daily path: the spec start must be a trusted (positive-count, listed) panel session.
+
+    The ``panel_start`` override removes the old ``panel_sessions[0] == start_session`` check,
+    so a missing, non-session or pre-coverage start is refused here instead.
+    """
+    if start is None or start not in panel_sessions:
+        raise _AdmissionInputError(
+            "EVALUATION_SPEC_DIGEST_MISMATCH",
+            "evaluator spec start_session is not a trusted panel session",
+        )
 
 
 def _bound_input_bytes(binding: InputBinding | None, name: str) -> bytes:
@@ -844,15 +860,32 @@ def _admission_for_hypothesis(store: ResearchStore, hypothesis_id: str) -> Admis
         )
     if daily:
         # A daily panel carries post-range tail sessions so held lots keep marks; the admission
-        # panel is the spec's own range, checked against what the evaluator will see there.
+        # panel runs from the receipt's first session (training warm-up, purge gap and feature
+        # lookback precede the spec) through the spec end, checked strictly inside the spec range.
+        # The daily receipt view sets no panel_start/panel_end, so PANEL_BOUNDS_MISMATCH is inert.
         spec_start, spec_end = _spec_session_range(evaluation_path)
+        if spec_start is None or spec_end is None or spec_start > spec_end:
+            raise _AdmissionInputError(
+                "EVALUATION_SPEC_DIGEST_MISMATCH",
+                "evaluator spec start_session/end_session are missing or reversed",
+            )
         try:
             panel_sessions = _decode_daily_sessions(receipt_wire, start=spec_start, end=spec_end)
         except ValueError as exc:
             raise _AdmissionInputError("RECEIPT_REJECTED", str(exc)) from exc
+        _require_spec_start_session(spec_start, panel_sessions)
+        if hypothesis.evaluation.start < spec_start or hypothesis.evaluation.end > spec_end:
+            raise _AdmissionInputError(
+                AdmissionReason.ANALYSIS_OUTSIDE_PANEL.value,
+                "the evaluation window must lie inside the evaluator spec range",
+            )
+    panel_start = panel_sessions[0] if daily else None
     bounds = replace(
         _parse_evaluator_bounds(
-            evaluation_path, hypothesis_spec.evaluation_spec_sha256, panel_sessions
+            evaluation_path,
+            hypothesis_spec.evaluation_spec_sha256,
+            panel_sessions,
+            panel_start=panel_start,
         ),
         earnings_coverage=earnings_coverage,
     )
@@ -880,11 +913,22 @@ def _admission_for_hypothesis(store: ResearchStore, hypothesis_id: str) -> Admis
                 "EVALUATION_SPEC_DIGEST_MISMATCH",
                 f"evaluation spec {entry.spec_id} bytes differ from its declared digest",
             )
-        candidate = _parse_evaluator_bounds(entry_path, entry.sha256, panel_sessions)
+        candidate = _parse_evaluator_bounds(
+            entry_path, entry.sha256, panel_sessions, panel_start=panel_start
+        )
         if not candidate.long_only and not candidate.borrow_bps_annual > 0:
             raise _AdmissionInputError(
                 AdmissionReason.BORROW_COST_MISSING.value,
                 f"evaluation spec {entry.spec_id}: {BORROW_COST_MISSING_REASON}",
+            )
+        if daily:
+            # panel_start is overridden for daily receipts, so check the spec start directly.
+            entry_range = _spec_session_range(entry_path)
+            _require_spec_start_session(entry_range[0], panel_sessions)
+        if daily and entry_range != (spec_start, spec_end):
+            raise _AdmissionInputError(
+                "EVALUATION_SPEC_DIGEST_MISMATCH",
+                f"evaluation spec {entry.spec_id} changes a non-cost bound",
             )
         if not _same_evaluator_bounds(bounds, candidate):
             raise _AdmissionInputError(
