@@ -565,6 +565,53 @@ that we need it" → "proceed"; then "I've updated massive, proceed".
   projects' pytest workers (~33 GB); the user authorised terminating the
   spine_sense runs.
 
+## First stock hypothesis: two gate defects, a host reboot, three fixes (2026-10-09/10)
+
+- **Astra's warm-up power check** (H0001 preparation): MDE 7.47 bp on 8,079
+  projected hedged events (per-event SD 269.9 bp from the excluded 2018
+  warm-up). She refused to inflate a literature effect; operator intervention
+  #2 (`autoresearch-openai-20261002.Tdkdgb/stocks-H0001-power-brief.md`) set
+  `plausible_effect_bps` 10.0 as the minimum effect of interest (one base
+  round trip), Martineau 2021 / Christensen et al. 2026 as the null prior.
+- **Create refused** `PURGE_GAP_INSUFFICIENT: only 0 panel sessions` although the
+  receipt holds 11. Astra diagnosed the clip correctly and paused (event 17).
+  Cause: for daily receipts the create/admission panel was clipped to the
+  evaluator spec range, so training, purge gap and feature lookback before
+  `start_session` never counted. Fixed in g2_openclaw `3cdfe55` (P8): the daily
+  admission panel runs from the receipt's first session through `end_session`
+  (tail still excluded), with explicit checks replacing the old span invariant
+  (spec start must be a listed session, spec-set entries keep the range, the
+  evaluation window must lie inside the spec range at create and admission).
+- **Lost owner runs** (P6, `115ebbc`): after the 16:56 gateway restart the driver
+  polled a run the gateway no longer knew forever. The driver now records the
+  gateway InvocationID per wake, declares the newest unfinished wake lost on an
+  unknown-run reply or a changed invocation (after reading the native host
+  record: interrupted/aborted → lost, error → error, success → ok), salts the
+  next wake key once per lost run, supersedes older rows, pauses after three.
+  Verified live: on restart it declared the pre-reboot wake lost (events 18-19).
+- **Coverage filter** (quantipy `5988796`, P7): `quantipy research-data
+  coverage-filter` reproduces validate-inputs' three per-ticker rules from the
+  bound inputs alone (11 s, 2.5 GB with `--panel`); on the real inputs it keeps
+  every ticker Astra retained and 57 inert pre-2019 names she had dropped via
+  `tickers_without_coverage`. The charter's operational rule now points at it.
+- **Host reboot** 2026-10-09 18:02 CDT, down until 23:02 CDT: the owner unit is
+  disabled at boot (stayed dead), the gateway restarted with its default 8G/10G
+  cgroup (runtime 12G/14G raise re-applied; the committed drop-in still needs the
+  operator's guarded push), and the previous Claude session died. Astra's
+  `create-refusal.md` and `pause-receipt.json` were truncated to 0 bytes.
+- **Resume** 2026-10-10 04:5xZ: owner service started on P6+P8, campaign resumed
+  (`resume_seq` 2, event 20), operator intervention #3
+  (`stocks-H0001-resume-brief.md`) sent. Measured on a root copy and included
+  in the brief: `source: "derived"` features are parser-accepted but
+  admission-refused (capability is `{"panel"}`; declare bar features `panel`),
+  and `analysis.start` must leave the 61-session beta lookback inside the panel
+  (≥ 2017-03-31) while containing `training`; with those two edits her document
+  is admitted.
+- **Operator items:** guarded push for the gateway cgroup drop-in and the
+  autoresearch SKILL.md lost-run paragraph (P6); decide whether
+  research-owner.service should be enabled at boot; note the SKILL.md has no
+  feature-source guidance (candidate doc fix).
+
 ## Guardrails (unchanged, plus the 10-02 directive)
 
 OpenAI models only for the research loop. Use no Anthropic, Claude, ACP, or Opus
