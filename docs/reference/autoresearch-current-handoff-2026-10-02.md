@@ -612,10 +612,70 @@ that we need it" → "proceed"; then "I've updated massive, proceed".
   research-owner.service should be enabled at boot; note the SKILL.md has no
   feature-source guidance (candidate doc fix).
 
-## Guardrails (unchanged, plus the 10-02 directive)
+## Operator continuation (2026-10-11)
+
+Codex reviewed `.archive/HANDOFF-autoresearch-stocks-2026-10-11.md` at the user's
+request and verified H0001 FROZEN, H0001-A001 OPENED/admitted/unsubmitted, and the
+owner service inactive. The owner transcript confirms the prior child completed
+and its harness never executed containment; no active owner run was present.
+
+The linked Quantipy worktree was moved intact to
+`/home/dev/backups/H0001-A001-pre-clone-20261011.ssEtct/linked-checkout` using Git.
+The original A001 path now contains a self-contained `git clone --no-hardlinks`
+at frozen base `e73c1a335628d6d158632eb7481571c6196a2a7b`, with all six uncommitted
+candidate files copied byte-for-byte. `.git`, common directory and objects are
+inside that checkout; there are no alternates. A bubblewrap probe with only the
+hypothesis-checkout root writable successfully wrote a separate index, objects
+and an unreferenced commit without changing HEAD, the normal index or candidate.
+The backup remains registered for operator recovery; never dispatch from it.
+
+The reviewed source patch requires isolated clones, documents supported panel
+feature sources, and explicitly separates full pre-review synthetic validation
+from admitted, committed, post-PASS historical execution. It preserves the same
+attempt and mirrors the guidance in both runtime skills and the Claude mirror.
+Inspection also found that the push script and fixture still expected 8G/10G
+while commit `071f315` already specified 12G/14G. The patch aligns the guard and
+fixture with that existing approved configuration.
+
+Source repairs landed as `41ce6c5` (clone/runtime guidance and deployment memory
+guard alignment) and `974c8d2` (owned disposable readonly-copy cleanup). The first
+patch's 191 script-guarding cases passed across a 164-case interrupted run and a
+separate remaining-27 run. The final cleanup patch passed 42 focused tests with
+one skip, five relevant script integration tests, Ruff, formatting, mypy and the
+commit hooks. Native bounded read-only reviews returned READY.
+
+Guarded deployment initially exposed two additional operator-state issues: an
+unindexed zero-byte Codex rollout from the reboot caused parity warnings, and
+readonly immutable review copies prevented rollback cleanup. The empty rollout
+is preserved outside the active scan at
+`/home/dev/backups/codex-empty-rollout-20261011.IG6Ppv/`; no SQLite database was
+edited and the doctor policy was not relaxed. Cleanup now changes directory
+write/search bits only on owned disposable copies, not canonical review bundles
+or regular files. The retained failed transaction was rolled back successfully,
+then its disposable snapshots removed.
+
+The final guarded push succeeded with explicit
+`OPENCLAW_BIN=/home/dev/.local/bin/openclaw` (2026.9.2) and a PATH containing the
+repo `.venv/bin`; the default binary resolver otherwise selects an obsolete
+local installation. Both deployed runtime skills match source byte-for-byte.
+The gateway restarted healthy with Codex/OpenAI loaded and persistent 12G/14G
+memory caps. `research-owner.service` was started but remains disabled at boot.
+
+The operator brief is
+`.archive/stocks-H0001-checkout-continuation-2026-10-11.md`; it requires the full
+six-scenario contained synthetic harness and analysis, rather than a target plan.
+The CLI recorded operator intervention seq 38 for H0001-A001. Astra accepted the
+brief with run ID `stocks-H0001-clone-correction-20261011T2047Z`. Scientific
+implementation, native Sol review and canonical historical execution remain
+pending; infrastructure recovery is not scientific evidence.
+
+## Current guardrails
 
 OpenAI models only for the research loop. Use no Anthropic, Claude, ACP, or Opus
 route, and do not fall back to one. Historical Opus evidence stays readable and
-unchanged. No live trading; no MemPalace writes; no input redownloads; five-session
-horizon; ETF-only; no cap beyond 15; never hand-edit the research DB; workers never
-commit, deploy, or restart; serialize pytest per checkout.
+unchanged. No live trading; no MemPalace writes; no input redownloads; never
+hand-edit the research DB; serialize pytest per checkout. The active stock
+campaign charter governs its universe, hedged books, horizon and stop condition;
+the closed ETF campaign's five-session/ETF-only bounds do not govern research-v4.
+Native implementers commit only inside their attempt clones. Deployment,
+shared-infrastructure repairs and service lifecycle remain operator-owned.
