@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -173,6 +174,73 @@ def test_artifact_rollback_restores_in_reverse_order(
     assert _journal_payload(recovery_dir)["lifecycle"] == transactions.ROLLED_BACK
 
 
+def test_artifact_rollback_cleans_readonly_prior_tree_without_changing_restored_modes(
+    tmp_path: Path,
+) -> None:
+    recovery_dir = tmp_path / "artifact-recovery"
+    recovery_dir.mkdir()
+    destination = tmp_path / "workspace"
+    destination.mkdir()
+    review_bundle = destination / "review-bundle"
+    review_bundle.mkdir()
+    review_file = review_bundle / "review.json"
+    review_file.write_text("original\n", encoding="utf-8")
+    os.chmod(review_bundle, 0o555)
+    os.chmod(review_file, 0o444)
+
+    transactions.begin_artifact_transaction(str(recovery_dir))
+    transactions.snapshot_artifact_path(str(recovery_dir), str(destination))
+
+    published = tmp_path / "published"
+    destination.rename(published)
+    destination.mkdir()
+    published_bundle = destination / "review-bundle"
+    published_bundle.mkdir()
+    published_file = published_bundle / "review.json"
+    published_file.write_text("published\n", encoding="utf-8")
+    os.chmod(published_bundle, 0o555)
+    os.chmod(published_file, 0o444)
+
+    assert (
+        transactions.rollback_artifact_transaction(
+            str(recovery_dir), str(tmp_path / "systemd"), "gateway.service"
+        )
+        is False
+    )
+
+    review_file = destination / "review-bundle" / "review.json"
+    assert review_file.read_text(encoding="utf-8") == "original\n"
+    assert stat.S_IMODE(review_file.stat().st_mode) == 0o444
+    assert stat.S_IMODE(review_file.parent.stat().st_mode) == 0o555
+    assert not (recovery_dir / "prior.restore.0").exists()
+
+
+def test_committed_cleanup_removes_readonly_snapshot_and_preserves_source(
+    tmp_path: Path,
+) -> None:
+    recovery_dir = tmp_path / "artifact-recovery"
+    recovery_dir.mkdir()
+    source = tmp_path / "workspace"
+    source.mkdir()
+    review_bundle = source / "review-bundle"
+    review_bundle.mkdir()
+    review_file = review_bundle / "review.json"
+    review_file.write_text("original\n", encoding="utf-8")
+    os.chmod(review_bundle, 0o555)
+    os.chmod(review_file, 0o444)
+
+    transactions.begin_artifact_transaction(str(recovery_dir))
+    transactions.snapshot_artifact_path(str(recovery_dir), str(source))
+    transactions.finalize_artifact_transaction(str(recovery_dir))
+
+    transactions.cleanup_transaction(str(recovery_dir), transactions.ARTIFACT_KIND, "committed")
+
+    assert not recovery_dir.exists()
+    assert review_file.read_text(encoding="utf-8") == "original\n"
+    assert stat.S_IMODE(review_bundle.stat().st_mode) == 0o555
+    assert stat.S_IMODE(review_file.stat().st_mode) == 0o444
+
+
 def test_restore_local_config_uses_noninteractive_mv_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -211,7 +279,7 @@ def test_cleanup_transaction_reports_phase_specific_failure(
 ) -> None:
     recovery_dir = tmp_path / f"{kind}-{phase}"
     recovery_dir.mkdir()
-    monkeypatch.setattr(transactions, "guarded_rm_rf", lambda path, context: 1)
+    monkeypatch.setattr(transactions, "guarded_rm_owned_disposable_tree", lambda path, context: 1)
 
     with pytest.raises(transactions.SilentFailure):
         transactions.cleanup_transaction(str(recovery_dir), kind, phase)

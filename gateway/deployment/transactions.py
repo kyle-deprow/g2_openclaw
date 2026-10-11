@@ -19,6 +19,7 @@ from .guarded_fs import (
     guarded_mv_replace,
     guarded_mv_replace_preserving_final_symlink_topology,
     guarded_rm_f,
+    guarded_rm_owned_disposable_tree,
     guarded_rm_rf,
     guarded_rmdir,
     path_exists_or_symlink,
@@ -566,7 +567,7 @@ def cleanup_transaction(backup_dir: str, kind: str, phase: str) -> None:
     )
     context = base_context if phase == "committed" else f"{base_context} after rollback"
     try:
-        status = guarded_rm_rf(
+        status = guarded_rm_owned_disposable_tree(
             backup_dir,
             context,
         )
@@ -628,7 +629,7 @@ def restore_local_config(backup: str, local_config: str, push_home: str) -> None
             file=sys.stderr,
         )
         try:
-            cleanup_status = guarded_rm_rf(
+            cleanup_status = guarded_rm_owned_disposable_tree(
                 restore_stage_dir,
                 "removing local OpenClaw config rollback staging directory "
                 f"{restore_stage_dir} after stage failure",

@@ -194,6 +194,140 @@ def guarded_rm_rf(destination_path: str, context: str) -> int:
     return _run(["rm", "-rf", "--", destination_path])
 
 
+def _disposable_tree_directories(destination_path: str, context: str) -> list[str]:
+    """Collect owned directory nodes without following nested symlinks."""
+
+    try:
+        root_stat = os.lstat(destination_path)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        raise RuntimeError(
+            f"ERROR: Failed to inspect disposable cleanup path while {context}: "
+            f"{destination_path}\n"
+            "       Refusing before mutation."
+        ) from exc
+    if root_stat.st_uid != os.geteuid():
+        raise RuntimeError(
+            f"ERROR: Disposable cleanup root is not owned by the effective user while "
+            f"{context}: {destination_path}\n"
+            "       Refusing before mutation."
+        )
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return []
+
+    directories: list[str] = []
+    pending = [destination_path]
+    effective_uid = os.geteuid()
+    while pending:
+        directory = pending.pop()
+        try:
+            directory_stat = os.lstat(directory)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RuntimeError(
+                f"ERROR: Failed to inspect disposable cleanup path while {context}: "
+                f"{directory}\n"
+                "       Refusing before mutation."
+            ) from exc
+        if stat.S_ISLNK(directory_stat.st_mode):
+            continue
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            continue
+        if directory_stat.st_uid != effective_uid:
+            raise RuntimeError(
+                f"ERROR: Disposable cleanup directory is not owned by the effective user "
+                f"while {context}: {directory}\n"
+                "       Refusing before mutation."
+            )
+        directories.append(directory)
+        try:
+            entries = list(os.scandir(directory))
+        except OSError as exc:
+            raise RuntimeError(
+                f"ERROR: Failed to inspect disposable cleanup directory while {context}: "
+                f"{directory}\n"
+                "       Refusing before mutation."
+            ) from exc
+        for entry in entries:
+            try:
+                entry_stat = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise RuntimeError(
+                    f"ERROR: Failed to inspect disposable cleanup path while {context}: "
+                    f"{entry.path}\n"
+                    "       Refusing before mutation."
+                ) from exc
+            if stat.S_ISDIR(entry_stat.st_mode):
+                pending.append(entry.path)
+    return directories
+
+
+def guarded_rm_owned_disposable_tree(destination_path: str, context: str) -> int:
+    """Remove an owned transaction/staging tree after making its dirs deletable.
+
+    This deliberately differs from :func:`guarded_rm_rf`: it is only for
+    disposable recovery copies. Regular files retain their modes, nested
+    symlink targets are never inspected or chmodded, and every directory in
+    the disposable tree must be owned by the effective user before mutation.
+    """
+
+    guard_destination_path_chain(destination_path, context)
+    directories = _disposable_tree_directories(destination_path, context)
+    for directory in directories:
+        try:
+            directory_stat = os.lstat(directory)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RuntimeError(
+                f"ERROR: Failed to inspect disposable cleanup path while {context}: "
+                f"{directory}\n"
+                "       Refusing before mutation."
+            ) from exc
+        if stat.S_ISLNK(directory_stat.st_mode):
+            continue
+        if not stat.S_ISDIR(directory_stat.st_mode):
+            continue
+        if directory_stat.st_uid != os.geteuid():
+            raise RuntimeError(
+                f"ERROR: Disposable cleanup directory is not owned by the effective user "
+                f"while {context}: {directory}\n"
+                "       Refusing before mutation."
+            )
+        mode = stat.S_IMODE(directory_stat.st_mode)
+        deletable_mode = mode | stat.S_IWUSR | stat.S_IXUSR
+        if deletable_mode == mode:
+            continue
+        try:
+            os.chmod(directory, deletable_mode, follow_symlinks=False)
+        except OSError:
+            print(
+                f"ERROR: Failed to make disposable cleanup directory deletable while "
+                f"{context}: {directory}",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            refreshed_stat = os.lstat(directory)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise RuntimeError(
+                f"ERROR: Failed to inspect disposable cleanup path while {context}: "
+                f"{directory}\n"
+                "       Refusing before mutation."
+            ) from exc
+        if stat.S_ISLNK(refreshed_stat.st_mode) or not stat.S_ISDIR(refreshed_stat.st_mode):
+            raise RuntimeError(
+                f"ERROR: Disposable cleanup directory changed topology while {context}: "
+                f"{directory}\n"
+                "       Refusing before mutation."
+            )
+    return _run(["rm", "-rf", "--", destination_path])
+
+
 def guarded_rm_f(destination_path: str, context: str) -> int:
     guard_destination_path_chain(destination_path, context)
     return _run(["rm", "-f", "--", destination_path])
@@ -279,7 +413,9 @@ def restore_path_topology_from_backup(
     prior_staged = False
     try:
         try:
-            status = guarded_rm_rf(restore_stage, f"clearing staged restore path {restore_stage}")
+            status = guarded_rm_owned_disposable_tree(
+                restore_stage, f"clearing staged restore path {restore_stage}"
+            )
         except RuntimeError as exc:
             print(str(exc), file=sys.stderr)
             status = 1
@@ -327,7 +463,7 @@ def restore_path_topology_from_backup(
         # because GNU mv -T will not replace a directory in place.
         if os.path.isdir(destination_path) and not os.path.islink(destination_path):
             try:
-                status = guarded_rm_rf(
+                status = guarded_rm_owned_disposable_tree(
                     prior_stage,
                     f"clearing prior staged path {prior_stage} during rollback",
                 )
@@ -397,7 +533,7 @@ def restore_path_topology_from_backup(
             )
         if prior_staged:
             try:
-                status = guarded_rm_rf(
+                status = guarded_rm_owned_disposable_tree(
                     prior_stage,
                     f"removing prior staged path {prior_stage} after rollback replacement",
                 )
@@ -476,7 +612,13 @@ def _build_parser() -> argparse.ArgumentParser:
     find_parser.add_argument("context")
     find_parser.add_argument("find_arguments", nargs=argparse.REMAINDER)
 
-    for name in ("guarded-rm-rf", "guarded-rm-f", "guarded-rm", "guarded-rmdir"):
+    for name in (
+        "guarded-rm-rf",
+        "guarded-rm-owned-disposable-tree",
+        "guarded-rm-f",
+        "guarded-rm",
+        "guarded-rmdir",
+    ):
         add_path_context(name)
 
     for name in ("guarded-mv-replace", "guarded-mv-replace-preserving-final-symlink-topology"):
@@ -532,6 +674,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if command == "guarded-rm-rf":
             return guarded_rm_rf(args.path, args.context)
+        if command == "guarded-rm-owned-disposable-tree":
+            return guarded_rm_owned_disposable_tree(args.path, args.context)
         if command == "guarded-rm-f":
             return guarded_rm_f(args.path, args.context)
         if command == "guarded-rm":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ from gateway.deployment.guarded_fs import (
     guard_destination_path_chain,
     guard_no_hardlinked_regular_file,
     guarded_copy_path_topology_preserving_final_symlink_topology,
+    guarded_rm_owned_disposable_tree,
     path_owned_by_effective_user,
 )
 
@@ -178,6 +180,59 @@ def test_hardlink_guard_silently_proceeds_when_nlink_read_fails(
 
     guard_no_hardlinked_regular_file(str(path), "checking")
     assert call_count == 2
+
+
+def test_owned_disposable_tree_cleanup_removes_readonly_directories_only(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    review_bundle = source / "review-bundle"
+    review_bundle.mkdir()
+    source_file = review_bundle / "review.json"
+    source_file.write_text("source\n", encoding="utf-8")
+    os.chmod(review_bundle, 0o555)
+    os.chmod(source_file, 0o444)
+
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    copied_bundle = staged / "review-bundle"
+    copied_bundle.mkdir()
+    copied_file = copied_bundle / "review.json"
+    copied_file.write_text("source\n", encoding="utf-8")
+    os.chmod(copied_bundle, 0o555)
+    os.chmod(copied_file, 0o444)
+
+    assert guarded_rm_owned_disposable_tree(str(staged), "removing staged tree") == 0
+
+    assert not staged.exists()
+    assert source_file.read_text(encoding="utf-8") == "source\n"
+    assert stat.S_IMODE(review_bundle.stat().st_mode) == 0o555
+    assert stat.S_IMODE(source_file.stat().st_mode) == 0o444
+
+
+def test_owned_disposable_tree_cleanup_removes_nested_symlink_without_following_it(
+    tmp_path: Path,
+) -> None:
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    nested = staged / "nested"
+    nested.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    external_file = external / "review.json"
+    external_file.write_text("external\n", encoding="utf-8")
+    os.chmod(external, 0o555)
+    os.chmod(external_file, 0o444)
+    nested_link = nested / "external-link"
+    nested_link.symlink_to(external, target_is_directory=True)
+
+    assert guarded_rm_owned_disposable_tree(str(staged), "removing staged tree") == 0
+
+    assert not staged.exists()
+    assert external_file.read_text(encoding="utf-8") == "external\n"
+    assert stat.S_IMODE(external.stat().st_mode) == 0o555
+    assert stat.S_IMODE(external_file.stat().st_mode) == 0o444
 
 
 @pytest.mark.skipif(os.geteuid() != 0, reason="wrong-owner test requires root to chown safely")
