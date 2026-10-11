@@ -21,6 +21,21 @@ available.
 - Use maximum three attempts; Astra explicitly chooses FINISH, ABANDON, or PAUSE.
 - Every attempt outcome, refusal, and terminal state returns to Astra.
 
+## Attempt checkout contract
+
+Each attempt checkout is a self-contained clone under
+`ROOT/hypothesis-worktrees`, created with `git clone --no-hardlinks` and checked
+out at the frozen `base_commit`. Never use `--shared`, `--reference`, or
+`git worktree add`. Keep the persisted `worktree_path` naming unchanged. Before
+`attempt-open`, verify a newly created checkout has `HEAD == base_commit`; before
+each native implementer dispatch, verify `HEAD` is the expected committed
+attempt checkpoint. In both checks, verify the `.git` directory, resolved
+`git-common-dir`, and `objects` directory are inside the checkout with no
+alternates or shared-object paths configured. An existing OPENED, unsubmitted
+attempt is repaired by the operator in its persisted checkout without a new
+attempt or state rewrite; the owner must not autonomously replace the filesystem
+or widen the sandbox.
+
 ## First campaign: conditional short-term reversal
 
 - The requested panel window is 2021-10-01 through 2026-07-31 inclusive (the
@@ -79,6 +94,12 @@ The immutable outer `HypothesisSpec` fields are `hypothesis_id`, `title`,
 `lookback_sessions`; bounds include dates, minimum evidence, compute limits,
 and relative deliverable paths.
 
+For every feature derived from panel bars (including beta, reaction/residual,
+and volatility features), declare `source: panel` and an explicit causal
+`as_of_rule` identifying the bars and decision cutoff that are known. A
+parser-accepted `source: derived` value is not an admission-supported
+capability and does not supply capability evidence.
+
 ## Admission, status, and readiness
 
 - Admission consumes typed caller evidence: immutable spec/panel/receipt/
@@ -109,6 +130,10 @@ and relative deliverable paths.
   owner wake, and read-only main controls. Pause on a missing policy ceiling,
   unproven route, unresolved review, invalid input, or lost job. Do not clear a
   readiness pause autonomously. Invalid inputs remain refusals.
+- A wake reporting that the previous turn was interrupted by a gateway restart
+  means the owner run is lost. Resume only from durable notes and recorded
+  state; never infer completion. Three lost runs in one resume pause the
+  campaign for the operator.
 - Receipt artifact digests bind the exact bytes but do not attest a provider;
   native readiness reads model, effort, and role from the official rollout,
   while requested `fast` and observed `unknown` service tiers stay distinct.
@@ -141,6 +166,12 @@ and relative deliverable paths.
   exact result/error and durable checkpoint; do not claim an owned wait/autowake
   or fabricate a callback. That error is not permission to duplicate or
   re-run the completed stage, restart it, or switch route/provider.
+- For a bounded correction, bind dispatch to the persisted or explicitly
+  declared checkpoint commit and any explicitly retained uncommitted
+  implementation files for that OPENED attempt. Bind the resulting committed
+  checkpoint into submission, review, and historical run evidence;
+  submission/preflight and historical execution require that clean committed
+  checkout.
 - An implementation completion callback may verify and submit the implementation
   result, then must STOP. It must not reserve or spawn review from the original
   OPENED callback. Only the next canonical IMPLEMENTED wake supplies `WAKE_KEY`
@@ -148,11 +179,12 @@ and relative deliverable paths.
   must likewise wait for its next IMPLEMENTED wake. This implementation callback
   is separate from the later review completion callback, which only reconciles
   and collects the already-spawned child and never dispatches again.
-- Run only an admitted, committed worktree after review PASS. The runner does
-  no-repair/no-retry, input substitution, evaluator substitution, or invented
-  result. A failed or lost job remains terminal evidence for Astra. Completion
-  of the final allocated attempt remains allowed even when new admission is
-  exhausted.
+- The historical runner may execute only an admitted, clean committed checkout
+  after a reviewed PASS for the exact attempt, committed checkpoint, and RunPlan;
+  do not run historical data before that PASS. It does no-repair/no-retry,
+  input substitution, evaluator substitution, or invented result. A failed or
+  lost job remains terminal evidence for Astra. Completion of the final
+  allocated attempt remains allowed even when new admission is exhausted.
 
 Native review collection reserves with
 `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY --owner-key OWNER_KEY
@@ -235,7 +267,8 @@ target path or another scenario's stage.
 
 - Every targets/evaluate/analysis stage built through `gateway.research.containment.stage_plan` must pass `provenance_dir=` and receive deployed `PYTHONPATH=/provenance:/snapshot/src[:/work]`.
 - The sandbox writes `research-containment-provenance-v1` records to `/stage/provenance/`.
-- The implementer synthetic harness retains those record dirs inside the committed worktree and submits a `research-provenance-evidence-v1` index via `implementation-submit --provenance-evidence`.
+- The implementer synthetic validation runs before `implementation-submit` and before immutable review. Full-scenario execution is the implementer acceptance contract: it must execute every scenario in the proposed/review-candidate `RunPlan` sequentially, with each scenario's contained targets and evaluator stages, then run one declared aggregate analysis stage after all scenario artifacts are complete, through the deployed builders. The current validator checks stage categories and module identity, not mechanical every-scenario completeness; do not claim CLI enforcement. It retains provenance records for every stage inside the committed worktree and submits a `research-provenance-evidence-v1` index via `implementation-submit --provenance-evidence`.
+- The retained provenance index must cover every executed scenario and stage. A target-plan-only check or an unconditional `EVIDENCE_BLOCKED` result is not a full harness. Synthetic proof is contract evidence only: it is not historical-data evidence, installed readiness, or alpha.
 - Submission is refused when a stage lacks records, `quantipy` resolves outside `/snapshot/src`, or a `/work` module differs from the tested commit.
 - The historical worker applies the same verification and fails the run with `provenance_invalid`.
 - Evaluator and analysis stages run `python -P -s` and are verified for those interpreter flags, while target entrypoints are verified by module origin and hashes rather than interpreter flags.

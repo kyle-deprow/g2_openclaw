@@ -18,6 +18,17 @@ or proof that a current-price ETF feed is installed.
 - Rule: hypothesis equals iteration; each attempt is code → review → run.
 - Use maximum three attempts; Astra explicitly chooses FINISH, ABANDON, or PAUSE.
 - Every attempt outcome, refusal, and terminal state returns to Astra.
+- Each attempt checkout is a self-contained `git clone --no-hardlinks` under
+  `ROOT/hypothesis-worktrees`, checked out at frozen `base_commit`; never use
+  `--shared`, `--reference`, or `git worktree add`. Keep persisted
+  `worktree_path` naming unchanged. Before `attempt-open`, verify a new
+  checkout's `HEAD == base_commit`; before native implementer dispatch, verify
+  `HEAD` is the expected committed attempt checkpoint. In both checks, `.git`,
+  `git-common-dir`, and `objects` must remain inside the checkout with no
+  alternates/shared objects. An existing OPENED, unsubmitted attempt is
+  repaired by the operator in its persisted checkout without a new attempt or
+  state rewrite; the owner must not autonomously replace the filesystem or
+  widen the sandbox.
 - Reserve review evidence before the one native Sol review; the evidence and
   bundle are immutable.
 - Reconcile the official child run and bind its identity, verdict, mode, attempt,
@@ -71,6 +82,10 @@ or proof that a current-price ETF feed is installed.
 - Pause on a missing policy ceiling, unproven route, unresolved review, invalid
   inputs, or lost job. Do not clear a readiness pause autonomously. Invalid
   inputs remain refusals.
+- A wake reporting that the previous turn was interrupted by a gateway restart
+  means the owner run is lost. Resume only from durable notes and recorded
+  state; never infer completion. Three lost runs in one resume pause the
+  campaign for the operator.
 - The capability is price-panel-only capability within ETF scope.
 - Mandatory: stocks are refused unless a hypothesis-bound EDGAR rule-D earnings
   snapshot and membership file are present; results stay `exploratory_snapshot`
@@ -88,6 +103,10 @@ or proof that a current-price ETF feed is installed.
 - Use trusted panel sessions, immutable receipts, the exposure ledger, and
   evaluator bounds; unknown earnings fail closed.
 - Make no alpha claim from smoke or synthetic data.
+- Features derived from panel bars (including beta, reaction/residual, and
+  volatility) declare `source: panel` with an explicit causal `as_of_rule`.
+  Parser-accepted `source: derived` is not an admission-supported capability
+  and does not supply capability evidence.
 
 ## Reversal campaign bounds
 
@@ -185,8 +204,10 @@ An exact cancel is at most once, with unknown correlation left pending and
 paused. Never retype a verdict, respawn after an unknown result, or launch
 without operator policy and proven route. An unknown native spawn
 acknowledgement or outcome remains pending and never authorizes repeat dispatch.
-The runner runs admitted committed work
-only, with no-repair/no-retry, substitution, or invented result.
+The historical runner may execute only an admitted, clean committed checkout
+after a reviewed PASS for the exact attempt, committed checkpoint, and RunPlan;
+do not run historical data before that PASS. It uses no-repair/no-retry,
+substitution, or invented result.
 
 - Completion ownership is per owner turn: a completion-required coding or runner
   stage spawns a fresh configured native child bound to the same hypothesis,
@@ -199,6 +220,12 @@ only, with no-repair/no-retry, substitution, or invented result.
   durable checkpoint; no owned pending completion is not an owned wait/autowake,
   and do not fabricate a callback. That error is not permission to duplicate or
   re-run the completed stage, restart it, or switch route/provider.
+- For a bounded correction, bind dispatch to the persisted or explicitly
+  declared checkpoint commit and any explicitly retained uncommitted
+  implementation files for that OPENED attempt. Bind the resulting committed
+  checkpoint into submission, review, and historical run evidence;
+  submission/preflight and historical execution require that clean committed
+  checkout.
 - An implementation completion callback may verify and submit the implementation
   result, then must STOP. It must not reserve or spawn review from the original
   OPENED callback. Only the next canonical IMPLEMENTED wake supplies `WAKE_KEY`
@@ -208,13 +235,26 @@ only, with no-repair/no-retry, substitution, or invented result.
   and collects the already-spawned child and never dispatches again.
 
 Synthetic-versus-installed proof boundary: smoke or synthetic data does not
-prove installed readiness. Make no alpha claim from smoke or synthetic data.
+prove installed readiness. The implementer synthetic validation runs before
+`implementation-submit` and before immutable review. Full-scenario execution is
+the implementer acceptance contract: it must execute every scenario in the
+proposed/review-candidate `RunPlan` sequentially, with each scenario's
+contained targets and evaluator stages, then run one declared aggregate
+analysis stage after all scenario artifacts are complete, through the deployed
+builders. The
+current validator checks stage categories and module identity, not mechanical
+every-scenario completeness; do not claim CLI enforcement. It retains
+provenance records for every stage and submits a
+`research-provenance-evidence-v1` index. The retained provenance index must
+cover every executed scenario and stage. Target-plan-only checks or unconditional
+`EVIDENCE_BLOCKED` are not a full harness. Make no alpha claim from synthetic
+proof.
 
 ## Containment provenance
 
 - Every targets/evaluate/analysis stage built through `gateway.research.containment.stage_plan` must pass `provenance_dir=` and receive deployed `PYTHONPATH=/provenance:/snapshot/src[:/work]`.
 - The sandbox writes `research-containment-provenance-v1` records to `/stage/provenance/`.
-- The implementer synthetic harness retains those record dirs inside the committed worktree and submits a `research-provenance-evidence-v1` index via `implementation-submit --provenance-evidence`.
+- The implementer synthetic harness retains those record dirs inside the committed worktree and submits the `research-provenance-evidence-v1` index via `implementation-submit --provenance-evidence`; the retained provenance index must cover every executed scenario and stage.
 - Submission is refused when a stage lacks records, `quantipy` resolves outside `/snapshot/src`, or a `/work` module differs from the tested commit.
 - The historical worker applies the same verification and fails the run with `provenance_invalid`.
 - Evaluator and analysis stages run `python -P -s` and are verified for those interpreter flags, while target entrypoints are verified by module origin and hashes rather than interpreter flags.

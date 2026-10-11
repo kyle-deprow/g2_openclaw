@@ -25,6 +25,21 @@ at most three attempts. On exhaustion Astra explicitly chooses FINISH, ABANDON,
 or PAUSE; a final allocated attempt may complete evidence collection and its
 decision. Every refusal, attempt outcome, and terminal state returns to Astra.
 
+## Attempt checkout contract
+
+Each attempt checkout is a self-contained clone under
+`ROOT/hypothesis-worktrees`, created with `git clone --no-hardlinks` and checked
+out at the frozen `base_commit`. Never use `--shared`, `--reference`, or
+`git worktree add`. Keep the persisted `worktree_path` naming unchanged. Before
+`attempt-open`, verify a newly created checkout has `HEAD == base_commit`; before
+each native implementer dispatch, verify `HEAD` is the expected committed
+attempt checkpoint. In both checks, verify the `.git` directory, resolved
+`git-common-dir`, and `objects` directory are inside the checkout with no
+alternates or shared-object paths configured. An existing OPENED, unsubmitted
+attempt is repaired by the operator in its persisted checkout without a new
+attempt or state rewrite; the owner must not autonomously replace the filesystem
+or widen the sandbox.
+
 ## Campaign capability boundary
 
 The first real-data proposal is conditional short-term reversal: an unusually
@@ -118,6 +133,12 @@ DRAFT whose requirements are infeasible within driver bounds (or whose spec
 cannot be repaired) is abandoned with `hypothesis-decide HYPOTHESIS_ID
 --decision ABANDONED --reason ...`; only ABANDONED is allowed from DRAFT.
 
+For every feature derived from panel bars (including beta, reaction/residual,
+and volatility features), declare `source: panel` and an explicit causal
+`as_of_rule` identifying the bars and decision cutoff that are known. A
+parser-accepted `source: derived` value is not an admission-supported
+capability and does not supply capability evidence.
+
 Read existing research status/control surfaces and durable receipts. Do not
 invent command names, flags, routes, state fields, or acknowledgements. Admission
 consumes immutable hypothesis/spec/panel/receipt/evaluator digests, trusted
@@ -187,6 +208,12 @@ and durable checkpoint; no owned pending completion is not an owned wait/autowak
 and do not fabricate a callback. That error is not permission to duplicate or
 re-run the completed stage, restart it, or switch route/provider.
 
+For a bounded correction, bind dispatch to the persisted or explicitly declared
+checkpoint commit and any explicitly retained uncommitted implementation files
+for that OPENED attempt. Bind the resulting committed checkpoint into
+submission, review, and historical run evidence; submission/preflight and
+historical execution require that clean committed checkout.
+
 An implementation completion callback may verify and submit the implementation
 result, then must STOP. It must not reserve or spawn review from the original
 OPENED callback. Only the next canonical IMPLEMENTED wake supplies `WAKE_KEY`
@@ -195,10 +222,13 @@ must likewise wait for its next IMPLEMENTED wake. This implementation callback
 is separate from the later review completion callback, which only reconciles
 and collects the already-spawned child and never dispatches again.
 
-Run only an admitted committed worktree after review PASS. The runner performs
-no repair, retry, substitution, evaluator substitution, or invented result. A
-failed or lost job is terminal evidence for Astra. Completion of the last
-allocated attempt remains allowed even when a new admission would be exhausted.
+The historical runner may execute only an admitted, clean committed checkout
+after a reviewed PASS for the exact attempt, committed checkpoint, and RunPlan;
+do not run historical data before that PASS. It performs no repair, retry,
+substitution, evaluator substitution, or invented result. A failed or lost job
+is terminal evidence for Astra.
+Completion of the last allocated attempt remains allowed even when a new
+admission would be exhausted.
 
 Before a fresh hypothesis is frozen, Astra must bind an immutable
 `EvaluationSpecSet` containing every evaluator file used by the reviewed
@@ -217,7 +247,8 @@ target path or another scenario's stage.
 
 - Every targets/evaluate/analysis stage built through `gateway.research.containment.stage_plan` must pass `provenance_dir=` and receive deployed `PYTHONPATH=/provenance:/snapshot/src[:/work]`.
 - The sandbox writes `research-containment-provenance-v1` records to `/stage/provenance/`.
-- The implementer synthetic harness retains those record dirs inside the committed worktree and submits a `research-provenance-evidence-v1` index via `implementation-submit --provenance-evidence`.
+- The implementer synthetic validation runs before `implementation-submit` and before immutable review. Full-scenario execution is the implementer acceptance contract: it must execute every scenario in the proposed/review-candidate `RunPlan` sequentially, with each scenario's contained targets and evaluator stages, then run one declared aggregate analysis stage after all scenario artifacts are complete, through the deployed builders. The current validator checks stage categories and module identity, not mechanical every-scenario completeness; do not claim CLI enforcement. It retains provenance records for every stage inside the committed worktree and submits a `research-provenance-evidence-v1` index via `implementation-submit --provenance-evidence`.
+- The retained provenance index must cover every executed scenario and stage. A target-plan-only check or an unconditional `EVIDENCE_BLOCKED` result is not a full harness. Synthetic proof is contract evidence only: it is not historical-data evidence, installed readiness, or alpha.
 - Submission is refused when a stage lacks records, `quantipy` resolves outside `/snapshot/src`, or a `/work` module differs from the tested commit.
 - The historical worker applies the same verification and fails the run with `provenance_invalid`.
 - Evaluator and analysis stages run `python -P -s` and are verified for those interpreter flags, while target entrypoints are verified by module origin and hashes rather than interpreter flags.

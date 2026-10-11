@@ -66,8 +66,8 @@ EXPECTED_RUNTIME_CAP_LINES = [
 EXPECTED_RUNTIME_CAP_TEXT = "\n".join(EXPECTED_RUNTIME_CAP_LINES) + "\n"
 EXPECTED_NATIVE_CRASH_HARDENING_LINES = [
     "[Service]",
-    "MemoryHigh=8G",
-    "MemoryMax=10G",
+    "MemoryHigh=12G",
+    "MemoryMax=14G",
     "OOMPolicy=kill",
     (
         "RestartPreventExitStatus=SIGABRT SIGBUS SIGFPE SIGILL SIGQUIT SIGSEGV "
