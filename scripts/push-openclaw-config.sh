@@ -74,11 +74,13 @@ QUANTIPY_API_UNIT_TEMPLATE="${REPO_ROOT}/gateway/openclaw_config/quantipy-api.se
 QUANTIPY_API_SERVICE_NAME="quantipy-api.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-runtime-caps.conf"
 NATIVE_CRASH_HARDENING_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-native-crash-hardening.conf"
+CLAUDE_CONFIG_DROPIN_SRC="${REPO_ROOT}/gateway/openclaw_config/openclaw-gateway-claude-config.conf"
 GATEWAY_SERVICE_NAME="openclaw-gateway.service"
 HEALTHCHECK_TIMER_NAME="openclaw-gateway-healthcheck.timer"
 HEALTHCHECK_SERVICE_NAME="openclaw-gateway-healthcheck.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_NAME="10-quantipy-runtime-caps.conf"
 NATIVE_CRASH_HARDENING_DROPIN_NAME="30-openclaw-native-crash-hardening.conf"
+CLAUDE_CONFIG_DROPIN_NAME="40-openclaw-claude-config.conf"
 STALE_AZURE_PRELOAD_PATTERN="azure-api-version-preload.cjs"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 RESEARCH_OWNER_UNIT_DST="${SYSTEMD_USER_DIR}/${RESEARCH_OWNER_SERVICE_NAME}"
@@ -86,6 +88,7 @@ QUANTIPY_API_UNIT_DST="${SYSTEMD_USER_DIR}/quantipy-api.service"
 GATEWAY_RUNTIME_CAPS_DROPIN_DIR="${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}.d"
 GATEWAY_RUNTIME_CAPS_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${GATEWAY_RUNTIME_CAPS_DROPIN_NAME}"
 NATIVE_CRASH_HARDENING_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${NATIVE_CRASH_HARDENING_DROPIN_NAME}"
+CLAUDE_CONFIG_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/${CLAUDE_CONFIG_DROPIN_NAME}"
 OBSOLETE_CODEX_RUNTIME_DROPIN_DST="${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/20-openclaw-codex-runtime.conf"
 PYTHON_BIN="${REPO_ROOT}/.venv/bin/python"
 
@@ -194,9 +197,12 @@ NATIVE_CRASH_HARDENING_LINES=(
   "OOMPolicy=kill"
   "RestartPreventExitStatus=SIGABRT SIGBUS SIGFPE SIGILL SIGQUIT SIGSEGV SIGSYS SIGTRAP SIGXCPU SIGXFSZ"
 )
-check_managed_agent_codex_auth_readiness() {
+# Profile-aware: OpenAI/Codex OAuth under the codex profile, Claude Code
+# version/auth readiness under the claude profile.
+check_agent_auth_readiness() {
   PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.auth_readiness check \
+    --profile "${PROFILE}" \
     -- "${OPENCLAW_PUSH_HOME}" "${REPO_CONFIG}"
 }
 
@@ -668,6 +674,18 @@ validate_native_crash_hardening_dropin_file() {
   fi
 }
 
+validate_claude_config_dropin_file() {
+  local path="$1"
+  if [[ ! -f "${path}" ]]; then
+    echo "ERROR: Repo-managed OpenClaw gateway Claude config drop-in not found at ${path}" >&2
+    return 1
+  fi
+  if ! diff -u "${CLAUDE_CONFIG_DROPIN_SRC}" "${path}" >&2; then
+    echo "ERROR: OpenClaw gateway Claude config drop-in must match the repo-managed CLAUDE_CONFIG_DIR drop-in exactly." >&2
+    return 1
+  fi
+}
+
 retire_obsolete_codex_runtime_dropin() {
   if [[ ! -e "${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}" \
     && ! -L "${OBSOLETE_CODEX_RUNTIME_DROPIN_DST}" ]]; then
@@ -778,6 +796,7 @@ require_gateway_service_loadable() {
 
   load_state="$(printf '%s\n' "${service_state}" | awk -F= '$1 == "LoadState" { print $2; exit }')"
   active_state="$(printf '%s\n' "${service_state}" | awk -F= '$1 == "ActiveState" { print $2; exit }')"
+  GATEWAY_ACTIVE_STATE_OBSERVED="${active_state}"
   case "${load_state}" in
     loaded)
       echo "Verified ${GATEWAY_SERVICE_NAME} is loadable (ActiveState=${active_state:-unknown})."
@@ -1127,6 +1146,7 @@ MANAGED_UNIT_PATHS=(
   "${QUANTIPY_API_UNIT_DST}"
   "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
   "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
+  "${CLAUDE_CONFIG_DROPIN_DST}"
 )
 MANAGED_ARTIFACT_TRANSACTION_ARMED=0
 MANAGED_ARTIFACT_BACKUP_DIR=""
@@ -1136,6 +1156,15 @@ RUNTIME_CAPS_DROPIN_DIR_MODE=""
 SYSTEMD_MANAGER_NODE_OPTIONS_CHANGED=0
 SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL_PRESENT=0
 SYSTEMD_MANAGER_NODE_OPTIONS_ORIGINAL=""
+
+PERSONA_STAGE_DIR=""
+
+cleanup_persona_stage() {
+  if [[ -n "${PERSONA_STAGE_DIR:-}" ]]; then
+    rm -rf -- "${PERSONA_STAGE_DIR}"
+    PERSONA_STAGE_DIR=""
+  fi
+}
 
 cleanup_deployment_temp_file() {
   local path="${1:-}"
@@ -1195,7 +1224,8 @@ begin_managed_unit_transaction() {
       "${RESEARCH_OWNER_UNIT_DST}" \
       "${QUANTIPY_API_UNIT_DST}" \
       "${GATEWAY_RUNTIME_CAPS_DROPIN_DST}" \
-      "${NATIVE_CRASH_HARDENING_DROPIN_DST}"; do
+      "${NATIVE_CRASH_HARDENING_DROPIN_DST}" \
+      "${CLAUDE_CONFIG_DROPIN_DST}"; do
       snapshot_managed_artifact_path "${path}" || return 1
     done
     return 0
@@ -1529,6 +1559,7 @@ run_deployment_rollback_and_exit() {
   local rollback_step_failed=0
   trap - EXIT
   trap - HUP INT TERM
+  cleanup_persona_stage
   if ! cleanup_deployment_temp_file "${GENERATED_OPENCLAW_CONFIG_TMP:-}"; then
     rollback_step_failed=1
   fi
@@ -1542,6 +1573,9 @@ run_deployment_rollback_and_exit() {
     rollback_step_failed=1
   fi
   if ! cleanup_deployment_temp_file "${NATIVE_CRASH_HARDENING_DROPIN_TMP:-}"; then
+    rollback_step_failed=1
+  fi
+  if ! cleanup_deployment_temp_file "${CLAUDE_CONFIG_DROPIN_TMP:-}"; then
     rollback_step_failed=1
   fi
   if ! rollback_managed_unit_transaction; then
@@ -1779,6 +1813,63 @@ for VAR_NAME in "${!PRESERVED_ENV[@]}"; do
   export "${VAR_NAME}"
 done
 unset OPENCLAW_HOME
+
+# Resolve the agent profile once. An exported G2_AGENT_PROFILE wins, then the
+# approved env file, then the repo default (all handled by agent_profiles).
+if ! PROFILE="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+  "${PYTHON_BIN}" -m gateway.agent_profiles resolve --env-file "${ENV_FILE}")" \
+  || [[ -z "${PROFILE}" ]]; then
+  echo "ERROR: Could not resolve the agent profile (G2_AGENT_PROFILE / ${ENV_FILE})." >&2
+  exit 1
+fi
+if ! PROFILE_JSON="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+  "${PYTHON_BIN}" -m gateway.agent_profiles show --profile "${PROFILE}" --json)"; then
+  echo "ERROR: Unknown agent profile '${PROFILE}'." >&2
+  exit 1
+fi
+PROFILE_RUNTIME="$(printf '%s\n' "${PROFILE_JSON}" | jq -r '.runtime')" || exit 1
+case "${PROFILE_RUNTIME}" in
+  codex | claude-cli) ;;
+  *)
+    echo "ERROR: Agent profile '${PROFILE}' has unsupported runtime '${PROFILE_RUNTIME}'." >&2
+    exit 1
+    ;;
+esac
+echo "Agent profile: ${PROFILE} (runtime ${PROFILE_RUNTIME})"
+agent_profile_get() {
+  PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.agent_profiles get "$1" "$2" --profile "${PROFILE}"
+}
+GATEWAY_CLI_BIN="${REPO_ROOT}/.venv/bin/gateway-cli"
+OWNER_WORKSPACE_DST_EXPECTED="${OPENCLAW_PUSH_HOME}/workspace-research-orchestrator"
+
+# A plain push must never silently switch the deployed profile. Compare the
+# resolved profile with the deployed snapshot (missing snapshot = codex) and
+# refuse a mismatch unless the operator names the new profile explicitly.
+if [[ -n "${G2_AGENT_PROFILE:-}" ]]; then
+  PROFILE_SOURCE="exported G2_AGENT_PROFILE"
+elif grep -Eq '^[[:space:]]*(export[[:space:]]+)?G2_AGENT_PROFILE[[:space:]]*=' "${ENV_FILE}" 2>/dev/null; then
+  PROFILE_SOURCE="G2_AGENT_PROFILE in ${ENV_FILE}"
+else
+  PROFILE_SOURCE="repo default (no G2_AGENT_PROFILE set)"
+fi
+if ! ACTIVE_PROFILE_NAME="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+  "${PYTHON_BIN}" -m gateway.agent_profiles active --json --state-dir "${OPENCLAW_PUSH_HOME}" | jq -r '.name')" \
+  || [[ -z "${ACTIVE_PROFILE_NAME}" ]]; then
+  echo "ERROR: Could not read the deployed agent profile under ${OPENCLAW_PUSH_HOME}." >&2
+  exit 1
+fi
+echo "################################################################"
+echo "# AGENT PROFILE: ${PROFILE}   (source: ${PROFILE_SOURCE})"
+echo "# currently deployed profile: ${ACTIVE_PROFILE_NAME}"
+echo "################################################################"
+if [[ "${ACTIVE_PROFILE_NAME}" != "${PROFILE}" \
+  && "${OPENCLAW_PUSH_PROFILE_CHANGE:-}" != "${PROFILE}" ]]; then
+  echo "ERROR: This push would switch the deployed agent profile from '${ACTIVE_PROFILE_NAME}' to '${PROFILE}'." >&2
+  echo "       Use scripts/switch-agent-profile.sh ${PROFILE}, or set OPENCLAW_PUSH_PROFILE_CHANGE=${PROFILE} to confirm the switch." >&2
+  exit 1
+fi
+
 # Resolve the bounded route roots after the approved env file has loaded. An
 # explicitly exported value still wins via PRESERVED_ENV above; the owner MCP
 # receives only this fixed path and loads a strict allowlist at runtime.
@@ -1797,7 +1888,7 @@ if ! validate_research_core_database; then
   exit 1
 fi
 
-if [[ "${OPENCLAW_PROVIDER:-codex}" == "openrouter" ]] && [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
+if [[ "${PROFILE_RUNTIME}" == "codex" && "${OPENCLAW_PROVIDER:-codex}" == "openrouter" ]] && [[ -z "${OPENROUTER_API_KEY:-}" ]]; then
   echo "ERROR: OPENROUTER_API_KEY is not set but OPENCLAW_PROVIDER=openrouter." >&2
   echo "       Set it in ${ENV_FILE} or export it before running this script." >&2
   exit 1
@@ -1807,10 +1898,72 @@ if ! validate_repo_openclaw_config; then
   exit 1
 fi
 
-if [[ "${OPENCLAW_PROVIDER:-codex}" == "codex" ]]; then
+if [[ "${PROFILE_RUNTIME}" == "codex" && "${OPENCLAW_PROVIDER:-codex}" == "codex" ]]; then
   echo "Running preflight: guarded repo OpenClaw config copy with ${OPENCLAW_BIN_RESOLVED} plugins inspect codex --json"
   if ! require_codex_runtime_exact; then
     exit 1
+  fi
+fi
+
+# ── Claude preflight (before any backup or write) ───────────────────────────
+# OpenClaw hot-reloads agent/model/plugin config, so a claude push makes the
+# running gateway start claude-cli agents immediately. Without the gateway
+# having CLAUDE_CONFIG_DIR (systemd drop-in applied by restart) those agents
+# would use the operator's own ~/.claude with none of the managed isolation.
+claude_gateway_remediation() {
+  local want_raw="${OPENCLAW_PUSH_HOME}/claude-code"
+  cat >&2 <<REMEDIATION
+The running ${GATEWAY_SERVICE_NAME} must already have CLAUDE_CONFIG_DIR=${want_raw}.
+Fix it, then retry:
+  1. push (either profile) so the drop-in ${CLAUDE_CONFIG_DROPIN_DST} is installed,
+  2. systemctl --user restart ${GATEWAY_SERVICE_NAME}
+  3. re-run this claude push;
+or use paused mode (OPENCLAW_PUSH_MODE=paused) with the gateway stopped.
+REMEDIATION
+}
+
+require_running_gateway_claude_config_dir() {
+  local want_raw="${OPENCLAW_PUSH_HOME}/claude-code" want_real pid environ
+  want_real="$(realpath -m -- "${OPENCLAW_PUSH_HOME}")/claude-code"
+  case "${GATEWAY_ACTIVE_STATE_OBSERVED:-}" in
+    active | activating | reloading) ;;
+    *) return 0 ;;
+  esac
+  if ! pid="$(systemctl --user show -p MainPID --value "${GATEWAY_SERVICE_NAME}" 2>/dev/null)" \
+    || [[ ! "${pid}" =~ ^[1-9][0-9]*$ ]]; then
+    claude_gateway_remediation
+    echo "ERROR: Refusing the claude push: cannot determine the running ${GATEWAY_SERVICE_NAME} MainPID." >&2
+    return 1
+  fi
+  if ! environ="$({ tr '\0' '\n' < "/proc/${pid}/environ"; } 2>/dev/null)"; then
+    claude_gateway_remediation
+    echo "ERROR: Refusing the claude push: cannot read /proc/${pid}/environ of the running gateway." >&2
+    return 1
+  fi
+  if ! printf '%s\n' "${environ}" | grep -Fxq -e "CLAUDE_CONFIG_DIR=${want_raw}" \
+    && ! printf '%s\n' "${environ}" | grep -Fxq -e "CLAUDE_CONFIG_DIR=${want_real}"; then
+    claude_gateway_remediation
+    echo "ERROR: Refusing the claude push: the running gateway (pid ${pid}) does not have CLAUDE_CONFIG_DIR=${want_raw}." >&2
+    return 1
+  fi
+}
+
+if [[ "${PROFILE_RUNTIME}" == "claude-cli" ]]; then
+  if ! validate_claude_config_dropin_file "${CLAUDE_CONFIG_DROPIN_SRC}"; then
+    exit 1
+  fi
+  # The static drop-in names %h/.openclaw/claude-code; check-dropin refuses a
+  # state dir that does not match it.
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.claude_runtime check-dropin \
+    --state-dir "${OPENCLAW_PUSH_HOME}"; then
+    exit 1
+  fi
+  if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+    echo "DEFERRED: paused mode skipped Claude Code auth readiness check and the running-gateway environment check."
+  else
+    require_running_gateway_claude_config_dir || exit 1
+    check_agent_auth_readiness || exit 1
   fi
 fi
 
@@ -1872,7 +2025,16 @@ assemble_openclaw_config() {
   echo "Installed MemPalace read-only wrapper → ${MEMPALACE_READONLY_WRAPPER_DST}"
 
   PROVIDER="${OPENCLAW_PROVIDER:-codex}"
+  if [[ "${PROFILE_RUNTIME}" != "codex" ]]; then
+    if [[ "${PROVIDER}" != "codex" ]]; then
+      echo "WARNING: OPENCLAW_PROVIDER=${PROVIDER} is ignored under the ${PROFILE} profile." >&2
+    fi
+    PROVIDER="profile:${PROFILE}"
+  fi
   case "${PROVIDER}" in
+    "profile:${PROFILE}")
+      MODEL_PRIMARY="$(agent_profile_get main model)" || return 1
+      ;;
     codex)
       MODEL_PRIMARY="openai/${OPENAI_MODEL:-gpt-5.4}"
       ;;
@@ -1892,23 +2054,36 @@ assemble_openclaw_config() {
       ;;
   esac
 
-  if ! RESEARCH_ORCHESTRATOR_MODEL_PRIMARY="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
-    "${PYTHON_BIN}" -m gateway.deployment.config_merge orchestrator-model \
-    -- "${REPO_CONFIG}")"; then
-    return 1
+  if [[ "${PROFILE_RUNTIME}" == "codex" ]]; then
+    if ! RESEARCH_ORCHESTRATOR_MODEL_PRIMARY="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.config_merge orchestrator-model \
+      -- "${REPO_CONFIG}")"; then
+      return 1
+    fi
+  else
+    RESEARCH_ORCHESTRATOR_MODEL_PRIMARY="$(agent_profile_get owner model)" || return 1
   fi
   if [[ -z "${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}" ]]; then
     echo "ERROR: Repo config must pin agents.entries.research-orchestrator to a model.primary." >&2
     return 1
   fi
-  if [[ "${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}" != openai/* ]]; then
+  if [[ "${PROFILE_RUNTIME}" == "codex" && "${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}" != openai/* ]]; then
     echo "ERROR: Research orchestrator model '${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}' must use the OpenAI/Codex provider." >&2
     return 1
   fi
 
+  local -a assemble_profile_args=(--profile "${PROFILE}")
+  if [[ "${PROFILE_RUNTIME}" == "claude-cli" ]]; then
+    assemble_profile_args+=(
+      --owner-workspace-root "${OWNER_WORKSPACE_DST_EXPECTED}"
+      --hypothesis-worktrees-root "${HYPOTHESIS_WORKTREES_ROOT}"
+      --gateway-cli "${GATEWAY_CLI_BIN}"
+    )
+  fi
   if ! MERGED="$(PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
     "${PYTHON_BIN}" -m gateway.deployment.config_merge assemble \
     --migration-record "${MIGRATION_RECORD_DST}" \
+    "${assemble_profile_args[@]}" \
     -- "${LOCAL_CONFIG}" "${REPO_CONFIG}" "${REPO_ROOT}" "${OPENCLAW_PUSH_HOME}" "${PYTHON_BIN}" \
     "${MEMPALACE_PYTHON}" "${MEMPALACE_PALACE}" "${MEMPALACE_READONLY_WRAPPER_DST}" \
     "${FASTEMBED_CACHE_PATH}" "${MEMPALACE_EMBEDDING_MODEL}" "${HF_HUB_OFFLINE}" \
@@ -1926,6 +2101,32 @@ assemble_openclaw_config() {
   echo "Sanitized stale coding-provider config keys: github-copilot copilot-proxy copilot-cli"
   echo "Active provider: ${PROVIDER} → default model: ${MODEL_PRIMARY}; research owner: ${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}"
 }
+
+if [[ "${PROFILE_RUNTIME}" == "claude-cli" ]]; then
+  # Install the dedicated Claude Code settings BEFORE publication so the
+  # confinement exists before any claude-cli agent can start. Snapshot only
+  # settings.json (never credentials or transcripts), or the whole directory
+  # when this push creates it.
+  CLAUDE_CONFIG_DIR_DST="${OPENCLAW_PUSH_HOME}/claude-code"
+  if [[ -e "${CLAUDE_CONFIG_DIR_DST}" || -L "${CLAUDE_CONFIG_DIR_DST}" ]]; then
+    snapshot_managed_artifact_path "${CLAUDE_CONFIG_DIR_DST}/settings.json" || exit 1
+  else
+    snapshot_managed_artifact_path "${CLAUDE_CONFIG_DIR_DST}" || exit 1
+  fi
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.claude_runtime install \
+    --state-dir "${OPENCLAW_PUSH_HOME}" --profile "${PROFILE}" \
+    --var "HOME=${HOME}" \
+    --var "OPENCLAW_STATE_DIR=${OPENCLAW_PUSH_HOME}" \
+    --var "RESEARCH_V2_ROOT=${RESEARCH_V2_ROOT}" \
+    --var "HYPOTHESIS_WORKTREES_ROOT=${HYPOTHESIS_WORKTREES_ROOT}" \
+    --var "REPO_ROOT=${REPO_ROOT}" \
+    --var "OPERATOR_ENV_FILE=${G2_OWNER_ENV_FILE}"; then
+    echo "ERROR: Claude Code settings install failed." >&2
+    exit 1
+  fi
+  echo "Installed Claude Code settings → ${CLAUDE_CONFIG_DIR_DST}/settings.json"
+fi
 
 assemble_openclaw_config
 
@@ -1967,119 +2168,123 @@ if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
   apply_paused_config_gates || exit 1
 fi
 
-# Research orchestrator tool policy: the owner must use the native full harness
-# policy. Finite owner allowlists and unsafe denies trigger native restriction
-# and disable multi-agent delegation; MCP access remains bounded by each
-# server's agent projection.
-if ! echo "${MERGED}" | jq -e \
-  '([.agents.entries["research-orchestrator"] | select(type == "object")
-    | select(.tools == {"profile": "full"})
-  ] | length) == 1
-' >/dev/null; then
-  echo "ERROR: Research orchestrator must use the native full tool profile without local filters." >&2
-  exit 1
-fi
-
-# ── Managed invariant validation ─────────────────────────────────────────────
-# Fail before writing if a local merge or env selection would violate the
-# repo-managed autoresearch target shape.
-if ! echo "${MERGED}" | jq -e \
-  --arg owner "${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}" \
-  --arg cmd "${MEMPALACE_PYTHON}" \
-  --arg palace "${MEMPALACE_PALACE}" \
-  --arg wrapper "${MEMPALACE_READONLY_WRAPPER_DST}" \
-  --arg cache "${FASTEMBED_CACHE_PATH}" \
-  --arg model "${MEMPALACE_EMBEDDING_MODEL}" \
-  --arg offline "${HF_HUB_OFFLINE}" \
-  --arg repo "${REPO_ROOT}" \
-  --arg python "${PYTHON_BIN}" \
-  --arg g2_module "${G2_CONTROL_MCP_MODULE}" \
-  --arg research_root "${RESEARCH_V2_ROOT}" \
-  --arg research_core_database "${RESEARCH_CORE_DATABASE}" \
-  --arg owner_env_file "${G2_OWNER_ENV_FILE}" \
-  --arg openclaw_host "${OPENCLAW_HOST}" \
-  --arg openclaw_port "${OPENCLAW_PORT}" \
-  --argjson readonly_server_agents "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
-  --argjson g2_server_agents "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" \
-  --argjson main_openclaw_allow "${MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON}" '
-  def denies: (.tools.deny // []);
-  def main_allow: (.tools.allow // []);
-  def expected_native_models: {"main": "openai/gpt-5.4", "research-orchestrator": $owner};
-  def expected_agent_ids: (expected_native_models | keys);
-  (.agents.defaults.thinkingDefault == "high")
-  and (.agents.ownership == "explicit")
-  and ((.agents | has("list")) | not)
-  and ((.agents.entries | type) == "object")
-  and all(.agents.entries | to_entries[]; (.value | type) == "object" and ((.value | has("id")) | not))
-  and ((.plugins.allow // []) | contains(["codex", "openai"]))
-  and (((.plugins.allow // []) | index("acpx")) == null)
-  and (.plugins.load.paths? == null)
-  and (.plugins.entries.codex.enabled == true)
-  and (.plugins.entries.codex.config.nativeToolSurfaceEnabled? == null)
-  and (.plugins.entries.codex.config.codexDynamicToolsExclude? == null)
-  and (.plugins.entries.codex.config.appServer.sandbox == "workspace-write")
-  and (.plugins.entries.codex.config.appServer.sandbox != "danger-full-access")
-  and (.plugins.entries.codex.config.appServer.defaultWorkspaceDir? != "/home/dev/.openclaw/autoresearch/model-workspaces")
-  and (.plugins.entries.codex.config.appServer.networkProxy? == null)
-  and (.plugins.entries.acpx? == null)
-  and (.acp? == null)
-  and (.agents.defaults.maxConcurrent == 2)
-  and (.agents.defaults.subagents.maxConcurrent == 1)
-  and (.agents.defaults.subagents.maxSpawnDepth == 1)
-  and (.agents.defaults.subagents.runTimeoutSeconds == 1800)
-  and (.memory.search.enabled == false)
-  and (.agents.defaults.compaction.mode == "default")
-  and (.agents.defaults.compaction.memoryFlush.enabled == false)
-  and ((.tools.deny // []) | contains(["memory_search", "memory_get"]))
-  and ((.mcp.servers | keys | sort) == (["g2-control", "mempalace-readonly"] | sort))
-  and (.mcp.servers."mempalace-readonly".command == $cmd)
-  and (.mcp.servers."mempalace-readonly".args == [$wrapper, "--palace", $palace])
-  and ((.mcp.servers."mempalace-readonly".codex.agents // []) == $readonly_server_agents)
-  and (.mcp.servers."mempalace-readonly".env == {
-    "FASTEMBED_CACHE_PATH": $cache,
-    "MEMPALACE_EMBEDDING_MODEL": $model,
-    "HF_HUB_OFFLINE": $offline
-  })
-  and (.mcp.servers."g2-control".command == $python)
-  and (.mcp.servers."g2-control".args == ["-m", $g2_module])
-  and ((.mcp.servers."g2-control".codex.agents // []) == $g2_server_agents)
-  and (.mcp.servers."g2-control".codex.defaultToolsApprovalMode == "approve")
-  and (.mcp.servers."g2-control".env == {
-    "PYTHONPATH": $repo,
-    "RESEARCH_V2_ROOT": $research_root,
-    "RESEARCH_CORE_DATABASE": $research_core_database,
-    "OPENCLAW_HOST": $openclaw_host,
-    "OPENCLAW_PORT": $openclaw_port,
-    "G2_OWNER_ENV_FILE": $owner_env_file
-  })
-  and (((.agents.entries // {}) | keys | sort) == (expected_agent_ids | sort))
-  and all((.agents.entries // {}) | to_entries[];
-    (.value.model.primary == expected_native_models[.key]
-      and (.value.model.primary | startswith("openai/"))
-      and .value.thinkingDefault == "high")
-  )
-  and ([.agents.entries.main | select(.tools.profile == "minimal" and main_allow == $main_openclaw_allow and (denies | contains(["exec", "sessions_spawn", "sessions_yield", "sessions_send", "sessions_list", "sessions_history", "agents_list"])))] | length) == 1
-  and ([.agents.entries["research-orchestrator"] | select(
-    .model.primary == $owner
-    and .thinkingDefault == "high"
-    and ((.skills // []) == ["research-loop"])
-    and .tools == {"profile": "full"}
-    and (((.subagents.allowAgents? // []) | length) == 0)
-  )] | length) == 1
-  and ([.agents.entries.main | select(
-    .model.primary == "openai/gpt-5.4"
-    and .thinkingDefault == "high"
-    and (((.skills // []) | index("mempalace")) == null)
-    and (((.skills // []) | index("autoresearch")) == null)
-    and ((.skills // []) == ["mempalace-readonly"])
-    and (((.subagents.allowAgents? // []) | length) == 0)
-  )] | length) == 1
+if [[ "${PROFILE_RUNTIME}" == "codex" ]]; then
+  # Research orchestrator tool policy: the owner must use the native full harness
+  # policy. Finite owner allowlists and unsafe denies trigger native restriction
+  # and disable multi-agent delegation; MCP access remains bounded by each
+  # server's agent projection.
+  if ! echo "${MERGED}" | jq -e \
+    '([.agents.entries["research-orchestrator"] | select(type == "object")
+      | select(.tools == {"profile": "full"})
+    ] | length) == 1
   ' >/dev/null; then
-  echo "ERROR: Generated OpenClaw config violates the managed route invariants." >&2
-  echo "       Check native OpenAI model policy, research-orchestrator policy, main restrictions, model catalog, and bounded MCP projection." >&2
-  exit 1
+    echo "ERROR: Research orchestrator must use the native full tool profile without local filters." >&2
+    exit 1
+  fi
+
+  # ── Managed invariant validation ─────────────────────────────────────────────
+  # Fail before writing if a local merge or env selection would violate the
+  # repo-managed autoresearch target shape.
+  if ! echo "${MERGED}" | jq -e \
+    --arg owner "${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}" \
+    --arg cmd "${MEMPALACE_PYTHON}" \
+    --arg palace "${MEMPALACE_PALACE}" \
+    --arg wrapper "${MEMPALACE_READONLY_WRAPPER_DST}" \
+    --arg cache "${FASTEMBED_CACHE_PATH}" \
+    --arg model "${MEMPALACE_EMBEDDING_MODEL}" \
+    --arg offline "${HF_HUB_OFFLINE}" \
+    --arg repo "${REPO_ROOT}" \
+    --arg python "${PYTHON_BIN}" \
+    --arg g2_module "${G2_CONTROL_MCP_MODULE}" \
+    --arg research_root "${RESEARCH_V2_ROOT}" \
+    --arg research_core_database "${RESEARCH_CORE_DATABASE}" \
+    --arg owner_env_file "${G2_OWNER_ENV_FILE}" \
+    --arg openclaw_host "${OPENCLAW_HOST}" \
+    --arg openclaw_port "${OPENCLAW_PORT}" \
+    --argjson readonly_server_agents "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
+    --argjson g2_server_agents "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" \
+    --argjson main_openclaw_allow "${MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON}" '
+    def denies: (.tools.deny // []);
+    def main_allow: (.tools.allow // []);
+    def expected_native_models: {"main": "openai/gpt-5.4", "research-orchestrator": $owner};
+    def expected_agent_ids: (expected_native_models | keys);
+    (.agents.defaults.thinkingDefault == "high")
+    and (.agents.ownership == "explicit")
+    and ((.agents | has("list")) | not)
+    and ((.agents.entries | type) == "object")
+    and all(.agents.entries | to_entries[]; (.value | type) == "object" and ((.value | has("id")) | not))
+    and ((.plugins.allow // []) | contains(["codex", "openai"]))
+    and (((.plugins.allow // []) | index("acpx")) == null)
+    and (.plugins.load.paths? == null)
+    and (.plugins.entries.codex.enabled == true)
+    and (.plugins.entries.codex.config.nativeToolSurfaceEnabled? == null)
+    and (.plugins.entries.codex.config.codexDynamicToolsExclude? == null)
+    and (.plugins.entries.codex.config.appServer.sandbox == "workspace-write")
+    and (.plugins.entries.codex.config.appServer.sandbox != "danger-full-access")
+    and (.plugins.entries.codex.config.appServer.defaultWorkspaceDir? != "/home/dev/.openclaw/autoresearch/model-workspaces")
+    and (.plugins.entries.codex.config.appServer.networkProxy? == null)
+    and (.plugins.entries.acpx? == null)
+    and (.acp? == null)
+    and (.agents.defaults.maxConcurrent == 2)
+    and (.agents.defaults.subagents.maxConcurrent == 1)
+    and (.agents.defaults.subagents.maxSpawnDepth == 1)
+    and (.agents.defaults.subagents.runTimeoutSeconds == 1800)
+    and (.memory.search.enabled == false)
+    and (.agents.defaults.compaction.mode == "default")
+    and (.agents.defaults.compaction.memoryFlush.enabled == false)
+    and ((.tools.deny // []) | contains(["memory_search", "memory_get"]))
+    and ((.mcp.servers | keys | sort) == (["g2-control", "mempalace-readonly"] | sort))
+    and (.mcp.servers."mempalace-readonly".command == $cmd)
+    and (.mcp.servers."mempalace-readonly".args == [$wrapper, "--palace", $palace])
+    and ((.mcp.servers."mempalace-readonly".codex.agents // []) == $readonly_server_agents)
+    and (.mcp.servers."mempalace-readonly".env == {
+      "FASTEMBED_CACHE_PATH": $cache,
+      "MEMPALACE_EMBEDDING_MODEL": $model,
+      "HF_HUB_OFFLINE": $offline
+    })
+    and (.mcp.servers."g2-control".command == $python)
+    and (.mcp.servers."g2-control".args == ["-m", $g2_module])
+    and ((.mcp.servers."g2-control".codex.agents // []) == $g2_server_agents)
+    and (.mcp.servers."g2-control".codex.defaultToolsApprovalMode == "approve")
+    and (.mcp.servers."g2-control".env == {
+      "PYTHONPATH": $repo,
+      "RESEARCH_V2_ROOT": $research_root,
+      "RESEARCH_CORE_DATABASE": $research_core_database,
+      "OPENCLAW_HOST": $openclaw_host,
+      "OPENCLAW_PORT": $openclaw_port,
+      "G2_OWNER_ENV_FILE": $owner_env_file
+    })
+    and (((.agents.entries // {}) | keys | sort) == (expected_agent_ids | sort))
+    and all((.agents.entries // {}) | to_entries[];
+      (.value.model.primary == expected_native_models[.key]
+        and (.value.model.primary | startswith("openai/"))
+        and .value.thinkingDefault == "high")
+    )
+    and ([.agents.entries.main | select(.tools.profile == "minimal" and main_allow == $main_openclaw_allow and (denies | contains(["exec", "sessions_spawn", "sessions_yield", "sessions_send", "sessions_list", "sessions_history", "agents_list"])))] | length) == 1
+    and ([.agents.entries["research-orchestrator"] | select(
+      .model.primary == $owner
+      and .thinkingDefault == "high"
+      and ((.skills // []) == ["research-loop"])
+      and .tools == {"profile": "full"}
+      and (((.subagents.allowAgents? // []) | length) == 0)
+    )] | length) == 1
+    and ([.agents.entries.main | select(
+      .model.primary == "openai/gpt-5.4"
+      and .thinkingDefault == "high"
+      and (((.skills // []) | index("mempalace")) == null)
+      and (((.skills // []) | index("autoresearch")) == null)
+      and ((.skills // []) == ["mempalace-readonly"])
+      and (((.subagents.allowAgents? // []) | length) == 0)
+    )] | length) == 1
+    ' >/dev/null; then
+    echo "ERROR: Generated OpenClaw config violates the managed route invariants." >&2
+    echo "       Check native OpenAI model policy, research-orchestrator policy, main restrictions, model catalog, and bounded MCP projection." >&2
+    exit 1
+  fi
+  echo "Managed invariants validated: main interface, Astra research owner, native Luna/Sol roster, strict concurrency caps, and bounded MCP projection."
+else
+  echo "Claude profile: managed invariants are validated by config_merge validate before publication."
 fi
-echo "Managed invariants validated: main interface, Astra research owner, native Luna/Sol roster, strict concurrency caps, and bounded MCP projection."
 
 validate_generated_openclaw_config() {
   local temp_config validate_json validate_status current_hash current_bytes
@@ -2090,6 +2295,37 @@ validate_generated_openclaw_config() {
   printf '%s\n' "${MERGED}" > "${temp_config}"
   guard_destination_path_chain "${temp_config}" "wrote generated OpenClaw config temp file ${temp_config}" || exit 1
   guarded_chmod 0600 "${temp_config}" "chmod generated OpenClaw config temp file ${temp_config}"
+  if [[ "${PROFILE_RUNTIME}" == "claude-cli" ]]; then
+    if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+      "${PYTHON_BIN}" -m gateway.deployment.config_merge validate \
+      --profile "${PROFILE}" \
+      --config "${temp_config}" \
+      --repo-root "${REPO_ROOT}" \
+      --python-bin "${PYTHON_BIN}" \
+      --mempalace-python "${MEMPALACE_PYTHON}" \
+      --mempalace-palace "${MEMPALACE_PALACE}" \
+      --mempalace-wrapper "${MEMPALACE_READONLY_WRAPPER_DST}" \
+      --fastembed-cache "${FASTEMBED_CACHE_PATH}" \
+      --mempalace-embedding-model "${MEMPALACE_EMBEDDING_MODEL}" \
+      --hf-hub-offline "${HF_HUB_OFFLINE}" \
+      --g2-module "${G2_CONTROL_MCP_MODULE}" \
+      --research-v2-root "${RESEARCH_V2_ROOT}" \
+      --research-core-database "${RESEARCH_CORE_DATABASE}" \
+      --owner-env-file "${G2_OWNER_ENV_FILE}" \
+      --openclaw-host "${OPENCLAW_HOST}" \
+      --openclaw-port "${OPENCLAW_PORT}" \
+      --readonly-server-agents-json "${MEMPALACE_READONLY_SERVER_AGENT_IDS_JSON}" \
+      --g2-server-agents-json "${G2_CONTROL_SERVER_AGENT_IDS_JSON}" \
+      --main-tool-allow-json "${MAIN_OPENCLAW_TOOL_ALLOW_IDS_JSON}" \
+      --openclaw-state-root "${OPENCLAW_PUSH_HOME}" \
+      --owner-workspace-root "${OWNER_WORKSPACE_DST_EXPECTED}" \
+      --hypothesis-worktrees-root "${HYPOTHESIS_WORKTREES_ROOT}" \
+      --gateway-cli "${GATEWAY_CLI_BIN}"; then
+      echo "ERROR: Generated OpenClaw config violates the managed ${PROFILE} profile invariants." >&2
+      exit 1
+    fi
+    echo "Managed invariants validated for the ${PROFILE} profile (config_merge validate)."
+  fi
   GENERATED_OPENCLAW_CONFIG_IDENTITY="$(guarded_regular_file_identity "${temp_config}" "capturing generated OpenClaw config identity before validation ${temp_config}")" || exit 1
   GENERATED_OPENCLAW_CONFIG_HASH="$(file_sha256 "${temp_config}")"
   GENERATED_OPENCLAW_CONFIG_BYTES="$(file_bytes "${temp_config}")"
@@ -2298,16 +2534,55 @@ remove_stale_native_research_layers() {
   done
 }
 
+# Render persona/bootstrap files for the active profile into a private staging
+# directory. Callers copy the staged files into managed destinations through
+# the guarded filesystem helpers, so backup/rollback semantics are unchanged.
+# Sets PERSONA_STAGE_DIR; the caller must call cleanup_persona_stage.
+render_persona_stage() {
+  local src="$1"
+  local files_csv="$2"
+  cleanup_persona_stage
+  PERSONA_STAGE_DIR="$(mktemp -d)" || return 1
+  if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+    "${PYTHON_BIN}" -m gateway.deployment.persona_render render \
+    --profile "${PROFILE}" \
+    --src "${src}" \
+    --dst "${PERSONA_STAGE_DIR}" \
+    --var "RESEARCH_V2_ROOT=${RESEARCH_V2_ROOT}" \
+    --var "HYPOTHESIS_WORKTREES_ROOT=${HYPOTHESIS_WORKTREES_ROOT}" \
+    --var "GATEWAY_CLI=${GATEWAY_CLI_BIN}" \
+    --var "REPO_ROOT=${REPO_ROOT}" \
+    --files "${files_csv}" >/dev/null; then
+    echo "ERROR: Persona rendering failed for ${src} (${files_csv}) under profile ${PROFILE}." >&2
+    cleanup_persona_stage
+    return 1
+  fi
+}
+
+# Render the named files (remaining arguments) from SRC and copy them into DST
+# with guarded copies.
+install_rendered_persona_files() {
+  local src="$1"
+  local dst="$2"
+  shift 2
+  local files_csv file
+  files_csv="$(IFS=,; printf '%s' "$*")"
+  render_persona_stage "${src}" "${files_csv}" || exit 1
+  for file in "$@"; do
+    guarded_cp_file "${PERSONA_STAGE_DIR}/${file}" "${dst}/${file}" "copying managed bootstrap file ${dst}/${file}"
+  done
+  cleanup_persona_stage
+}
+
 render_native_research_layer() {
   local agent_id="$1"
   local destination_dir="$2"
-  local source="${CODEX_AGENT_CONFIGS_SRC}/${agent_id}.toml"
   local temporary
+  render_persona_stage "${CODEX_AGENT_CONFIGS_SRC}" "${agent_id}.toml" || exit 1
   temporary="$(mktemp "${destination_dir}/.${agent_id}.XXXXXX.toml")"
   guard_destination_path_chain "${temporary}" "writing rendered native Codex research layer ${temporary}"
-  sed -e "s|@RESEARCH_V2_ROOT@|$(escape_sed_replacement "${RESEARCH_V2_ROOT}")|g" \
-    -e "s|@HYPOTHESIS_WORKTREES_ROOT@|$(escape_sed_replacement "${HYPOTHESIS_WORKTREES_ROOT}")|g" \
-    "${source}" > "${temporary}"
+  cat -- "${PERSONA_STAGE_DIR}/${agent_id}.toml" > "${temporary}"
+  cleanup_persona_stage
   guarded_chmod 0600 "${temporary}" "chmod rendered native Codex research layer ${temporary}"
   guarded_mv_replace "${temporary}" "${destination_dir}/${agent_id}.toml" \
     "publishing rendered native Codex research layer ${destination_dir}/${agent_id}.toml"
@@ -2323,7 +2598,9 @@ render_native_research_role_config() {
   guard_destination_path_chain "${config_path}" "wrote rendered native Codex role config ${config_path}"
 }
 
-validate_codex_native_stage_agent_sources "${CODEX_AGENTS_SRC}"
+if [[ "${PROFILE_RUNTIME}" == "codex" ]]; then
+  validate_codex_native_stage_agent_sources "${CODEX_AGENTS_SRC}"
+fi
 
 mapfile -t BOOTSTRAP_TARGETS < <(jq -r '
   def workspace_target:
@@ -2371,10 +2648,8 @@ for TARGET in "${BOOTSTRAP_TARGETS[@]}"; do
     echo "ERROR: Unsupported OpenClaw workspace agent roster: ${AGENTS}" >&2
     exit 1
   fi
-  for FILE in "${BOOTSTRAP_FILES_FOR_TARGET[@]}"; do
-    guarded_cp_file "${BOOTSTRAP_SRC}/${FILE}" "${BOOTSTRAP_DST}/${FILE}" "copying managed bootstrap file ${BOOTSTRAP_DST}/${FILE}"
-  done
-  if workspace_is_research_orchestrator "${AGENTS}"; then
+  install_rendered_persona_files "${BOOTSTRAP_SRC}" "${BOOTSTRAP_DST}" "${BOOTSTRAP_FILES_FOR_TARGET[@]}"
+  if workspace_is_research_orchestrator "${AGENTS}" && [[ "${PROFILE_RUNTIME}" == "codex" ]]; then
     CODEX_AGENTS_DST="${BOOTSTRAP_DST}/.codex/agents"
     if [[ -d "${CODEX_AGENTS_DST}" ]]; then
       remove_stale_native_research_agents "${CODEX_AGENTS_DST}"
@@ -2385,10 +2660,29 @@ for TARGET in "${BOOTSTRAP_TARGETS[@]}"; do
     for AGENT_ID in "${CODEX_NATIVE_STAGE_AGENT_IDS[@]}"; do
       render_native_research_layer "${AGENT_ID}" "${CODEX_AGENT_CONFIGS_DST}"
     done
+  fi
+  if workspace_is_research_orchestrator "${AGENTS}"; then
     RESEARCH_OWNER_WORKSPACE_DST="${BOOTSTRAP_DST}"
   fi
   echo "  ${AGENTS} → ${BOOTSTRAP_DST} (${BOOTSTRAP_FILES_FOR_TARGET[*]})"
 done
+
+# Claude profile: the three research child agents are OpenClaw agents with
+# dedicated workspaces; each receives only its rendered AGENTS.md.
+if [[ "${PROFILE_RUNTIME}" == "claude-cli" ]]; then
+  for CHILD_ROLE in implementer runner reviewer; do
+    CHILD_AGENT_ID="research-${CHILD_ROLE}"
+    CHILD_WORKSPACE_TARGET="$(printf '%s\n' "${MERGED}" | jq -r --arg id "${CHILD_AGENT_ID}" '.agents.entries[$id].workspace // empty')"
+    if [[ -z "${CHILD_WORKSPACE_TARGET}" ]]; then
+      CHILD_WORKSPACE_TARGET="workspace-${CHILD_AGENT_ID}"
+    fi
+    CHILD_WORKSPACE_DST="$(workspace_dir_for_target "${CHILD_WORKSPACE_TARGET}")"
+    snapshot_managed_artifact_path "${CHILD_WORKSPACE_DST}"
+    guarded_mkdir_p "${CHILD_WORKSPACE_DST}" "creating managed OpenClaw workspace ${CHILD_WORKSPACE_DST}"
+    install_rendered_persona_files "${REPO_ROOT}/gateway/agent_config/${CHILD_AGENT_ID}" "${CHILD_WORKSPACE_DST}" AGENTS.md
+    echo "  ${CHILD_AGENT_ID} → ${CHILD_WORKSPACE_DST} (AGENTS.md)"
+  done
+fi
 echo "Local workspace files such as USER.md and IDENTITY.md were left untouched."
 
 if [[ -z "${RESEARCH_OWNER_WORKSPACE_DST:-}" ]]; then
@@ -2401,44 +2695,47 @@ fi
 # metadata templates; rendered layers live in the owner workspace and are
 # registered with absolute paths. Remove only known obsolete duplicate role
 # TOMLs from old workspace/runtime locations; generic manual roles survive.
-CODEX_NATIVE_RUNTIME_AGENT_IDS=("main" "research-orchestrator")
-declare -A MANAGED_AGENT_DIR_SNAPSHOT_IDS=()
-for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
-  MANAGED_AGENT_DIR_SNAPSHOT_IDS["${CODEX_RUNTIME_AGENT_ID}"]=1
-done
-mapfile -t OPENAI_AGENT_IDS_FOR_SNAPSHOT < <(jq -r '
-  ((.agents.entries // {}) | to_entries[] | .value + {id: .key})
-  | select((.model.primary // "") | startswith("openai/"))
-  | .id
-' "${REPO_CONFIG}")
-for OPENAI_AGENT_ID_FOR_SNAPSHOT in "${OPENAI_AGENT_IDS_FOR_SNAPSHOT[@]}"; do
-  MANAGED_AGENT_DIR_SNAPSHOT_IDS["${OPENAI_AGENT_ID_FOR_SNAPSHOT}"]=1
-done
-for MANAGED_AGENT_ID_FOR_SNAPSHOT in "${!MANAGED_AGENT_DIR_SNAPSHOT_IDS[@]}"; do
-  snapshot_managed_artifact_path "${OPENCLAW_PUSH_HOME}/agents/${MANAGED_AGENT_ID_FOR_SNAPSHOT}/agent"
-done
-echo "Writing native Codex runtime configs to ${#CODEX_NATIVE_RUNTIME_AGENT_IDS[@]} scoped Codex homes:"
-for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
-  CODEX_RUNTIME_HOME="${OPENCLAW_PUSH_HOME}/agents/${CODEX_RUNTIME_AGENT_ID}/agent/codex-home"
-  write_codex_runtime_config "${CODEX_RUNTIME_HOME}" "${CODEX_RUNTIME_AGENT_ID}"
-  if [[ "${CODEX_RUNTIME_AGENT_ID}" == "research-orchestrator" ]]; then
-    render_native_research_role_config \
-      "${CODEX_AGENTS_SRC}" \
-      "${RESEARCH_OWNER_WORKSPACE_DST}/.codex/agent-configs" \
-      "${CODEX_RUNTIME_HOME}/config.toml"
-    validate_codex_native_research_runtime_roles \
-      "${CODEX_RUNTIME_HOME}/config.toml" \
-      "${CODEX_AGENTS_SRC}" \
-      "${RESEARCH_OWNER_WORKSPACE_DST}/.codex/agent-configs"
-  fi
-  if [[ "${CODEX_RUNTIME_AGENT_ID}" == "main" || "${CODEX_RUNTIME_AGENT_ID}" == "research-orchestrator" ]]; then
-    CODEX_RUNTIME_AGENTS_DST="${CODEX_RUNTIME_HOME}/agents"
-    guarded_mkdir_p "${CODEX_RUNTIME_AGENTS_DST}" "creating managed Codex runtime agents directory ${CODEX_RUNTIME_AGENTS_DST}"
-    remove_retired_codex_runtime_agents "${CODEX_RUNTIME_AGENTS_DST}"
-  fi
-  validate_codex_runtime_config "${CODEX_RUNTIME_HOME}" "${CODEX_RUNTIME_AGENT_ID}"
-  echo "  ${CODEX_RUNTIME_AGENT_ID} → ${CODEX_RUNTIME_HOME}"
-done
+if [[ "${PROFILE_RUNTIME}" == "codex" ]]; then
+  CODEX_NATIVE_RUNTIME_AGENT_IDS=("main" "research-orchestrator")
+  declare -A MANAGED_AGENT_DIR_SNAPSHOT_IDS=()
+  for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
+    MANAGED_AGENT_DIR_SNAPSHOT_IDS["${CODEX_RUNTIME_AGENT_ID}"]=1
+  done
+  mapfile -t OPENAI_AGENT_IDS_FOR_SNAPSHOT < <(jq -r '
+    ((.agents.entries // {}) | to_entries[] | .value + {id: .key})
+    | select((.model.primary // "") | startswith("openai/"))
+    | .id
+  ' "${REPO_CONFIG}")
+  for OPENAI_AGENT_ID_FOR_SNAPSHOT in "${OPENAI_AGENT_IDS_FOR_SNAPSHOT[@]}"; do
+    MANAGED_AGENT_DIR_SNAPSHOT_IDS["${OPENAI_AGENT_ID_FOR_SNAPSHOT}"]=1
+  done
+  for MANAGED_AGENT_ID_FOR_SNAPSHOT in "${!MANAGED_AGENT_DIR_SNAPSHOT_IDS[@]}"; do
+    snapshot_managed_artifact_path "${OPENCLAW_PUSH_HOME}/agents/${MANAGED_AGENT_ID_FOR_SNAPSHOT}/agent"
+  done
+  echo "Writing native Codex runtime configs to ${#CODEX_NATIVE_RUNTIME_AGENT_IDS[@]} scoped Codex homes:"
+  for CODEX_RUNTIME_AGENT_ID in "${CODEX_NATIVE_RUNTIME_AGENT_IDS[@]}"; do
+    CODEX_RUNTIME_HOME="${OPENCLAW_PUSH_HOME}/agents/${CODEX_RUNTIME_AGENT_ID}/agent/codex-home"
+    write_codex_runtime_config "${CODEX_RUNTIME_HOME}" "${CODEX_RUNTIME_AGENT_ID}"
+    if [[ "${CODEX_RUNTIME_AGENT_ID}" == "research-orchestrator" ]]; then
+      render_native_research_role_config \
+        "${CODEX_AGENTS_SRC}" \
+        "${RESEARCH_OWNER_WORKSPACE_DST}/.codex/agent-configs" \
+        "${CODEX_RUNTIME_HOME}/config.toml"
+      validate_codex_native_research_runtime_roles \
+        "${CODEX_RUNTIME_HOME}/config.toml" \
+        "${CODEX_AGENTS_SRC}" \
+        "${RESEARCH_OWNER_WORKSPACE_DST}/.codex/agent-configs"
+    fi
+    if [[ "${CODEX_RUNTIME_AGENT_ID}" == "main" || "${CODEX_RUNTIME_AGENT_ID}" == "research-orchestrator" ]]; then
+      CODEX_RUNTIME_AGENTS_DST="${CODEX_RUNTIME_HOME}/agents"
+      guarded_mkdir_p "${CODEX_RUNTIME_AGENTS_DST}" "creating managed Codex runtime agents directory ${CODEX_RUNTIME_AGENTS_DST}"
+      remove_retired_codex_runtime_agents "${CODEX_RUNTIME_AGENTS_DST}"
+    fi
+    validate_codex_runtime_config "${CODEX_RUNTIME_HOME}" "${CODEX_RUNTIME_AGENT_ID}"
+    echo "  ${CODEX_RUNTIME_AGENT_ID} → ${CODEX_RUNTIME_HOME}"
+  done
+fi
+
 
 run_research_owner_command_contract_probe() {
   local codex_home="${OPENCLAW_PUSH_HOME}/agents/research-orchestrator/agent/codex-home"
@@ -2505,11 +2802,11 @@ fi
 # ── Manage Azure API-version preload artifact ────────────────────────────────
 PRELOAD_SRC="${REPO_ROOT}/gateway/openclaw_config/azure-api-version-preload.cjs"
 PRELOAD_DST="${OPENCLAW_PUSH_HOME}/azure-api-version-preload.cjs"
-if [[ "${OPENCLAW_PROVIDER:-codex}" == "azure" && -f "${PRELOAD_SRC}" ]]; then
+if [[ "${PROVIDER}" == "azure" && -f "${PRELOAD_SRC}" ]]; then
   snapshot_managed_artifact_path "${PRELOAD_DST}"
   guarded_cp_file "${PRELOAD_SRC}" "${PRELOAD_DST}" "copying managed Azure preload artifact ${PRELOAD_DST}"
   echo "Copied azure-api-version-preload.cjs → ${PRELOAD_DST}"
-elif [[ "${OPENCLAW_PROVIDER:-codex}" != "azure" && -f "${PRELOAD_DST}" ]]; then
+elif [[ "${PROVIDER}" != "azure" && -f "${PRELOAD_DST}" ]]; then
   snapshot_managed_artifact_path "${PRELOAD_DST}"
   guarded_rm "${PRELOAD_DST}" "removing managed Azure preload artifact ${PRELOAD_DST}"
   echo "Removed Azure preload artifact from Codex/OpenRouter route: ${PRELOAD_DST}"
@@ -2523,7 +2820,7 @@ if [[ "${PROVIDER}" == "codex" ]]; then
     snapshot_managed_artifact_path "${SYSTEMD_USER_DIR}/${GATEWAY_SERVICE_NAME}"
     snapshot_stale_systemd_environment_paths
     remove_stale_azure_node_options_for_codex
-    check_managed_agent_codex_auth_readiness
+    check_agent_auth_readiness
   fi
 fi
 
@@ -2556,6 +2853,18 @@ if [[ "${current_live_config_hash}" != "${PUBLISHED_OPENCLAW_CONFIG_HASH}" \
   echo "       expected ${PUBLISHED_OPENCLAW_CONFIG_BYTES} bytes sha256 ${PUBLISHED_OPENCLAW_CONFIG_HASH}; got ${current_live_config_bytes} bytes sha256 ${current_live_config_hash}." >&2
   run_deployment_rollback_and_exit 1
 fi
+
+# Record the deployed profile so runtime consumers resolve the same profile the
+# config was published for. Snapshotted first, so a later failure rolls it back.
+DEPLOYED_PROFILE_SNAPSHOT_DST="${OPENCLAW_PUSH_HOME}/g2-agent-profile.json"
+snapshot_managed_artifact_path "${DEPLOYED_PROFILE_SNAPSHOT_DST}" || run_deployment_rollback_and_exit 1
+if ! PYTHONSAFEPATH=1 PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+  "${PYTHON_BIN}" -m gateway.agent_profiles write-deployed \
+  --profile "${PROFILE}" --state-dir "${OPENCLAW_PUSH_HOME}" >/dev/null; then
+  echo "ERROR: Could not write the deployed agent profile snapshot; rolling back managed deployment from backup ${BACKUP}." >&2
+  run_deployment_rollback_and_exit 1
+fi
+echo "Recorded deployed agent profile '${PROFILE}' → ${DEPLOYED_PROFILE_SNAPSHOT_DST}"
 
 # Install the research owner definition without enabling or starting it. The
 # operator owns activation and stop transitions.
@@ -2624,6 +2933,15 @@ validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_TMP
 guarded_mv_replace "${NATIVE_CRASH_HARDENING_DROPIN_TMP}" "${NATIVE_CRASH_HARDENING_DROPIN_DST}" "publishing managed native-crash hardening drop-in ${NATIVE_CRASH_HARDENING_DROPIN_DST}"
 NATIVE_CRASH_HARDENING_DROPIN_TMP=""
 validate_native_crash_hardening_dropin_file "${NATIVE_CRASH_HARDENING_DROPIN_DST}"
+# Installed under BOTH profiles so one gateway restart under codex arms
+# CLAUDE_CONFIG_DIR ahead of any later switch to claude.
+CLAUDE_CONFIG_DROPIN_TMP="$(mktemp "${GATEWAY_RUNTIME_CAPS_DROPIN_DIR}/.${CLAUDE_CONFIG_DROPIN_NAME}.XXXXXX")"
+guarded_cp_file "${CLAUDE_CONFIG_DROPIN_SRC}" "${CLAUDE_CONFIG_DROPIN_TMP}" "staging managed Claude config drop-in ${CLAUDE_CONFIG_DROPIN_TMP}"
+guarded_chmod 0644 "${CLAUDE_CONFIG_DROPIN_TMP}" "chmod staged managed Claude config drop-in ${CLAUDE_CONFIG_DROPIN_TMP}"
+validate_claude_config_dropin_file "${CLAUDE_CONFIG_DROPIN_TMP}"
+guarded_mv_replace "${CLAUDE_CONFIG_DROPIN_TMP}" "${CLAUDE_CONFIG_DROPIN_DST}" "publishing managed Claude config drop-in ${CLAUDE_CONFIG_DROPIN_DST}"
+CLAUDE_CONFIG_DROPIN_TMP=""
+validate_claude_config_dropin_file "${CLAUDE_CONFIG_DROPIN_DST}"
 if ! retire_obsolete_codex_runtime_dropin; then
   run_deployment_rollback_and_exit 1
 fi
@@ -2645,6 +2963,7 @@ if [[ "${POST_COMMIT_CLEANUP_FAILED:-0}" -ne 0 ]]; then
 fi
 echo "Installed ${GATEWAY_SERVICE_NAME} runtime caps drop-in → ${GATEWAY_RUNTIME_CAPS_DROPIN_DST}"
 echo "Installed ${GATEWAY_SERVICE_NAME} native-crash hardening → ${NATIVE_CRASH_HARDENING_DROPIN_DST}"
+echo "Installed ${GATEWAY_SERVICE_NAME} Claude config drop-in → ${CLAUDE_CONFIG_DROPIN_DST}"
 if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
   echo "Deferred user systemd reload; restart ${GATEWAY_SERVICE_NAME} externally after leaving paused mode."
 else
@@ -2659,6 +2978,18 @@ if [[ "${PROVIDER}" == "codex" ]]; then
   echo "Using model: ${MODEL_PRIMARY}"
   echo "Native auth readiness: shared OpenAI/Codex OAuth verified during publication."
   echo "Codex plugin is enabled; OpenAI provider runtime is pinned to codex."
+  echo ""
+elif [[ "${PROFILE_RUNTIME}" == "claude-cli" ]]; then
+  echo "── Anthropic / Claude Code ──"
+  echo "Profile: ${PROFILE}; main model: ${MODEL_PRIMARY}; research owner: ${RESEARCH_ORCHESTRATOR_MODEL_PRIMARY}"
+  echo "Claude Code settings installed."
+  if [[ "${OPENCLAW_PUSH_MODE}" == "paused" ]]; then
+    echo "Claude Code auth readiness was SKIPPED (paused mode)."
+  else
+    echo "Claude Code auth readiness verified before publication."
+  fi
+  echo "After restarting ${GATEWAY_SERVICE_NAME}, verify the gateway with:"
+  printf '  %q -m gateway.deployment.claude_doctor check --state-dir %q --gateway\n' "${PYTHON_BIN}" "${OPENCLAW_PUSH_HOME}"
   echo ""
 elif [[ "${PROVIDER}" == "azure" ]]; then
   echo "── Azure Entra preload ──"

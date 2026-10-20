@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import stat
 import subprocess
@@ -1194,6 +1195,10 @@ case "$*" in
     printf 'LoadState=%s\nActiveState=%s\n' "$load_state" "$active_state"
     exit 0
     ;;
+  "--user show -p MainPID --value openclaw-gateway.service")
+    printf '%s\n' "${{GATEWAY_MAIN_PID_VALUE:-0}}"
+    exit 0
+    ;;
   "--user show openclaw-gateway.service ${{paused_show_properties}}")
     load_state="${{GATEWAY_LOAD_STATE:-loaded}}"
     active_state="${{GATEWAY_ACTIVE_STATE:-inactive}}"
@@ -1343,9 +1348,10 @@ def _prepare_push_script_home(
     *,
     gateway_load_state: str = "loaded",
     gateway_active_state: str = "inactive",
+    push_root_name: str = "isolated push root with spaces $literal",
 ) -> dict[str, str]:
     home = tmp_path / "home"
-    openclaw_home = home / "isolated push root with spaces $literal"
+    openclaw_home = home / push_root_name
     leaked_openclaw_home = tmp_path / "inherited-openclaw-home"
     leaked_state_dir = tmp_path / "inherited-state-dir"
     leaked_config_path = tmp_path / "inherited-config.json"
@@ -1586,8 +1592,10 @@ def _schema_validation_status(payload: dict[str, object]) -> int:
     return result.returncode
 
 
-def _prepare_paused_push_script_home(tmp_path: Path) -> dict[str, str]:
-    env = _prepare_push_script_home(tmp_path)
+def _prepare_paused_push_script_home(
+    tmp_path: Path, *, push_root_name: str = "isolated push root with spaces $literal"
+) -> dict[str, str]:
+    env = _prepare_push_script_home(tmp_path, push_root_name=push_root_name)
     paused_target_db = (
         Path(env["OPENCLAW_PUSH_HOME"]) / "agents/research-orchestrator/agent/openclaw-agent.sqlite"
     )
@@ -5508,3 +5516,486 @@ def test_push_script_rejects_unstable_exact_prefix_version(
     assert result.returncode == 1
     assert "need exactly 2026.9.2" in result.stderr
     assert not openclaw_home.exists()
+
+
+# ── Agent profile wiring (AP2d) ──────────────────────────────────────────────
+CLAUDE_CONFIG_DROPIN = REPO_ROOT / "gateway/openclaw_config/openclaw-gateway-claude-config.conf"
+CLAUDE_PUSH_ROOT = ".openclaw"
+
+
+def _claude_config_dropin_dst(home: Path) -> Path:
+    return _runtime_caps_dropin_dst(home).parent / "40-openclaw-claude-config.conf"
+
+
+def _install_fake_claude(env: dict[str, str], *, logged_in: bool = True) -> None:
+    mock_bin = Path(env["PATH"].split(":")[0])
+    status = '{"loggedIn": true, "authMethod": "claude.ai", "subscriptionType": "max"}'
+    if not logged_in:
+        status = '{"loggedIn": false}'
+    _write_executable(
+        mock_bin / "claude",
+        f"""
+case "$1" in
+  --version) echo "2.1.304 (Claude Code)" ;;
+  auth) echo '{status}' ;;
+  *) exit 2 ;;
+esac
+""",
+    )
+
+
+def _set_env_file_profile(env: dict[str, str], name: str) -> None:
+    env_file = Path(env["OPENCLAW_PUSH_ENV_FILE"])
+    env_file.write_text(
+        env_file.read_text(encoding="utf-8") + f"G2_AGENT_PROFILE={name}\n", encoding="utf-8"
+    )
+    env_file.chmod(0o600)
+
+
+def _add_persona_placeholders(env: dict[str, str]) -> None:
+    persona = Path(env["RESEARCH_OWNER_PERSONA_SRC"])
+    (persona / "TOOLS.md").write_text(
+        "profile=@AGENT_PROFILE@ runtime=@AGENT_RUNTIME@ root=@RESEARCH_V2_ROOT@\n",
+        encoding="utf-8",
+    )
+
+
+def _prepare_claude_push_home(
+    tmp_path: Path, *, paused: bool = False, confirm_change: bool = True
+) -> dict[str, str]:
+    if paused:
+        env = _prepare_paused_push_script_home(tmp_path, push_root_name=CLAUDE_PUSH_ROOT)
+    else:
+        env = _prepare_push_script_home(tmp_path, push_root_name=CLAUDE_PUSH_ROOT)
+    _install_fake_claude(env)
+    _set_env_file_profile(env, "claude")
+    _add_persona_placeholders(env)
+    if confirm_change:
+        env["OPENCLAW_PUSH_PROFILE_CHANGE"] = "claude"
+    return env
+
+
+def test_push_script_profile_resolution_prefers_exported_over_env_file(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    _set_env_file_profile(env, "claude")
+    env["G2_AGENT_PROFILE"] = "codex"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "Agent profile: codex (runtime codex)" in result.stdout
+    published = json.loads(
+        (Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json").read_text(encoding="utf-8")
+    )
+    assert "research-implementer" not in published["agents"]["entries"]
+
+
+def test_push_script_rejects_unknown_profile_before_any_write(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["G2_AGENT_PROFILE"] = "nonesuch"
+    live_config = Path(env["OPENCLAW_PUSH_HOME"]) / "openclaw.json"
+    before = live_config.read_bytes()
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "nonesuch" in result.stderr
+    assert live_config.read_bytes() == before
+    assert not _runtime_caps_dropin_dst(Path(env["HOME"])).exists()
+
+
+def test_push_script_codex_renders_personas_and_records_deployed_profile(tmp_path: Path) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    _add_persona_placeholders(env)
+    env["RESEARCH_V2_ROOT"] = str(Path(env["OPENCLAW_PUSH_HOME"]) / "research-v2")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+    owner_tools = (push_home / "workspace-research-orchestrator/TOOLS.md").read_text("utf-8")
+    assert owner_tools == f"profile=codex runtime=codex root={push_home}/research-v2\n"
+    for workspace in ("workspace", "workspace-research-orchestrator"):
+        for name in ("AGENTS.md", "SOUL.md", "TOOLS.md", "BOOTSTRAP.md"):
+            text = (push_home / workspace / name).read_text("utf-8")
+            assert "@AGENT_PROFILE@" not in text and "@RUNTIME_SECTION@" not in text
+    for layer in ("implementer", "experiment_runner", "reviewer"):
+        layer_path = (
+            push_home / f"workspace-research-orchestrator/.codex/agent-configs/{layer}.toml"
+        )
+        assert "@RESEARCH_V2_ROOT@" not in layer_path.read_text("utf-8")
+    deployed = json.loads((push_home / "g2-agent-profile.json").read_text("utf-8"))
+    assert deployed["profile"] == "codex"
+    assert _claude_config_dropin_dst(Path(env["HOME"])).read_text("utf-8") == (
+        CLAUDE_CONFIG_DROPIN.read_text("utf-8")
+    )
+    assert not (push_home / "claude-code").exists()
+    assert not (push_home / "workspace-research-implementer").exists()
+    assert Path(env["CODEX_DOCTOR_LOG"]).exists()
+
+
+def test_push_script_claude_gates_codex_steps_and_runs_claude_steps(tmp_path: Path) -> None:
+    env = _prepare_claude_push_home(tmp_path)
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+    assert push_home == Path(env["HOME"]) / CLAUDE_PUSH_ROOT
+    env["RESEARCH_V2_ROOT"] = str(push_home / "research-v2")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "Agent profile: claude (runtime claude-cli)" in result.stdout
+    # Codex-only steps did not run.
+    assert not Path(env["CODEX_DOCTOR_LOG"]).exists()
+    assert not Path(env["CODEX_SANDBOX_LOG"]).exists()
+    assert not list(push_home.glob("agents/*/agent/codex-home"))
+    assert not (push_home / "workspace-research-orchestrator/.codex").exists()
+    assert "Codex runtime validated" not in result.stdout
+    # Published config is the claude assembly.
+    published = json.loads((push_home / "openclaw.json").read_text("utf-8"))
+    entries = published["agents"]["entries"]
+    for child in ("research-implementer", "research-runner", "research-reviewer"):
+        assert child in entries
+    assert entries["main"]["model"]["primary"].startswith("anthropic/")
+    assert "codex" not in published["plugins"].get("allow", [])
+    # Claude steps ran: settings, drop-in, deployed snapshot, auth readiness.
+    settings = json.loads((push_home / "claude-code/settings.json").read_text("utf-8"))
+    assert "permissions" in settings
+    # The operator env file (rendered from the push variables) is write-denied.
+    assert env["OPENCLAW_PUSH_ENV_FILE"] in json.dumps(settings)
+    assert settings["sandbox"]["filesystem"]["denyWrite"]
+    dropin = _claude_config_dropin_dst(Path(env["HOME"]))
+    assert dropin.read_text("utf-8") == CLAUDE_CONFIG_DROPIN.read_text("utf-8")
+    assert _mode(dropin) == 0o644
+    deployed = json.loads((push_home / "g2-agent-profile.json").read_text("utf-8"))
+    assert deployed["profile"] == "claude"
+    assert "Claude Code auth readiness verified." in result.stdout
+    assert "claude_doctor check --state-dir" in result.stdout
+    # Persona rendering ran for the owner, main and the three children.
+    assert (push_home / "workspace-research-orchestrator/TOOLS.md").read_text("utf-8") == (
+        f"profile=claude runtime=claude-cli root={push_home}/research-v2\n"
+    )
+    for role in ("implementer", "runner", "reviewer"):
+        text = (push_home / f"workspace-research-{role}/AGENTS.md").read_text("utf-8")
+        assert not re.search(r"@[A-Z][A-Z0-9_]*@", text)
+    main_text = (push_home / "workspace/AGENTS.md").read_text("utf-8")
+    assert "@AGENT_PROFILE@" not in main_text
+
+
+def test_push_script_claude_paused_mode_defers_auth_and_keeps_pause_gates(tmp_path: Path) -> None:
+    env = _prepare_claude_push_home(tmp_path, paused=True)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "DEFERRED: paused mode skipped Claude Code auth readiness check" in result.stdout
+    assert "auth readiness was SKIPPED (paused mode)" in result.stdout
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+    published = json.loads((push_home / "openclaw.json").read_text("utf-8"))
+    assert published["cron"]["enabled"] is False
+    assert published["agents"]["defaults"]["heartbeat"]["every"] == "0m"
+    assert (push_home / "claude-code/settings.json").is_file()
+    assert _claude_config_dropin_dst(Path(env["HOME"])).is_file()
+    systemctl_log = Path(env["SYSTEMCTL_LOG"]).read_text(encoding="utf-8")
+    assert "daemon-reload" not in systemctl_log
+
+
+def test_push_script_claude_auth_failure_refuses_before_any_write(tmp_path: Path) -> None:
+    env = _prepare_claude_push_home(tmp_path)
+    _install_fake_claude(env, logged_in=False)
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+    before = (push_home / "openclaw.json").read_bytes()
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "Claude Code readiness failed" in result.stderr
+    assert "Backed up local config" not in result.stdout
+    assert (push_home / "openclaw.json").read_bytes() == before
+    assert not (push_home / "g2-agent-profile.json").exists()
+    assert not (push_home / "claude-code").exists()
+    assert not _claude_config_dropin_dst(Path(env["HOME"])).exists()
+
+
+def test_push_script_claude_refuses_state_dir_that_does_not_match_the_dropin(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    _install_fake_claude(env)
+    _set_env_file_profile(env, "claude")
+    env["OPENCLAW_PUSH_PROFILE_CHANGE"] = "claude"
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+    before = (push_home / "openclaw.json").read_bytes()
+
+    result = _run_push_script(env)
+
+    assert result.returncode != 0
+    assert "drop-in CLAUDE_CONFIG_DIR" in result.stderr
+    assert "Backed up local config" not in result.stdout
+    assert (push_home / "openclaw.json").read_bytes() == before
+    assert not _claude_config_dropin_dst(Path(env["HOME"])).exists()
+
+
+def _write_deployed_snapshot(push_home: Path, profile: str) -> None:
+    subprocess.run(
+        [
+            str(REPO_ROOT / ".venv/bin/python"),
+            "-m",
+            "gateway.agent_profiles",
+            "write-deployed",
+            "--profile",
+            profile,
+            "--state-dir",
+            str(push_home),
+        ],
+        check=True,
+        capture_output=True,
+        env={"PYTHONPATH": str(REPO_ROOT), "PYTHONSAFEPATH": "1", "PATH": "/usr/bin:/bin"},
+    )
+
+
+def _deployed_profile_name(push_home: Path) -> str:
+    return str(json.loads((push_home / "g2-agent-profile.json").read_text("utf-8"))["profile"])
+
+
+def test_push_script_refuses_silent_profile_switch(tmp_path: Path) -> None:
+    env = _prepare_claude_push_home(tmp_path, confirm_change=False)
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+    before = (push_home / "openclaw.json").read_bytes()
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "AGENT PROFILE: claude" in result.stdout
+    assert f"G2_AGENT_PROFILE in {env['OPENCLAW_PUSH_ENV_FILE']}" in result.stdout
+    assert "would switch the deployed agent profile from 'codex' to 'claude'" in result.stderr
+    assert (push_home / "openclaw.json").read_bytes() == before
+    assert not (push_home / "claude-code").exists()
+    assert not _claude_config_dropin_dst(Path(env["HOME"])).exists()
+
+
+def test_push_script_profile_change_must_name_the_resolved_profile(tmp_path: Path) -> None:
+    env = _prepare_claude_push_home(tmp_path, confirm_change=False)
+    env["OPENCLAW_PUSH_PROFILE_CHANGE"] = "codex"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert "would switch the deployed agent profile" in result.stderr
+
+
+def test_push_script_banner_names_exported_source_and_same_profile_needs_no_confirmation(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["G2_AGENT_PROFILE"] = "codex"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert "AGENT PROFILE: codex   (source: exported G2_AGENT_PROFILE)" in result.stdout
+
+
+def _start_fake_gateway_process(
+    claude_config_dir: str | None,
+) -> subprocess.Popen[bytes]:
+    proc_env = {"PATH": "/usr/bin:/bin"}
+    if claude_config_dir is not None:
+        proc_env["CLAUDE_CONFIG_DIR"] = claude_config_dir
+    return subprocess.Popen(["sleep", "120"], env=proc_env)
+
+
+@pytest.mark.parametrize("case", ["pid-zero", "missing-var", "wrong-var", "dead-pid"])
+def test_push_script_claude_refuses_when_running_gateway_lacks_claude_config_dir(
+    tmp_path: Path, case: str
+) -> None:
+    env = _prepare_claude_push_home(tmp_path)
+    env["GATEWAY_ACTIVE_STATE"] = "active"
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+    before = (push_home / "openclaw.json").read_bytes()
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        if case == "pid-zero":
+            env["GATEWAY_MAIN_PID_VALUE"] = "0"
+        elif case == "dead-pid":
+            env["GATEWAY_MAIN_PID_VALUE"] = "4194300"
+        else:
+            proc = _start_fake_gateway_process(
+                None if case == "missing-var" else str(tmp_path / "elsewhere")
+            )
+            env["GATEWAY_MAIN_PID_VALUE"] = str(proc.pid)
+
+        result = _run_push_script(env)
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait()
+
+    assert result.returncode == 1
+    assert "systemctl --user restart openclaw-gateway.service" in result.stderr
+    assert "paused mode" in result.stderr
+    assert "Refusing the claude push" in result.stderr
+    assert "Backed up local config" not in result.stdout
+    assert (push_home / "openclaw.json").read_bytes() == before
+    assert not (push_home / "claude-code").exists()
+    assert not _claude_config_dropin_dst(Path(env["HOME"])).exists()
+
+
+def test_push_script_claude_accepts_running_gateway_with_claude_config_dir(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_claude_push_home(tmp_path)
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+    env["GATEWAY_ACTIVE_STATE"] = "active"
+    proc = _start_fake_gateway_process(str(push_home / "claude-code"))
+    try:
+        env["GATEWAY_MAIN_PID_VALUE"] = str(proc.pid)
+        result = _run_push_script(env)
+    finally:
+        proc.kill()
+        proc.wait()
+
+    assert result.returncode == 0, result.stderr
+    assert (push_home / "claude-code/settings.json").is_file()
+
+
+def test_push_script_codex_with_active_gateway_needs_no_claude_environment(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["GATEWAY_ACTIVE_STATE"] = "active"
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_push_script_claude_installs_settings_before_publishing_config(tmp_path: Path) -> None:
+    env = _prepare_claude_push_home(tmp_path)
+    log = tmp_path / "order.log"
+    mock_bin = Path(env["PATH"].split(":")[0])
+    # The mock openclaw validates the generated config; record whether the
+    # settings file already exists at that point (it must).
+    env["ORDER_LOG"] = str(log)
+    env["ORDER_SETTINGS"] = str(Path(env["OPENCLAW_PUSH_HOME"]) / "claude-code/settings.json")
+    wrapper = mock_bin / "openclaw"
+    original = wrapper.read_text("utf-8")
+    wrapper.write_text(
+        original.replace(
+            "#!/usr/bin/env bash\n",
+            '#!/usr/bin/env bash\n[ -f "$ORDER_SETTINGS" ] && echo settings-present >> "$ORDER_LOG"'
+            ' || echo settings-missing >> "$ORDER_LOG"\n',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    recorded = log.read_text("utf-8").split()
+    assert recorded and recorded[-1] == "settings-present"
+    first_config_validate = result.stdout.index("Generated OpenClaw config schema validated")
+    assert result.stdout.index("Installed Claude Code settings") < first_config_validate
+
+
+def test_push_script_failure_after_write_deployed_restores_snapshot_and_dropin(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    env["FAIL_DAEMON_RELOAD"] = "1"
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+    _write_deployed_snapshot(push_home, "claude")
+    snapshot = push_home / "g2-agent-profile.json"
+    snapshot_before = snapshot.read_bytes()
+    env["OPENCLAW_PUSH_PROFILE_CHANGE"] = "codex"
+    dropin = _claude_config_dropin_dst(Path(env["HOME"]))
+    dropin.parent.mkdir(parents=True)
+    prior = b"[Service]\nEnvironment=PRIOR=1\n"
+    dropin.write_bytes(prior)
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert snapshot.read_bytes() == snapshot_before
+    assert dropin.read_bytes() == prior
+    assert "Restoring managed OpenClaw artifacts after failed publication." in result.stderr
+
+
+def test_push_script_claude_failure_restores_only_settings_and_keeps_credentials(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_claude_push_home(tmp_path)
+    env["FAIL_DAEMON_RELOAD"] = "1"
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+    config_dir = push_home / "claude-code"
+    (config_dir / "projects/x").mkdir(parents=True)
+    (config_dir / ".credentials.json").write_text("credential-sentinel", encoding="utf-8")
+    (config_dir / "projects/x/t.jsonl").write_text("transcript-sentinel", encoding="utf-8")
+    (config_dir / "settings.json").write_text('{"prior": true}\n', encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 1
+    assert (config_dir / "settings.json").read_text("utf-8") == '{"prior": true}\n'
+    assert (config_dir / ".credentials.json").read_text("utf-8") == "credential-sentinel"
+    assert (config_dir / "projects/x/t.jsonl").read_text("utf-8") == "transcript-sentinel"
+    assert not (push_home / "g2-agent-profile.json").exists()
+
+
+def test_push_script_claude_to_codex_writes_snapshot_keeps_dropin_and_claude_artifacts(
+    tmp_path: Path,
+) -> None:
+    env = _prepare_push_script_home(tmp_path)
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+    _write_deployed_snapshot(push_home, "claude")
+    env["OPENCLAW_PUSH_PROFILE_CHANGE"] = "codex"
+    config_dir = push_home / "claude-code"
+    config_dir.mkdir()
+    (config_dir / "settings.json").write_text('{"claude": true}\n', encoding="utf-8")
+    (config_dir / ".credentials.json").write_text("credential-sentinel", encoding="utf-8")
+    child = push_home / "workspace-research-implementer"
+    child.mkdir()
+    (child / "AGENTS.md").write_text("child-sentinel\n", encoding="utf-8")
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    assert _deployed_profile_name(push_home) == "codex"
+    assert _claude_config_dropin_dst(Path(env["HOME"])).read_text("utf-8") == (
+        CLAUDE_CONFIG_DROPIN.read_text("utf-8")
+    )
+    assert (config_dir / "settings.json").read_text("utf-8") == '{"claude": true}\n'
+    assert (config_dir / ".credentials.json").read_text("utf-8") == "credential-sentinel"
+    assert (child / "AGENTS.md").read_text("utf-8") == "child-sentinel\n"
+    published = json.loads((push_home / "openclaw.json").read_text("utf-8"))
+    assert "research-implementer" not in published["agents"]["entries"]
+
+
+@pytest.mark.parametrize(
+    ("profile", "runtime_heading", "other_heading"),
+    [
+        ("codex", "### Runtime mechanics: codex", "### Runtime mechanics: claude-cli"),
+        ("claude", "### Runtime mechanics: claude-cli", "### Runtime mechanics: codex"),
+    ],
+)
+def test_push_script_renders_the_real_owner_persona_for_each_profile(
+    tmp_path: Path, profile: str, runtime_heading: str, other_heading: str
+) -> None:
+    if profile == "claude":
+        env = _prepare_claude_push_home(tmp_path)
+    else:
+        env = _prepare_push_script_home(tmp_path)
+    del env["RESEARCH_OWNER_PERSONA_SRC"]
+    push_home = Path(env["OPENCLAW_PUSH_HOME"])
+
+    result = _run_push_script(env)
+
+    assert result.returncode == 0, result.stderr
+    workspace = push_home / "workspace-research-orchestrator"
+    for name in ("AGENTS.md", "SOUL.md", "TOOLS.md", "BOOTSTRAP.md"):
+        text = (workspace / name).read_text("utf-8")
+        assert not re.search(r"@[A-Z][A-Z0-9_]*@", text), name
+    tools = (workspace / "TOOLS.md").read_text("utf-8")
+    assert runtime_heading in tools
+    assert other_heading not in tools
+    assert (push_home / "workspace/AGENTS.md").is_file()

@@ -47,7 +47,8 @@ cat "$FAKE_STATUS"
 
 FAKE_PUSH = """#!/usr/bin/env bash
 echo "push env=$OPENCLAW_PUSH_ENV_FILE home=${OPENCLAW_PUSH_HOME:-}" \\
-  "bin=${OPENCLAW_BIN:-} profile=${G2_AGENT_PROFILE:-unset}" >> "$FAKE_LOG"
+  "bin=${OPENCLAW_BIN:-} profile=${G2_AGENT_PROFILE:-unset}" \
+  "change=${OPENCLAW_PUSH_PROFILE_CHANGE:-unset}" >> "$FAKE_LOG"
 cp "$OPENCLAW_PUSH_ENV_FILE" "$FAKE_PUSH_SNAPSHOT"
 case "${FAKE_PUSH:-ok}" in
   fail) exit 1 ;;
@@ -439,3 +440,31 @@ def test_symlinked_lock_refuses(h: Harness, tmp_path: Path) -> None:
     assert result.returncode == 1
     assert "symlink" in result.stderr
     assert target.read_text() == "keep"
+
+
+def test_push_is_told_the_profile_change_is_intended(h: Harness) -> None:
+    result = h.run("claude", "--skip-smoke-ack")
+    assert result.returncode == 0, result.stderr
+    assert "change=claude" in pushes(h)[0]
+
+
+def test_default_prints_restart_command_without_running_it(h: Harness) -> None:
+    result = h.run("codex")
+    assert result.returncode == 0, result.stderr
+    assert "systemctl --user restart openclaw-gateway.service" in result.stdout
+    assert not any("restart" in c for c in h.calls() if c.startswith("systemctl"))
+
+
+def test_restart_gateway_flag_restarts_after_verify(h: Harness) -> None:
+    result = h.run("codex", "--restart-gateway")
+    assert result.returncode == 0, result.stderr
+    calls = h.calls()
+    assert calls[-1] == "systemctl --user restart openclaw-gateway.service"
+    assert any(c.startswith("python -m gateway.agent_profiles active --json") for c in calls)
+
+
+def test_dry_run_mentions_restart_plan_and_does_not_restart(h: Harness) -> None:
+    result = h.run("codex", "--dry-run", "--restart-gateway")
+    assert result.returncode == 0, result.stderr
+    assert "would run" in result.stdout and "restart openclaw-gateway.service" in result.stdout
+    assert not any("restart" in c for c in h.calls() if c.startswith("systemctl"))

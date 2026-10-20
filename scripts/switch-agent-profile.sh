@@ -19,7 +19,7 @@ PUSH_SCRIPT="${SWITCH_PUSH_SCRIPT:-${REPO_ROOT}/scripts/push-openclaw-config.sh}
 OWNER_UNIT="research-owner.service"
 
 usage() {
-  echo "usage: $(basename "$0") <codex|claude> [--dry-run] [--env-file PATH] [--no-research-root] [--skip-smoke-ack]" >&2
+  echo "usage: $(basename "$0") <codex|claude> [--dry-run] [--env-file PATH] [--no-research-root] [--skip-smoke-ack] [--restart-gateway]" >&2
   exit 64
 }
 
@@ -27,6 +27,7 @@ PROFILE=""
 DRY_RUN=0
 SKIP_SMOKE_ACK=0
 NO_RESEARCH_ROOT=0
+RESTART_GATEWAY=0
 ENV_FILE="${OPENCLAW_PUSH_ENV_FILE:-${REPO_ROOT}/gateway/openclaw_config/.env}"
 
 while [ "$#" -gt 0 ]; do
@@ -34,6 +35,7 @@ while [ "$#" -gt 0 ]; do
     --dry-run) DRY_RUN=1 ;;
     --skip-smoke-ack) SKIP_SMOKE_ACK=1 ;;
     --no-research-root) NO_RESEARCH_ROOT=1 ;;
+    --restart-gateway) RESTART_GATEWAY=1 ;;
     --env-file)
       [ "$#" -ge 2 ] || usage
       ENV_FILE="$2"
@@ -292,8 +294,13 @@ if [ "${DRY_RUN}" -eq 1 ]; then
     fi
   fi
   step "would set G2_AGENT_PROFILE=${PROFILE} in ${ENV_FILE} (atomic; other lines untouched)"
-  step "would run ${PUSH_SCRIPT} with G2_AGENT_PROFILE=${PROFILE}"
+  step "would run ${PUSH_SCRIPT} with G2_AGENT_PROFILE=${PROFILE} OPENCLAW_PUSH_PROFILE_CHANGE=${PROFILE}"
   step "would verify ${PYTHON} -m gateway.agent_profiles active --json --state-dir ${STATE_DIR} reports ${PROFILE}"
+  if [ "${RESTART_GATEWAY}" -eq 1 ]; then
+    step "would run ${SYSTEMCTL} --user restart openclaw-gateway.service"
+  else
+    step "would print: systemctl --user restart openclaw-gateway.service"
+  fi
   exit 0
 fi
 
@@ -377,7 +384,8 @@ trap 'fail_after_edit "interrupted."' INT TERM HUP
 env_py set "${ENV_FILE}" "${PROFILE}"
 
 step "push ${PUSH_SCRIPT}"
-if ! G2_AGENT_PROFILE="${PROFILE}" OPENCLAW_PUSH_ENV_FILE="${ENV_FILE}" "${PUSH_SCRIPT}" 9>&-; then
+if ! G2_AGENT_PROFILE="${PROFILE}" OPENCLAW_PUSH_PROFILE_CHANGE="${PROFILE}" \
+  OPENCLAW_PUSH_ENV_FILE="${ENV_FILE}" "${PUSH_SCRIPT}" 9>&-; then
   fail_after_edit "push failed."
 fi
 
@@ -387,3 +395,16 @@ if [ "${DEPLOYED}" != "${PROFILE}" ]; then
   fail_after_edit "push finished but the deployed profile is ${DEPLOYED}, not ${PROFILE}."
 fi
 echo "Deployed profile: ${DEPLOYED}"
+
+GATEWAY_UNIT="openclaw-gateway.service"
+if [ "${RESTART_GATEWAY}" -eq 1 ]; then
+  step "restart ${GATEWAY_UNIT}"
+  if ! "${SYSTEMCTL}" --user restart "${GATEWAY_UNIT}"; then
+    echo "ERROR: ${PROFILE} is deployed but restarting ${GATEWAY_UNIT} failed; restart it yourself: systemctl --user restart ${GATEWAY_UNIT}" >&2
+    exit 1
+  fi
+  echo "Restarted ${GATEWAY_UNIT}."
+else
+  echo "Restart the gateway to apply the profile (the running gateway keeps its old environment):"
+  echo "  systemctl --user restart ${GATEWAY_UNIT}"
+fi
