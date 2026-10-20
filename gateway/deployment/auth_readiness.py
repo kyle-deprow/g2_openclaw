@@ -13,6 +13,9 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import NoReturn
 
+from gateway.agent_profiles import AgentProfileError, load_profile
+
+from .claude_doctor import check_claude_auth_readiness
 from .guarded_fs import guard_destination_path_chain, path_owned_by_effective_user
 
 NATIVE_SHARED_SCHEMA_VERSION = 15
@@ -269,10 +272,27 @@ def check_managed_agent_codex_auth_readiness(
     )
 
 
+def check_auth_readiness(push_home: str, repo_config: str, profile_runtime: str) -> None:
+    """Profile-aware readiness: OpenAI OAuth under codex, claude_doctor under claude-cli."""
+
+    if profile_runtime == "codex":
+        check_managed_agent_codex_auth_readiness(push_home, repo_config)
+    elif profile_runtime == "claude-cli":
+        failures = check_claude_auth_readiness(Path(os.path.abspath(push_home)))
+        if failures:
+            _raise_error("Claude Code readiness failed: " + "; ".join(failures))
+        print("Claude Code auth readiness verified.")
+    else:
+        _raise_error(f"unknown runtime {profile_runtime!r}; expected codex or claude-cli.")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     check_parser = subparsers.add_parser("check")
+    check_parser.add_argument(
+        "--profile", default="codex", help="agent profile name (codex or claude)"
+    )
     check_parser.add_argument("push_home")
     check_parser.add_argument("repo_config")
     return parser
@@ -282,10 +302,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         if args.command == "check":
-            check_managed_agent_codex_auth_readiness(
-                args.push_home,
-                args.repo_config,
-            )
+            try:
+                runtime = load_profile(args.profile).runtime
+            except AgentProfileError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
+            check_auth_readiness(args.push_home, args.repo_config, runtime)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1

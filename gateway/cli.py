@@ -901,13 +901,83 @@ def _tail_file_text(path: Path, *, bytes_limit: int) -> str:
 # ---------------------------------------------------------------------------
 
 
+_PROC_ROOT = Path("/proc")
+_OPENCLAW_ARGV_MARKERS = ("openclaw-cli-mcp-", "openclaw-claude-skills-")
+
+
+def _read_proc_environ(pid_dir: Path) -> dict[str, str] | None:
+    try:
+        raw = (pid_dir / "environ").read_bytes()
+    except OSError:
+        return None
+    env: dict[str, str] = {}
+    for item in raw.split(b"\0"):
+        key, sep, value = item.partition(b"=")
+        if sep:
+            env[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    return env
+
+
+def _gateway_claude_pids(exclude: set[int] | None = None) -> set[int]:
+    """PIDs of `claude --print` children of the OpenClaw claude-cli backend.
+
+    A process matches only when its environment carries the gateway's dedicated
+    CLAUDE_CONFIG_DIR, an OpenClaw marker (MCP token env or openclaw temp dirs in argv) and
+    its argv has --print. Parentage is deliberately not used: orphans of a crashed gateway
+    have ppid 1. Unreadable processes are never matched.
+    """
+
+    from gateway.agent_profiles import claude_config_dir
+
+    skip = exclude or set()
+    try:
+        dedicated = claude_config_dir().resolve()
+    except (ValueError, OSError):
+        return set()
+    found: set[int] = set()
+    try:
+        entries = list(_PROC_ROOT.iterdir())
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.name.isdigit() or int(entry.name) in skip:
+            continue
+        try:
+            argv = [
+                a.decode("utf-8", "replace") for a in (entry / "cmdline").read_bytes().split(b"\0")
+            ]
+        except OSError:
+            continue
+        if "--print" not in argv:
+            continue
+        if not any(os.path.basename(a) == "claude" for a in argv[:2]):
+            continue
+        env = _read_proc_environ(entry)
+        if env is None or not env.get("CLAUDE_CONFIG_DIR"):
+            continue
+        try:
+            if Path(env["CLAUDE_CONFIG_DIR"]).resolve() != dedicated:
+                continue
+        except (ValueError, OSError):
+            continue
+        marked = "OPENCLAW_MCP_TOKEN" in env or any(
+            marker in a for a in argv for marker in _OPENCLAW_ARGV_MARKERS
+        )
+        if marked:
+            found.add(int(entry.name))
+    return found
+
+
 @app.command()
 def stop() -> None:
     """Stop all G2 OpenClaw processes (agents, MCP servers, gateway, Vite, simulator)."""
 
-    targets = [
+    targets: list[tuple[str, list[str] | None]] = [
         ("OpenClaw daemon", ["openclaw.*daemon", "openclaw.*gateway"]),
         ("OpenClaw agent", ["openclaw-agent", "openclaw.*agent", "codex app-server"]),
+        # `claude --print` children of the claude-cli backend, found by environment (see
+        # _gateway_claude_pids); signalled per PID, never by process group.
+        ("Claude agent CLI", None),
         ("MemPalace MCP server", ["python.*mempalace"]),
         ("Gateway", ["python.*-m.*gateway"]),
         ("Vite dev server", ["node.*vite"]),
@@ -919,30 +989,45 @@ def stop() -> None:
     exclude_pids = {own_pid, parent_pid}
     killed_any = False
 
+    # Collect Claude children before anything is killed so live children and orphans of a
+    # dying gateway are both found.
+    claude_pids = _gateway_claude_pids(exclude_pids)
+
     console.print("[bold]Stopping G2 OpenClaw services…[/bold]\n")
 
     for name, patterns in targets:
         pids: set[int] = set()
-        for pattern in patterns:
-            result = subprocess.run(
-                ["pgrep", "-f", pattern],
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                for line in result.stdout.strip().splitlines():
-                    pid = int(line.strip())
-                    if pid not in exclude_pids:
-                        pids.add(pid)
+        per_pid = patterns is None
+        if patterns is None:
+            pids = set(claude_pids)
+        else:
+            for pattern in patterns:
+                result = subprocess.run(
+                    ["pgrep", "-f", pattern],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    for line in result.stdout.strip().splitlines():
+                        pid = int(line.strip())
+                        if pid not in exclude_pids:
+                            pids.add(pid)
 
         if not pids:
             console.print(f"  [dim]●[/dim] {name}: not running")
             continue
 
+        if per_pid:
+            # Re-check identity right before signalling to close the PID-reuse window.
+            pids &= _gateway_claude_pids(exclude_pids)
+
         # SIGTERM first
         for pid in list(pids):
             try:
-                _signal_process_group(pid, signal.SIGTERM)
+                if per_pid:
+                    os.kill(pid, signal.SIGTERM)
+                else:
+                    _signal_process_group(pid, signal.SIGTERM)
             except ProcessLookupError:
                 pids.discard(pid)
 
@@ -958,9 +1043,14 @@ def stop() -> None:
                     remaining.discard(pid)
 
         # SIGKILL survivors
+        if per_pid:
+            remaining &= _gateway_claude_pids(exclude_pids)
         for pid in remaining:
             with contextlib.suppress(ProcessLookupError):
-                _signal_process_group(pid, signal.SIGKILL)
+                if per_pid:
+                    os.kill(pid, signal.SIGKILL)
+                else:
+                    _signal_process_group(pid, signal.SIGKILL)
 
         pid_str = ", ".join(str(p) for p in sorted(pids))
         console.print(f"  [green]✓[/green] {name}: stopped (PID {pid_str})")

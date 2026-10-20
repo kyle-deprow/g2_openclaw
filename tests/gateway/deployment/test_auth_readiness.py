@@ -544,3 +544,55 @@ def test_readiness_module_has_no_retired_synchronization_or_credential_fallback(
         "models auth login",
     ):
         assert retired not in source
+
+
+def test_claude_profile_skips_openai_oauth_and_delegates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from gateway.deployment import auth_readiness
+
+    calls: list[Path] = []
+
+    def fake_readiness(state_dir: Path) -> list[str]:
+        calls.append(state_dir)
+        return []
+
+    monkeypatch.setattr(auth_readiness, "check_claude_auth_readiness", fake_readiness)
+    monkeypatch.setattr(
+        auth_readiness,
+        "check_managed_agent_codex_auth_readiness",
+        lambda *a: pytest.fail("OpenAI OAuth check must not run under claude"),
+    )
+
+    # No native stores exist under tmp_path: the codex path would fail there.
+    assert (
+        auth_readiness.main(["check", "--profile", "claude", "--", str(tmp_path), "ignored.json"])
+        == 0
+    )
+    assert calls == [tmp_path]
+    assert "Claude Code auth readiness verified" in capsys.readouterr().out
+
+
+def test_claude_profile_reports_doctor_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gateway.deployment import auth_readiness
+
+    monkeypatch.setattr(
+        auth_readiness, "check_claude_auth_readiness", lambda state_dir: ["claude_auth: nope"]
+    )
+    with pytest.raises(SystemExit) as excinfo:
+        auth_readiness.main(["check", "--profile", "claude", "--", str(tmp_path), "x.json"])
+    assert "claude_auth: nope" in str(excinfo.value)
+
+
+def test_codex_profile_is_default_and_unknown_profile_exits_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from gateway.deployment import auth_readiness
+
+    assert auth_readiness.main(["check", "--profile", "nope", "--", str(tmp_path), "x.json"]) == 2
+    assert "nope" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as excinfo:
+        auth_readiness.main(["check", "--", str(tmp_path), "x.json"])
+    assert "state/openclaw.sqlite" in str(excinfo.value)
