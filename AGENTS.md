@@ -4,14 +4,14 @@
 
 G2 OpenClaw bridges Even Realities G2 glasses to a local OpenClaw assistant through a PC gateway. The G2 app is a thin WebView client: the iPhone relays BLE display, input, and microphone data between the glasses and the Python gateway. The gateway owns transcription, session selection, OpenClaw communication, telemetry, and local process lifecycle.
 
-The current agent path is Codex based. OpenClaw agent turns use the OpenAI provider with the Codex app-server runtime. Do not add alternate coding-agent integrations, compatibility shims, or silent provider fallbacks.
+OpenClaw agent turns, including the research loop, run on the deployed agent profile: `codex` (OpenAI provider with the Codex app-server runtime, the default) or `claude` (Anthropic provider with the `claude-cli` runtime). Switch profiles only with `scripts/switch-agent-profile.sh <codex|claude>`; the operator's 2026-10-19 directive supersedes the earlier OpenAI/Codex-only rule. Do not add other coding-agent integrations, compatibility shims, or silent provider fallbacks; a profile never falls back to the other.
 
 ## Stack
 
 - Python 3.13+ for `gateway/`, `infra/`, and tests, managed with `uv`.
 - TypeScript and Node.js 22+ for `g2_app/`, managed with `npm`.
 - The `g2_app` lockfile resolves EvenHub CLI `@evenrealities/evenhub-cli` 0.1.13 and SDK `@evenrealities/even_hub_sdk` 0.0.11. The simulator is installed globally; inspect its version before using version-specific features. Current audited upstream versions are SDK 0.0.12 and simulator 0.8.0.
-- OpenClaw local gateway with OpenAI/Codex auth. Authenticate with `openclaw models auth login --provider openai`.
+- OpenClaw local gateway with the deployed profile's auth: for `codex`, authenticate with `openclaw models auth login --provider openai`; for `claude`, log in with `CLAUDE_CONFIG_DIR=~/.openclaw/claude-code claude auth login` (the gateway's dedicated Claude config directory).
 - Azure Bicep under `infra/` for infrastructure modules.
 
 ## Layout
@@ -39,10 +39,10 @@ The current agent path is Codex based. OpenClaw agent turns use the OpenAI provi
 
 ## OpenClaw Rules
 
-- The default route is `openai/gpt-5.4` through OpenClaw's Codex runtime. Any Azure or OpenRouter use must be explicitly selected with `OPENCLAW_PROVIDER`; never silently retry through another provider.
+- The default (`codex` profile) route is `openai/gpt-5.4` through OpenClaw's Codex runtime; the `claude` profile selects its models from `gateway/openclaw_config/agent-profiles.json`. Any Azure or OpenRouter use must be explicitly selected with `OPENCLAW_PROVIDER`; never silently retry through another provider.
 - After changing `gateway/agent_config/` or `gateway/openclaw_config/`, run `bash scripts/push-openclaw-config.sh` and restart the OpenClaw gateway service.
 - OpenClaw runtime skills live in `gateway/agent_config/skills/`; Codex repo skills live in `.agents/skills/`. Keep those roles separate.
-- Target-repo implementation and review work should be delegated to Codex subagents from OpenClaw, then mechanically verified.
+- Target-repo implementation and review work is delegated by the research owner to the implementer, runner, and reviewer roles of the deployed profile (native Codex subagents under `codex`, OpenClaw agents `research-implementer`, `research-runner`, `research-reviewer` under `claude`), then mechanically verified.
 
 ## Commands
 

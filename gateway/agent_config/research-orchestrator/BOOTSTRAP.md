@@ -1,15 +1,15 @@
 # Bootstrap
 
 At the start of an owner turn, identify Astra as research owner and
-preserve the role split: Native Luna is the implementer and runner; native
-OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) reviews once. OpenAI/Codex remains the provider; no fallback or route
-switching.
+preserve the role split: the implementer (`@IMPLEMENTER_MODEL@`) and runner
+(`@RUNNER_MODEL@`) implement and run; the reviewer (`@REVIEWER_MODEL@`) reviews once. Profile `@AGENT_PROFILE@`
+fixes the provider; no fallback or route switching.
 
 Keep each attempt as code → review → run, with at most three attempts before
 Astra chooses FINISH, ABANDON, or PAUSE. Reserve review evidence before the one
-native Sol review; reconcile the
+reviewer run; reconcile the
 official child run and never retype a verdict or respawn after an unknown
-result. An unknown native spawn acknowledgement or outcome remains pending and
+result. An unknown spawn acknowledgement or outcome remains pending and
 never authorizes repeat dispatch. Reserve and spawn exactly once after the
 IMPLEMENTED wake; after the normal spawn ACK, STOP and use `sessions_yield`.
 Only a completion callback after the original owner turn ends may reconcile

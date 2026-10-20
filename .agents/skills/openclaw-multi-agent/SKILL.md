@@ -85,12 +85,13 @@ Preserve explicit repo-managed model selections for each role. Change model
 refs only through reviewed config updates; do not substitute generic aliases in
 prompts or per-spawn overrides.
 
-> **Deployment policy (this repo):** `main` is pinned to
-> `openai/gpt-5.4`; `research-orchestrator` is pinned to
-> `openai/gpt-6-astra`; native Luna is a bounded OpenAI/Codex child route, not
-> an ad-hoc model override. Native Sol (`openai/gpt-5.6-sol`) is the bounded,
-> read-only reviewer at xhigh/fast. Example models elsewhere in this file
-> are illustrative only.
+> **Deployment policy (this repo):** `main`, `research-orchestrator`, and the
+> implementer, runner, and read-only reviewer roles take their models and effort
+> from the deployed agent profile (`codex` or `claude`, in
+> `gateway/openclaw_config/agent-profiles.json`, switched with
+> `scripts/switch-agent-profile.sh`); a profile never mixes providers and has no
+> fallback, and a child is never an ad-hoc model override. Example models
+> elsewhere in this file are illustrative only.
 
 ### `agent-per-agent-identity`
 Each agent should have its own IDENTITY.md and SOUL.md overrides:
@@ -140,10 +141,12 @@ Configure shared defaults, then override per agent:
 ## 2. Session Tools — Inter-Agent Communication (CRITICAL)
 
 > **Deployment policy (this repo):** `main` denies `exec` and ALL `sessions_*`
-> tools. `research-orchestrator` delegates managed research children through
-> native Codex `spawn_agent`, including the read-only Sol reviewer; its Luna
-> children remain bounded native roles. Generic OpenClaw session
-> orchestration below does not apply to that owner.
+> tools. `research-orchestrator` delegates managed research children by the
+> mechanism of the deployed runtime (native Codex `spawn_agent` under `codex`;
+> the agents `research-implementer`, `research-runner`, and read-only
+> `research-reviewer` through `sessions_spawn` under `claude`), as documented in
+> the owner's TOOLS.md. Generic OpenClaw session orchestration below does not
+> otherwise apply to that owner.
 
 ### `st-four-tools`
 Four session tools enable inter-agent communication:

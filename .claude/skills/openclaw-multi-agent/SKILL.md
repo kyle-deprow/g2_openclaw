@@ -30,13 +30,13 @@ Design and operate multi-agent systems: orthogonal specialists, controlled commu
 
 ## This repo
 
-- **Agents and models are pinned** in `gateway/openclaw_config/openclaw.json`: `main`=openai/gpt-5.4 and `research-orchestrator`=openai/gpt-6-astra. Native Luna is a bounded OpenAI/Codex child route; read-only Sol (`openai/gpt-5.6-sol`, xhigh/fast) is the native reviewer.
+- **Agents and models are pinned** in `gateway/openclaw_config/openclaw.json`: `main`, `research-orchestrator`, and the implementer, runner, and read-only reviewer roles take models and effort from the deployed agent profile (`codex` or `claude`, `gateway/openclaw_config/agent-profiles.json`, switched with `scripts/switch-agent-profile.sh`).
 - **Session topology:** G2 traffic → `agent:main:g2`; research-owner traffic uses `agent:research-orchestrator:autoresearch:quantipy-v2`.
 - **Orchestration driver:** `gateway/research/` and `research-owner.service`; status and receipts remain in the bounded research store. The owner unit is bound to `openclaw-gateway.service`.
 - **Config changes** go through `gateway/openclaw_config/` + `bash scripts/push-openclaw-config.sh`, never `~/.openclaw/` edits.
 
 ## Repo policy overrides
 
-- **OpenClaw session tools are not the general research delegation mechanism here.** `main` denies all `sessions_*` tools; `research-orchestrator` delegates the bounded native Sol review and Luna children through native Codex `spawn_agent`. The canonical session-spawning playbook does not otherwise apply to the owner.
-- **No per-spawn model or tool broadening:** models are pinned per agent in `openclaw.json` (single provider: OpenAI/Codex app-server via OAuth, no fallback, no aliases); the canonical example models/emojis are illustrative only.
+- **OpenClaw session tools are not the general research delegation mechanism here.** `main` denies all `sessions_*` tools; `research-orchestrator` delegates its bounded children by the deployed runtime's mechanism (native Codex `spawn_agent` under `codex`; `research-implementer`, `research-runner`, and read-only `research-reviewer` through `sessions_spawn` under `claude`), per the owner's TOOLS.md. The canonical session-spawning playbook does not otherwise apply to the owner.
+- **No per-spawn model or tool broadening:** models are pinned per agent in `openclaw.json` (one provider per deployed profile, no fallback, no aliases); the canonical example models/emojis are illustrative only.
 - **Owner cadence is external, not cron-in-agent:** research health is driven by the research-owner unit, not by an agent running `sessions_list` on a cron job.

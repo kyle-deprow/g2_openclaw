@@ -7,8 +7,9 @@ research-owner persona. Keep those workspaces and their authorities separate.
 
 ## Runtime contract
 
-OpenClaw is pinned to 2026.9.2, `@openclaw/codex` to 2026.9.2, and embedded
-Codex to 0.153.4. The configured route is OpenAI/Codex OAuth. A missing or
+The deployed agent profile (`codex` or `claude`, switched with
+`scripts/switch-agent-profile.sh`) selects the provider route and runtime; the
+runtime pins live in `gateway/openclaw_config/`. A missing or
 unproven route is a refusal; do not invent an alias or switch providers.
 
 G2 traffic uses `agent:main:g2`. The bounded owner loop uses
@@ -18,8 +19,8 @@ uses an owner-only environment, and fails closed on an invalid or missing
 research root. The source template is
 `gateway/openclaw_config/research-owner.service.template`.
 
-The owner is Astra. Native Luna implements and runs admitted work. Native
-OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is reviewer-only, once per
+The owner is Astra. The implementer and runner implement and run admitted work. The
+reviewer (model and effort from the deployed profile) is reviewer-only, once per
 attempt; the reviewer is read-only, cannot spawn children, and cannot repair
 or retry. A hypothesis equals one iteration; each attempt is code → review →
 run, with at most three attempts.
@@ -50,7 +51,7 @@ research memory.
 
 The canonical research command vocabulary is the frozen help output:
 
-`uv run gateway-cli research --help`
+`gateway-cli research --help`
 
 Read source-managed config and persona files before changing them. Use focused
 source-only checks first. Deployment is an operator checkpoint performed later

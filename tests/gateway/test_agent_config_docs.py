@@ -22,6 +22,33 @@ MEMORY_MIRROR = REPO_ROOT / ".claude" / "skills" / "openclaw-memory" / "SKILL.md
 CONFIG_README = REPO_ROOT / "gateway" / "openclaw_config" / "README.md"
 CONFIG_ENV_EXAMPLE = REPO_ROOT / "gateway" / "openclaw_config" / ".env.example"
 RESEARCH_PERSONA = AGENT_CONFIG / "research-orchestrator"
+RUNTIME_DIR = RESEARCH_PERSONA / "runtime"
+RUNTIME_CODEX = RUNTIME_DIR / "codex.md"
+RUNTIME_CLAUDE = RUNTIME_DIR / "claude-cli.md"
+CLAUDE_MIRROR = REPO_ROOT / ".claude" / "skills" / "research-loop" / "SKILL.md"
+CHILD_CONTRACTS = {
+    name: AGENT_CONFIG / name / "AGENTS.md"
+    for name in ("research-implementer", "research-runner", "research-reviewer")
+}
+PROFILE_PLACEHOLDERS = frozenset(
+    {
+        "@AGENT_PROFILE@",
+        "@AGENT_RUNTIME@",
+        "@OWNER_MODEL@",
+        "@OWNER_EFFORT@",
+        "@IMPLEMENTER_MODEL@",
+        "@IMPLEMENTER_EFFORT@",
+        "@RUNNER_MODEL@",
+        "@RUNNER_EFFORT@",
+        "@REVIEWER_MODEL@",
+        "@REVIEWER_EFFORT@",
+        "@RESEARCH_V2_ROOT@",
+        "@HYPOTHESIS_WORKTREES_ROOT@",
+        "@RUNTIME_SECTION@",
+        "@GATEWAY_CLI@",
+    }
+)
+RAW_MODEL_ID = re.compile(r"gpt-\d|claude-(?:opus|sonnet|fable|haiku)|anthropic/|openai/")
 OPENCLAW_CONFIG = REPO_ROOT / "gateway" / "openclaw_config" / "openclaw.json"
 PUSH_SCRIPT = REPO_ROOT / "scripts" / "push-openclaw-config.sh"
 
@@ -68,6 +95,18 @@ def _normalized(path: Path) -> str:
     return " ".join(path.read_text(encoding="utf-8").split())
 
 
+def _persona_and_skill_files() -> tuple[Path, ...]:
+    """Every rendered persona file, runtime fragment, and runtime skill."""
+    return (
+        *sorted(AGENT_CONFIG.glob("*.md")),
+        *sorted(RESEARCH_PERSONA.glob("*.md")),
+        *sorted(RUNTIME_DIR.glob("*.md")),
+        *sorted(CHILD_CONTRACTS.values()),
+        *sorted((AGENT_CONFIG / "skills").glob("*/SKILL.md")),
+        CLAUDE_MIRROR,
+    )
+
+
 def _owner_docs() -> tuple[Path, ...]:
     return (
         *BOOTSTRAP_FILES,
@@ -84,14 +123,13 @@ def test_bootstrap_files_stay_within_openclaw_character_limit(path: Path) -> Non
 
 
 def test_runtime_docs_describe_current_native_owner_delegation() -> None:
-    docs = " ".join(path.read_text(encoding="utf-8") for path in _owner_docs())
+    docs = " ".join(" ".join(path.read_text(encoding="utf-8").split()) for path in _owner_docs())
 
-    assert "native Codex `spawn_agent`" in docs
-    assert "OpenClaw session spawning is not" in docs
     assert "Astra is the research owner" in docs
-    assert "Native Luna" in docs
-    assert "native OpenAI/Codex Sol" in docs
-    assert "OpenAI/Codex remains the provider" in docs
+    assert "The implementer (`@IMPLEMENTER_MODEL@`)" in docs
+    assert "the reviewer (`@REVIEWER_MODEL@`" in docs
+    assert "fixes the provider and route; no fallback or route switching" in docs
+    assert "@RUNTIME_SECTION@" in (RESEARCH_PERSONA / "TOOLS.md").read_text(encoding="utf-8")
     assert "hypothesis equals iteration" in docs
     assert "code → review → run" in docs
 
@@ -104,22 +142,18 @@ def test_native_review_contract_uses_official_wake_and_spawn_shape() -> None:
             RESEARCH_LOOP,
             RESEARCH_PERSONA / "AGENTS.md",
             RESEARCH_PERSONA / "TOOLS.md",
-            REPO_ROOT / ".claude" / "skills" / "research-loop" / "SKILL.md",
+            RUNTIME_CODEX,
+            CLAUDE_MIRROR,
         )
     )
     normalized = " ".join(review_docs.split())
     normalized_lower = normalized.casefold()
 
+    # Profile-neutral rules (skills, persona, and mirror).
     assert "top-level `model`, `effort`, and `prompt_sha256`" in normalized
-    assert (
-        "`spawn_arguments` contains only `task_name`, `message`, `agent_type`, and `fork_turns`"
-        in normalized
-    )
-    assert "no `cwd` argument" in normalized
-    assert "immutable absolute bundle path" in normalized
     assert "completed IMPLEMENTED wake and official event" in normalized
     assert "reserve and spawn exactly once" in normalized_lower
-    assert "after the normal native spawn ack, stop and call" in normalized_lower
+    assert "after the normal spawn ack, stop and call" in normalized_lower
     assert "`sessions_yield` for the owned completion" in normalized_lower
     assert "do not reconcile or collect in this owner turn" in normalized_lower
     assert "original owner turn to end" in normalized_lower
@@ -132,10 +166,27 @@ def test_native_review_contract_uses_official_wake_and_spawn_shape() -> None:
         in normalized_lower
     )
     assert "never dispatches again" in normalized_lower
-    assert "official child-thread ack" in normalized_lower
-    assert "unknown native spawn acknowledgement or outcome remains pending" in normalized_lower
+    assert "unknown spawn acknowledgement or outcome remains pending" in normalized_lower
     assert "never authorizes repeat dispatch" in normalized_lower
-    assert "--codex-state-database" in normalized_lower
+    for path in (AUTORESEARCH, RESEARCH_LOOP, CLAUDE_MIRROR):
+        text = " ".join(path.read_text(encoding="utf-8").split())
+        assert "owner's TOOLS.md" in text, path
+        assert "--codex-state-database" not in text, path
+        assert "spawn_arguments" not in text, path
+        assert "codex-home" not in text, path
+
+    # Codex runtime mechanics live only in the codex fragment.
+    codex = " ".join(RUNTIME_CODEX.read_text(encoding="utf-8").split())
+    codex_lower = codex.casefold()
+    assert "`spawn_arguments` contains only `task_name`, `message`, `agent_type`" in codex
+    assert "`fork_turns` (`none`), with no `cwd` argument" in codex
+    assert "immutable absolute bundle path" in codex
+    assert "native `collaboration.spawn_agent` arguments" in codex
+    assert "is never host-verified" in codex
+    assert "reconciles from the official child-thread ACK" in codex
+    assert "official child-thread ack" in codex_lower
+    assert "--codex-state-database" in codex_lower
+    assert "--openclaw-database DB" not in review_docs
     assert (
         "/home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite"
         in review_docs
@@ -144,7 +195,6 @@ def test_native_review_contract_uses_official_wake_and_spawn_shape() -> None:
         "/home/dev/.openclaw/agents/research-orchestrator/agent/codex-home/state_5.sqlite"
         in review_docs
     )
-    assert "--openclaw-database DB" not in review_docs
     assert "CODEX_DB" not in review_docs
     assert "spawn_arguments.model" not in review_docs
     assert "spawn_arguments.effort" not in review_docs
@@ -153,18 +203,151 @@ def test_native_review_contract_uses_official_wake_and_spawn_shape() -> None:
     assert "review-ack" not in review_docs
 
 
-def test_active_source_contract_has_no_anthropic_reviewer_or_default() -> None:
+def test_persona_and_skills_name_models_only_through_placeholders() -> None:
     runtime_docs = "\n".join(
         (AGENT_CONFIG / name).read_text(encoding="utf-8") for name in ("README.md", "BOOTSTRAP.md")
     ).casefold()
     env_example = " ".join(CONFIG_ENV_EXAMPLE.read_text(encoding="utf-8").casefold().split())
 
-    assert "native openai/codex sol" in runtime_docs
-    assert "gpt-5.6-sol" in runtime_docs
+    offenders = [
+        f"{path.relative_to(REPO_ROOT)}: {match.group(0)}"
+        for path in _persona_and_skill_files()
+        for match in RAW_MODEL_ID.finditer(path.read_text(encoding="utf-8"))
+    ]
+    assert not offenders
+    assert "@REVIEWER_MODEL@" in (AGENT_CONFIG / "BOOTSTRAP.md").read_text(encoding="utf-8")
     assert "claude code opus via acp" not in runtime_docs
     assert "anthropic/claude" not in env_example
     assert "there is no provider" in env_example
     assert "fallback" in env_example
+
+
+def test_placeholders_are_a_subset_of_the_design_list() -> None:
+    used: set[str] = set()
+    for path in _persona_and_skill_files():
+        used.update(re.findall(r"@[A-Z][A-Z0-9_]*@", path.read_text(encoding="utf-8")))
+    assert used <= PROFILE_PLACEHOLDERS, used - PROFILE_PLACEHOLDERS
+    persona_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(RESEARCH_PERSONA.glob("*.md"))
+    )
+    for required in (
+        "@OWNER_MODEL@",
+        "@IMPLEMENTER_MODEL@",
+        "@RUNNER_MODEL@",
+        "@REVIEWER_MODEL@",
+        "@REVIEWER_EFFORT@",
+        "@AGENT_PROFILE@",
+        "@AGENT_RUNTIME@",
+        "@RUNTIME_SECTION@",
+    ):
+        assert required in persona_text
+
+
+def test_rendered_persona_invokes_cli_through_gateway_cli_placeholder() -> None:
+    tools = (RESEARCH_PERSONA / "TOOLS.md").read_text(encoding="utf-8")
+    assert "`@GATEWAY_CLI@ research --help`" in tools
+    for path in (*sorted(AGENT_CONFIG.glob("*.md")), *sorted(RESEARCH_PERSONA.rglob("*.md"))):
+        assert "uv run gateway-cli" not in path.read_text(encoding="utf-8"), path
+    for path in (AUTORESEARCH, RESEARCH_LOOP, CODEX_SUBAGENTS, CLAUDE_MIRROR):
+        text = path.read_text(encoding="utf-8")
+        assert "uv run gateway-cli" not in text, path
+        assert "exact executable path" in text, path
+
+
+@pytest.mark.parametrize(
+    ("agent", "required"),
+    [
+        (
+            "research-implementer",
+            (
+                "Edit only inside the checkout",
+                "Commit inside the checkout",
+                "Run `@GATEWAY_CLI@` or any state transition",
+                "operator host step",
+                "submission input",
+                "specification, panel, evaluator",
+            ),
+        ),
+        (
+            "research-runner",
+            (
+                "exactly the one `@GATEWAY_CLI@ research run ...` command",
+                "retry the command",
+                "run any other command",
+            ),
+        ),
+        (
+            "research-reviewer",
+            (
+                "read-only",
+                "Write or edit any file, or run any shell command",
+                "exactly the bare strict-verdict JSON",
+                "no markdown, envelope, or surrounding prose",
+            ),
+        ),
+    ],
+)
+def test_child_role_contracts_carry_key_prohibitions(agent: str, required: tuple[str, ...]) -> None:
+    path = CHILD_CONTRACTS[agent]
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+    assert len(text.split()) < 250
+    assert set(re.findall(r"@[A-Z][A-Z0-9_]*@", text)) <= PROFILE_PLACEHOLDERS
+    assert "Claude's `Agent`, `Workflow`, or `Task` tools" in normalized
+    for phrase in required:
+        assert phrase.casefold() in normalized.casefold(), phrase
+    assert "uv run gateway-cli" not in text
+
+
+def test_skills_stay_provider_neutral_without_placeholders() -> None:
+    for path in (*sorted((AGENT_CONFIG / "skills").glob("*/SKILL.md")), CLAUDE_MIRROR):
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r"@[A-Z][A-Z0-9_]*@", text), path
+        assert not re.search(r"\bLuna\b|\bSol\b|OpenAI/Codex", text), path
+    for path in (AUTORESEARCH, RESEARCH_LOOP, CLAUDE_MIRROR):
+        assert "TOOLS.md" in path.read_text(encoding="utf-8"), path
+
+
+def test_runtime_fragments_document_their_spawn_shapes() -> None:
+    codex = " ".join(RUNTIME_CODEX.read_text(encoding="utf-8").split())
+    claude = " ".join(RUNTIME_CLAUDE.read_text(encoding="utf-8").split())
+
+    assert "never OpenClaw sessions" in codex
+    assert "`collaboration.spawn_agent`" in codex
+    assert "`--codex-state-database`" in codex
+    assert "announce:codex-native" in codex
+
+    for fragment in ("`agentId`", "`model`"):
+        assert fragment in claude
+    assert "`thinking`" in claude and "`cwd`" in claude
+    for agent_id in ("research-implementer", "research-runner", "research-reviewer"):
+        assert f"`{agent_id}`" in claude
+    assert "ONE literal line" in claude
+    assert "`@GATEWAY_CLI@ research <subcommand> --root <active root> ...`" in claude
+    assert "Never use shell variables" in claude
+    assert "The runner may run only `research run`" in claude
+    assert "the attempt checkout" in claude
+    for tool in ("mcp__openclaw__sessions_spawn", "mcp__openclaw__sessions_yield"):
+        assert f"`{tool}`" in claude
+    assert "Never use Claude's own `Agent`, `Workflow`, or `Task` tools" in claude
+    assert "Tell every child in its task text not to use them" in claude
+    assert "spawn with the reservation's `spawn_arguments` exactly as returned" in claude
+    assert "Never compose or edit them" in claude
+    assert "`cwd` comes from the reservation" in claude
+    assert "`Review label: <task_name>`" in claude
+    assert "read-only" in claude and "must not write" in claude
+    tools = " ".join((RESEARCH_PERSONA / "TOOLS.md").read_text(encoding="utf-8").split())
+    assert "operator host step under both runtimes" in tools
+    assert "Invoke exactly the returned spawn arguments for the reviewer" in tools
+    assert "never compose, edit, or add to them" in tools
+    assert "No separate acknowledgement is created or retyped" in tools
+    assert "task_runs" in claude and "subagent_runs" in claude
+    assert "api-request" in claude
+
+    for path in (RUNTIME_CODEX, RUNTIME_CLAUDE):
+        tokens = set(re.findall(r"@[A-Z][A-Z0-9_]*@", path.read_text(encoding="utf-8")))
+        assert tokens <= {"@GATEWAY_CLI@"}, path
 
 
 def test_current_runtime_skill_paths_are_explicit_and_retired_path_is_absent() -> None:

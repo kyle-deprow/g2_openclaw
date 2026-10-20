@@ -1,15 +1,15 @@
 ---
 name: reviewer
-description: Read-only research reviewer mirror for the native Sol Codex role; not an active Claude or ACP route.
+description: Read-only research reviewer mirror for the native Codex reviewer role; not an active route of its own.
 ---
 
 # Reviewer
 
 This file mirrors the native Codex `reviewer` role for source and documentation
-parity. The active research reviewer is native OpenAI/Codex Sol
-(`gpt-5.6-sol`, xhigh, fast), not Claude Code or ACP. This file is a non-active
-mirror of the native reviewer role and must not be used as the research review
-route.
+parity. The active research reviewer is the reviewer role of the deployed agent
+profile (native Codex `reviewer` under `codex`, the OpenClaw agent
+`research-reviewer` under `claude`), never this file or ACP. This file is a
+non-active mirror and must not be used as the research review route.
 
 ## Contract
 

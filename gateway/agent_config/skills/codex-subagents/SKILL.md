@@ -1,26 +1,27 @@
 ---
 name: codex-subagents
-description: Native Codex delegation contract for bounded G2 and research work.
+description: Provider-neutral delegation contract for bounded G2 and research work.
 ---
 
-# Native Codex delegation
+# Research delegation
 
-This runtime skill governs delegation from the configured OpenClaw Codex
-runtime. It does not create a second orchestration route.
+This runtime skill governs delegation from the configured OpenClaw runtime of the
+deployed profile. It does not create a second orchestration route. The spawn
+mechanics for the deployed runtime are in the owner's TOOLS.md.
 
 ## Research roles
 
 - Astra is the research owner and receives every child result.
-- Native Luna is the approved implementer and experiment runner; native Sol is
-  the read-only reviewer.
-- Native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is reviewer-only and
-  receives one reserved review bundle per attempt.
+- The implementer and runner are the approved implementer and experiment
+  runner; the reviewer is the read-only reviewer.
+- The reviewer is reviewer-only and receives one reserved review bundle per
+  attempt. Models and effort come from the deployed profile.
 - Main is read-only and never dispatches research work.
 
-Use only configured native Codex roles. Do not discover roles from session
-history, invent a role, override a model, or switch provider. The research
-owner uses the exact route and session supplied by the current admission
-receipt. OpenClaw session spawning is not the research delegation mechanism.
+Use only the configured roles of the deployed profile. Do not discover roles
+from session history, invent a role, override a model, or switch provider. The
+research owner uses the exact route and session supplied by the current
+admission receipt and the spawn mechanism documented for its runtime.
 
 ## Dispatch contract
 
@@ -31,18 +32,18 @@ The implementer changes only its experiment worktree. The runner executes only
 the admitted committed worktree and performs no repair, retry, substitution,
 evaluator substitution, or invented result.
 
-Reserve immutable review evidence before the one native Sol review and spawn
-exactly once in the owner turn. After the normal native spawn ACK, STOP and
+Reserve immutable review evidence before the one reviewer run and spawn
+exactly once in the owner turn. After the normal spawn ACK, STOP and
 call `sessions_yield` for the owned completion. Do not reconcile or collect in
-that turn: exact owner run/thread correlation requires the original owner turn
+that turn: exact owner run correlation requires the original owner turn
 to end. The later completion callback reconciles and collects the official
 child run exactly once; it never respawns. Never retype a verdict after an
 unknown result. An exact cancel rereads the current task and is sent once;
-unknown correlation remains pending and pauses the owner. An unknown native
+unknown correlation remains pending and pauses the owner. An unknown
 spawn acknowledgement or outcome never authorizes repeat dispatch.
 
 When a new owner turn needs a completion-required coding or runner stage, spawn
-a fresh configured native child bound to the same hypothesis, attempt, worktree,
+a fresh configured child bound to the same hypothesis, attempt, worktree,
 and checkpoint; this is the same attempt and needs no new admission. An
 authorized fresh child for a later bounded correction may continue that same
 attempt, but it does not authorize duplicating or re-running a completed stage.
@@ -83,7 +84,9 @@ MemPalace context; memory search and pre-compaction flush are disabled.
 
 The frozen command vocabulary is available from:
 
-uv run gateway-cli research --help
+gateway-cli research --help
+
+The exact executable path for `gateway-cli` is in TOOLS.md.
 
 Report exact evidence and stop when route, policy, review, input, or job proof
 is missing.

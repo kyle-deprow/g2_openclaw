@@ -12,61 +12,56 @@ or proof that a current-price ETF feed is installed.
 ## Canonical rules
 
 - Astra is the research owner.
-- Native Luna is the implementer and runner.
-- Native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is reviewer-only.
-- OpenAI/Codex remains the provider; no fallback or route switching.
+- The implementer and runner roles implement and run; models and effort come
+  from the deployed profile (see the owner's TOOLS.md).
+- The reviewer is reviewer-only.
+- The deployed profile remains the provider route; no fallback or route switching.
 - Rule: hypothesis equals iteration; each attempt is code → review → run.
 - Use maximum three attempts; Astra explicitly chooses FINISH, ABANDON, or PAUSE.
 - Every attempt outcome, refusal, and terminal state returns to Astra.
+- Research commands use the `gateway-cli` executable; the exact executable path is in TOOLS.md.
 - Each attempt checkout is a self-contained `git clone --no-hardlinks` under
   `ROOT/hypothesis-worktrees`, checked out at frozen `base_commit`; never use
   `--shared`, `--reference`, or `git worktree add`. Keep persisted
   `worktree_path` naming unchanged. Before `attempt-open`, verify a new
-  checkout's `HEAD == base_commit`; before native implementer dispatch, verify
+  checkout's `HEAD == base_commit`; before implementer dispatch, verify
   `HEAD` is the expected committed attempt checkpoint. In both checks, `.git`,
   `git-common-dir`, and `objects` must remain inside the checkout with no
   alternates/shared objects. An existing OPENED, unsubmitted attempt is
   repaired by the operator in its persisted checkout without a new attempt or
   state rewrite; the owner must not autonomously replace the filesystem or
   widen the sandbox.
-- Reserve review evidence before the one native Sol review; the evidence and
+- Reserve review evidence before the one reviewer run; the evidence and
   bundle are immutable.
 - Reconcile the official child run and bind its identity, verdict, mode, attempt,
   commit, and spec digest. Never retype a verdict or respawn after an unknown
   result.
-- Native review collection reserves with
-  `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY --owner-key OWNER_KEY
-  --openclaw-database
-  /home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`;
-  the command binds the owner run from the completed IMPLEMENTED wake and official event, requiring it to be the active running owner writer, and defers the owner thread: reconcile binds it from the official event once flushed. Reserve and spawn exactly
-  once in this owner turn. After the normal native spawn ACK, STOP and call
+- Review collection reserves with
+  `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY --owner-key OWNER_KEY`
+  plus the record-location flag for the deployed runtime; spawn mechanics,
+  argument shape, and record paths are in the owner's TOOLS.md. The command
+  binds the owner run from the completed IMPLEMENTED wake and official event,
+  requiring it to be the active running owner writer. Reserve and spawn exactly
+  once in this owner turn. After the normal spawn ACK, STOP and call
   `sessions_yield` for the owned completion. Do not reconcile or collect in
-  this owner turn: exact owner run/thread correlation requires the original
-  owner turn to end. The completion callback after that turn ends may reconcile
-  and collect exactly once from the official child-thread ACK; it must never
-  respawn. The reservation output's
-  top-level `model`, `effort`, and `prompt_sha256` are authoritative. Its
-  `spawn_arguments` contains only `task_name`, `message`, `agent_type`, and
-  `fork_turns` (`none`), with no `cwd`; `message` contains the immutable
-  absolute bundle path. Invoke exactly the returned native spawn arguments.
-  That later reconcile records the official child-thread ACK; no separate
-  acknowledgement is created or retyped. Reconcile/collect/cancel use these same
-  managed-root database paths
-  `/home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`
-  and
-  `/home/dev/.openclaw/agents/research-orchestrator/agent/codex-home/state_5.sqlite`,
-  and pass the latter as `--codex-state-database` to review-reconcile,
-  review-collect, and review-cancel. The CLI derives these paths from the managed OpenClaw root that contains `--root` (the wake text renders them concretely) and rejects any other path, including arbitrary/latest
-  records or caller-invented paths. The spawn message is encrypted on the host,
-  so `prompt_sha256` is reservation-side evidence only and is never
-  host-verified; binding rests on the exact task name plus host role, model,
-  effort, and the strict verdict binding. Collect trusts the child's official terminal rollout; an `announce:codex-native` callback is optional corroboration that must agree if present. An unfinished child stays pending, never FAIL. A failed, errored, or aborted reviewer child makes the attempt a terminal REVIEW_FAILED with the host reason as the sole finding, with no supersession or re-review; it is distinct from a reviewer FAIL verdict but final for the attempt. Limitation: an operator cannot stop a
-  running native reviewer through `chat.abort` after the owner yields (the reply
-  reports `owner_run_inactive_no_supported_child_cancel`); it ends on its own
-  terminal evidence. Do not use the retired `--core-database`, ACPX, or Claude
-  paths, infer
-  alternatives, search arbitrary records, or repair a verdict. Preserve
-  refusal if correlation remains unavailable.
+  this owner turn: exact owner run correlation requires the original owner turn
+  to end. The completion callback after that turn ends may reconcile and
+  collect exactly once; it must never respawn. The reservation output's
+  top-level `model`, `effort`, and `prompt_sha256` are authoritative; invoke
+  exactly the returned spawn arguments. `prompt_sha256` is reservation-side
+  evidence only; binding rests on the exact task identity plus host role,
+  model, effort, and the strict verdict binding. The CLI derives record paths
+  from the managed OpenClaw root that contains `--root` and rejects any other
+  path, including arbitrary/latest records or caller-invented paths. An
+  unfinished child stays pending, never FAIL. A failed, errored, or aborted
+  reviewer child makes the attempt a terminal REVIEW_FAILED with the host
+  reason as the sole finding, with no supersession or re-review; it is distinct
+  from a reviewer FAIL verdict but final for the attempt. Limitation: an
+  operator cannot stop a running reviewer through `chat.abort` after the owner
+  yields (the reply reports `owner_run_inactive_no_supported_child_cancel`); it
+  ends on its own terminal evidence. Do not use the retired `--core-database`
+  or ACPX paths, infer alternatives, search arbitrary records, or repair a
+  verdict. Preserve refusal if correlation remains unavailable.
 - Analysis uses `--scenarios /scenarios --inputs /inputs --out /stage/analysis`;
   cost specs are `/inputs/evaluation-specs/{spec_id}.json`, not
   `/evaluation-specs`. The canonical EvaluationSpecSet and RunPlan are
@@ -77,8 +72,8 @@ or proof that a current-price ETF feed is installed.
   refusals, policy-unset pause, exhausted-attempt completion, exact cancel,
   owner wake, and read-only main controls.
 - Receipt artifact digests bind exact bytes rather than provider attestation;
-  native readiness uses model, effort, and role from the official rollout, with
-  requested `fast` kept separate from observed `unknown` service tier.
+  readiness uses model, effort, and role from the official host record, with
+  requested and observed service tiers kept separate.
 - Pause on a missing policy ceiling, unproven route, unresolved review, invalid
   inputs, or lost job. Do not clear a readiness pause autonomously. Invalid
   inputs remain refusals.
@@ -197,12 +192,12 @@ hedged (long-short) books are allowed only when the frozen evaluator spec
 declares `long_only: false`, names shortable instruments and a borrow cost, and
 gross exposure stays ≤ 1.0 (no leverage).
 
-Reserve the immutable review bundle before the one native Sol review; reconcile
+Reserve the immutable review bundle before the one reviewer run; reconcile
 the official child run and collect a strict verdict bound to the child task,
 run, mode, attempt, commit, and spec.
 An exact cancel is at most once, with unknown correlation left pending and
 paused. Never retype a verdict, respawn after an unknown result, or launch
-without operator policy and proven route. An unknown native spawn
+without operator policy and proven route. An unknown spawn
 acknowledgement or outcome remains pending and never authorizes repeat dispatch.
 The historical runner may execute only an admitted, clean committed checkout
 after a reviewed PASS for the exact attempt, committed checkpoint, and RunPlan;
@@ -210,7 +205,7 @@ do not run historical data before that PASS. It uses no-repair/no-retry,
 substitution, or invented result.
 
 - Completion ownership is per owner turn: a completion-required coding or runner
-  stage spawns a fresh configured native child bound to the same hypothesis,
+  stage spawns a fresh configured child bound to the same hypothesis,
   attempt, worktree, and checkpoint; this is the same attempt and needs no new
   admission. An authorized fresh child for a later bounded correction may
   continue that same attempt, but it does not authorize duplicating or re-running
@@ -229,22 +224,25 @@ substitution, or invented result.
 - An implementation completion callback may verify and submit the implementation
   result, then must STOP. It must not reserve or spawn review from the original
   OPENED callback. Only the next canonical IMPLEMENTED wake supplies `WAKE_KEY`
-  for exactly one review reservation and native Sol dispatch; a later correction
+  for exactly one review reservation and reviewer dispatch; a later correction
   must likewise wait for its next IMPLEMENTED wake. This implementation callback
   is separate from the later review completion callback, which only reconciles
   and collects the already-spawned child and never dispatches again.
 
 Synthetic-versus-installed proof boundary: smoke or synthetic data does not
-prove installed readiness. The implementer synthetic validation runs before
-`implementation-submit` and before immutable review. Full-scenario execution is
-the implementer acceptance contract: it must execute every scenario in the
+prove installed readiness. The implementer writes and commits the synthetic
+validation harness and its tests before `implementation-submit` and immutable
+review. The contained stages are an operator host step under both runtimes: the
+operator runs them once on the host and a packager commits the PASS evidence;
+the implementer never launches them. Full-scenario execution is the implementer
+acceptance contract: the harness must cover every scenario in the
 proposed/review-candidate `RunPlan` sequentially, with each scenario's
-contained targets and evaluator stages, then run one declared aggregate
-analysis stage after all scenario artifacts are complete, through the deployed
-builders. The
-current validator checks stage categories and module identity, not mechanical
-every-scenario completeness; do not claim CLI enforcement. It retains
-provenance records for every stage and submits a
+contained targets and evaluator stages, then one declared aggregate analysis
+stage after all scenario artifacts are complete, built through the deployed
+builders. The current validator checks stage categories and module identity, not mechanical
+every-scenario completeness; do not claim CLI enforcement. The
+operator-run stages retain provenance records for every stage and the
+implementation submits a
 `research-provenance-evidence-v1` index. The retained provenance index must
 cover every executed scenario and stage. Target-plan-only checks or unconditional
 `EVIDENCE_BLOCKED` are not a full harness. Make no alpha claim from synthetic
@@ -254,7 +252,7 @@ proof.
 
 - Every targets/evaluate/analysis stage built through `gateway.research.containment.stage_plan` must pass `provenance_dir=` and receive deployed `PYTHONPATH=/provenance:/snapshot/src[:/work]`.
 - The sandbox writes `research-containment-provenance-v1` records to `/stage/provenance/`.
-- The implementer synthetic harness retains those record dirs inside the committed worktree and submits the `research-provenance-evidence-v1` index via `implementation-submit --provenance-evidence`; the retained provenance index must cover every executed scenario and stage.
+- The operator-run synthetic harness stages retain those record dirs inside the committed worktree and the implementation submits the `research-provenance-evidence-v1` index via `implementation-submit --provenance-evidence`; the retained provenance index must cover every executed scenario and stage.
 - Submission is refused when a stage lacks records, `quantipy` resolves outside `/snapshot/src`, or a `/work` module differs from the tested commit.
 - The historical worker applies the same verification and fails the run with `provenance_invalid`.
 - Evaluator and analysis stages run `python -P -s` and are verified for those interpreter flags, while target entrypoints are verified by module origin and hashes rather than interpreter flags.

@@ -45,16 +45,16 @@ BOOTSTRAP_FILES = tuple(
 
 RULE_STATEMENTS = (
     "Astra is the research owner",
-    "Native Luna is the implementer and runner",
-    "Native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is reviewer-only",
-    "OpenAI/Codex remains the provider; no fallback or route switching",
+    "The implementer and runner roles implement and run",
+    "The reviewer is reviewer-only",
+    "The deployed profile remains the provider route; no fallback or route switching",
     "hypothesis equals iteration",
     "each attempt is code → review → run",
     "maximum three attempts",
     "FINISH, ABANDON, or PAUSE",
-    "reserve review evidence before the one native Sol review",
+    "reserve review evidence before the one reviewer run",
     "Reserve and spawn exactly once",
-    "After the normal native spawn ACK, STOP and call",
+    "After the normal spawn ACK, STOP and call",
     "original owner turn to end",
     "review completion callback",
     "Never retype a verdict or respawn after an unknown result",
@@ -85,8 +85,16 @@ def _normalized(text: str) -> str:
 
 
 def test_bootstrap_contract_stays_under_word_budget() -> None:
-    # Arrange
-    text = " ".join(path.read_text(encoding="utf-8") for path in BOOTSTRAP_FILES)
+    # Arrange: count the rendered size, with the larger runtime fragment in TOOLS.md
+    runtime_dir = PERSONA_ROOT / "runtime"
+    fragment = max(
+        (path.read_text(encoding="utf-8") for path in runtime_dir.glob("*.md")),
+        key=lambda body: len(re.findall(r"\S+", body)),
+    )
+    text = " ".join(
+        path.read_text(encoding="utf-8").replace("@RUNTIME_SECTION@", fragment)
+        for path in BOOTSTRAP_FILES
+    )
 
     # Act
     words = re.findall(r"\S+", text)
@@ -103,7 +111,9 @@ def test_runtime_skill_stays_under_line_budget() -> None:
     line_count = len(lines)
 
     # Assert
-    assert line_count < 250
+    # The 2026-10-11 attempt-checkout rule (commit 41ce6c5) is rule content, so the
+    # budget was raised from 250 rather than compressing rule text.
+    assert line_count < 290
 
 
 def test_runtime_and_claude_mirror_share_canonical_rule_statements() -> None:
@@ -174,3 +184,31 @@ def test_runtime_and_claude_mirror_state_the_sixty_session_hedge_boundary() -> N
 
     # Assert
     assert not problems
+
+
+def test_persona_and_skills_contain_no_raw_provider_model_ids() -> None:
+    # Arrange
+    raw_id = re.compile(r"gpt-\d|claude-(?:opus|sonnet|fable|haiku)")
+    runtime_dir = PERSONA_ROOT / "runtime"
+
+    # Act
+    found = [
+        f"{path}: {match.group(0)}"
+        for path in (*_docs(), *sorted(runtime_dir.glob("*.md")))
+        for match in raw_id.finditer(path.read_text(encoding="utf-8"))
+    ]
+
+    # Assert
+    assert not found
+
+
+def test_owner_tools_inserts_the_runtime_section_and_both_fragments_exist() -> None:
+    # Arrange
+    tools = (PERSONA_ROOT / "TOOLS.md").read_text(encoding="utf-8")
+
+    # Act
+    fragments = {name: PERSONA_ROOT / "runtime" / f"{name}.md" for name in ("codex", "claude-cli")}
+
+    # Assert
+    assert tools.count("@RUNTIME_SECTION@") == 1
+    assert all(path.is_file() for path in fragments.values())

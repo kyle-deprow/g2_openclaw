@@ -20,10 +20,14 @@ never blend them into repo skills.
 
 ## Current research roles
 
-Astra (research-orchestrator) owns the bounded loop. Native Luna is the
-implementer and runner. Native Sol (`gpt-5.6-sol`, xhigh) is reviewer-only,
-once per attempt. The route remains OpenAI/Codex with no invented provider or
-route; historical Opus/ACP review evidence stays readable but is not a live path.
+Astra (research-orchestrator) owns the bounded loop. The implementer and
+runner roles implement and run; the reviewer role is reviewer-only, once per
+attempt. The research loop runs on the deployed agent profile, `codex` or
+`claude`, switched only with `scripts/switch-agent-profile.sh`; models and
+effort per role come from `gateway/openclaw_config/agent-profiles.json`. The
+operator's 2026-10-19 directive supersedes the earlier OpenAI/Codex-only rule.
+There is no invented provider or route and no fallback between profiles;
+historical Opus/ACP review evidence stays readable but is not a live path.
 
 A hypothesis equals one iteration and each attempt is code → review → run.
 There are at most three attempts; Astra explicitly chooses FINISH, ABANDON, or

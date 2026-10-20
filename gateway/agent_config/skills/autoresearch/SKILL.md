@@ -12,11 +12,13 @@ integration and it does not deploy or prove an installed runtime.
 ## Roles and authority
 
 - Astra owns admission, dispatch, status, decisions, and the owner wake.
-- Native Luna is the approved implementer and experiment runner.
-- Native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is reviewer-only:
+- The implementer and runner roles are the approved implementer and experiment
+  runner; models and effort come from the deployed profile (see the owner's
+  TOOLS.md).
+- The reviewer is reviewer-only:
   reserve one immutable review bundle before the review and collect exactly
   one bound verdict.
-- OpenAI/Codex is the configured provider. Do not invent a provider, route, or
+- The deployed profile is the configured provider route. Do not invent a provider, route, or
   model when the configured route is unavailable.
 - Main is a read-only G2 control interface and never conducts research.
 
@@ -32,7 +34,7 @@ Each attempt checkout is a self-contained clone under
 out at the frozen `base_commit`. Never use `--shared`, `--reference`, or
 `git worktree add`. Keep the persisted `worktree_path` naming unchanged. Before
 `attempt-open`, verify a newly created checkout has `HEAD == base_commit`; before
-each native implementer dispatch, verify `HEAD` is the expected committed
+each implementer dispatch, verify `HEAD` is the expected committed
 attempt checkpoint. In both checks, verify the `.git` directory, resolved
 `git-common-dir`, and `objects` directory are inside the checkout with no
 alternates or shared-object paths configured. An existing OPENED, unsubmitted
@@ -72,12 +74,14 @@ any holdout.
 
 Discover the supported command vocabulary from the installed CLI's live help:
 
-uv run gateway-cli research --help
+gateway-cli research --help
+
+The exact executable path for `gateway-cli` is in TOOLS.md.
 
 The top-level help enumerates research subcommands. Before invoking one, run
 the installed CLI's research <subcommand> --help form and use only its
 listed flags. The historical frozen appendix is not an exhaustive current CLI
-allowlist. The native review-reserve, review-reconcile, review-collect, and
+allowlist. The review-reserve, review-reconcile, review-collect, and
 review-cancel operations are authorized; consult each live help before using
 them.
 Live help defines syntax only and grants no additional permission. Owner actions
@@ -156,48 +160,44 @@ A wake that says your previous turn was interrupted by a gateway restart means t
 run was lost; resume from durable notes and recorded state, and never assume it
 finished. Three lost runs in one resume pause the campaign for the operator.
 
-Reserve with `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY
---owner-key OWNER_KEY --openclaw-database
-/home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`.
-The reservation output's
-top-level `model`, `effort`, and `prompt_sha256` are authoritative. Its
-`spawn_arguments` contains only `task_name`, `message`, `agent_type`, and
-`fork_turns` (which is `none`); it has no `cwd` argument, and the generated
-`message` carries the immutable absolute bundle path. Invoke exactly the
-returned native `collaboration.spawn_agent` arguments. The command binds the owner run from the completed IMPLEMENTED wake and official event, requiring it to be the active running owner writer, and defers the owner thread: reconcile binds it from the official event once flushed. Reserve and spawn exactly once in this owner turn. After the normal
-native spawn ACK, STOP and call `sessions_yield` for the owned completion. Do
-not reconcile or collect in this owner turn: exact owner run/thread correlation
-requires the original owner turn to end. The completion callback after that
-turn ends may reconcile and collect exactly once from the official child-thread
-ACK; it must never respawn. No separate acknowledgement is created or
-retyped. Those later reconcile/collect/cancel operations use these same
-managed-root database paths
-`/home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`
-and
-`/home/dev/.openclaw/agents/research-orchestrator/agent/codex-home/state_5.sqlite`,
-and pass the latter as `--codex-state-database` to review-reconcile,
-review-collect, and review-cancel. The CLI derives these paths from the managed OpenClaw root that contains `--root` (the wake text renders them concretely) and rejects any other path, including arbitrary/latest records
-or caller-invented paths. The spawn message is encrypted on the host, so
-`prompt_sha256` is reservation-side evidence only and is never host-verified;
-binding rests on the exact task name plus host role, model, effort, and the
-strict verdict binding. Collect trusts the child's official terminal rollout; an `announce:codex-native` callback is optional corroboration that must agree if present. An unfinished child stays pending, never FAIL. A failed, errored, or aborted reviewer child makes the attempt a terminal REVIEW_FAILED with the host reason as the sole finding, with no supersession or re-review; it is distinct from a reviewer FAIL verdict but final for the attempt. Limitation: an operator cannot stop a running native reviewer
-through `chat.abort` after the owner yields (the reply reports
+Review collection reserves with
+`review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY --owner-key OWNER_KEY`
+plus the record-location flag for the deployed runtime; the exact spawn
+mechanics, argument shape, and record paths are in the owner's TOOLS.md. The
+command binds the owner run from the completed IMPLEMENTED wake and official
+event, requiring it to be the active running owner writer. Reserve and spawn
+exactly once in this owner turn. After the normal spawn ACK, STOP and call
+`sessions_yield` for the owned completion. Do not reconcile or collect in this
+owner turn: exact owner run correlation requires the original owner turn to
+end. The completion callback after that turn ends may reconcile and collect
+exactly once; it must never respawn. The reservation output's top-level `model`,
+`effort`, and `prompt_sha256` are authoritative; invoke exactly the returned
+spawn arguments. `prompt_sha256` is reservation-side evidence only; binding
+rests on the exact task identity plus host role, model, effort, and the strict
+verdict binding. The CLI derives record paths from the managed OpenClaw root
+that contains `--root` and rejects any other path, including arbitrary/latest
+records or caller-invented paths. An unfinished child stays pending, never FAIL.
+A failed, errored, or aborted reviewer child makes the attempt a terminal
+REVIEW_FAILED with the host reason as the sole finding, with no supersession or
+re-review; it is distinct from a reviewer FAIL verdict but final for the
+attempt. Limitation: an operator cannot stop a running reviewer through
+`chat.abort` after the owner yields (the reply reports
 `owner_run_inactive_no_supported_child_cancel`); it ends on its own terminal
-evidence. Do not use the retired `--core-database`, ACPX, or Claude-project
-flags, infer paths, search arbitrary records, or repair a verdict.
+evidence. Do not use the retired `--core-database` or ACPX paths, infer
+alternatives, search arbitrary records, or repair a verdict. If correlation
+remains unavailable, preserve the refusal.
 
 ## Dispatch and review
 
-Spawn only the configured native implementer, experiment runner, and read-only
-Sol reviewer. Bind each child handoff to the exact hypothesis, attempt,
+Spawn only the configured implementer, runner, and read-only reviewer. Bind each child handoff to the exact hypothesis, attempt,
 worktree, commit, and task identity. Reserve immutable review evidence before
-the native Sol review and reconcile the official child run's identity, commit,
+the reviewer run and reconcile the official child run's identity, commit,
 specification digest, and strict verdict. Never respawn after an unknown result
-or retype a verdict. An unknown native spawn acknowledgement or outcome remains
+or retype a verdict. An unknown spawn acknowledgement or outcome remains
 pending and never authorizes repeat dispatch.
 
 Completion ownership is per owner turn: a completion-required coding or runner
-stage spawns a fresh configured native child bound to the same hypothesis,
+stage spawns a fresh configured child bound to the same hypothesis,
 attempt, worktree, and checkpoint; this is the same attempt and needs no new
 admission. An authorized fresh child for a later bounded correction may continue
 that same attempt, but it does not authorize duplicating or re-running a
@@ -217,7 +217,7 @@ historical execution require that clean committed checkout.
 An implementation completion callback may verify and submit the implementation
 result, then must STOP. It must not reserve or spawn review from the original
 OPENED callback. Only the next canonical IMPLEMENTED wake supplies `WAKE_KEY`
-for exactly one review reservation and native Sol dispatch; a later correction
+for exactly one review reservation and reviewer dispatch; a later correction
 must likewise wait for its next IMPLEMENTED wake. This implementation callback
 is separate from the later review completion callback, which only reconciles
 and collects the already-spawned child and never dispatches again.

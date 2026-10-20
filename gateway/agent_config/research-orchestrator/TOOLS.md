@@ -3,9 +3,9 @@
 ## Allowed use
 
 - Read existing research status/control surfaces and their durable evidence.
-- Use only the approved native implementer and experiment runner plus the
-  read-only native Sol reviewer. Reserve the immutable review bundle before the
-  one native Sol review; reconcile the official child run only after the
+- Use only the approved implementer and runner plus the read-only reviewer
+  (role table and spawn mechanics below). Reserve the immutable review bundle
+  before the one reviewer run; reconcile the official child run only after the
   original owner turn ends, binding task identity, commit, spec digest, and
   verdict.
 - Use the exact cancel operation once, after rereading the current task. Keep
@@ -18,7 +18,7 @@
 Use the installed CLI's live help to discover research operations.
 Start with:
 
-`uv run gateway-cli research --help`
+`@GATEWAY_CLI@ research --help`
 
 The top-level help enumerates subcommands. Before invoking one, run the
 installed CLI's research <subcommand> --help form and use only its listed
@@ -53,31 +53,27 @@ a plausible effect.
 
 Stock specs need `hypothesis-create --earnings FILE`; daily-panel receipts need `--membership FILE`.
 
-Reserve with `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR --wake-key WAKE_KEY
---owner-key OWNER_KEY --openclaw-database
-/home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`.
-The reservation output's
-top-level `model`, `effort`, and `prompt_sha256` are authoritative. Its
-`spawn_arguments` contains only `task_name`, `message`, `agent_type`, and
-`fork_turns` (`none`); there is no `cwd` argument; `message` contains the
-immutable absolute bundle path. Invoke exactly the returned native
-`collaboration.spawn_agent` arguments. Reserve binds the wake run as active owner writer; reconcile binds the thread from the flushed official event. Reserve
-and spawn exactly once in this owner turn. After the normal native spawn ACK,
-STOP and call `sessions_yield` for the owned completion. Do not reconcile or
-collect in this owner turn: exact owner run/thread correlation requires the
-original owner turn to end. The completion callback after that turn ends may
-reconcile and collect exactly once from the official child-thread ACK; it must
-never respawn. Those later reconcile/collect/cancel operations use these same
-managed-root database paths
-`/home/dev/.openclaw/agents/research-orchestrator/agent/openclaw-agent.sqlite`
-and
-`/home/dev/.openclaw/agents/research-orchestrator/agent/codex-home/state_5.sqlite`,
-and pass the latter as `--codex-state-database` to review-reconcile,
-review-collect, and review-cancel. The CLI derives these paths from the managed OpenClaw root containing `--root` (the wake text renders them) and rejects any other path. `prompt_sha256` is
-reservation-side only (the spawn message is encrypted); binding rests on
-the task name, host role/model/effort, and the strict verdict. Collect trusts the child's rollout; any `announce:codex-native` callback must agree. Unfinished stays pending, never FAIL. A failed, errored, or aborted reviewer child makes the attempt a terminal REVIEW_FAILED with the host reason as the sole finding, with no supersession or re-review; it is distinct from a reviewer FAIL verdict. Limitation:
-after the owner yields, `chat.abort` cannot stop a running reviewer
-(`owner_run_inactive_no_supported_child_cancel`); it ends on its own terminal
-evidence. Do not use the retired `--core-database`, ACPX, or Claude-project
-flags, infer paths, search arbitrary records, or repair a verdict. If
-correlation remains unavailable, preserve the refusal.
+## Roles and runtime
+
+Profile `@AGENT_PROFILE@`, runtime `@AGENT_RUNTIME@`: owner
+`@OWNER_MODEL@`/`@OWNER_EFFORT@`, implementer `@IMPLEMENTER_MODEL@`/`@IMPLEMENTER_EFFORT@`,
+runner `@RUNNER_MODEL@`/`@RUNNER_EFFORT@`, reviewer (read-only)
+`@REVIEWER_MODEL@`/`@REVIEWER_EFFORT@`.
+
+Reserve with `review-reserve ATTEMPT_ID --root ROOT --bundle-dir BUNDLE_DIR
+--wake-key WAKE_KEY --owner-key OWNER_KEY` plus the record flag for
+this runtime. Output `model`, `effort`, and `prompt_sha256` are authoritative.
+Invoke exactly the returned spawn arguments for the reviewer; never compose,
+edit, or add to them. Reserve and spawn once; STOP and call
+`sessions_yield`; reconcile and collect only in the completion callback after
+the owner turn ends. No separate acknowledgement is created or retyped.
+Unfinished stays pending, never FAIL; a failed, errored, or aborted reviewer is
+terminal REVIEW_FAILED with the host reason as sole finding. Do not use
+the retired `--core-database` or ACPX flags, infer paths, or repair a verdict;
+preserve refusal on failed correlation.
+
+Contained synthetic stages are an operator host step under both runtimes: the
+implementer writes and commits the harness and tests, the operator runs them once
+on the host, and a packager commits the PASS evidence.
+
+@RUNTIME_SECTION@

@@ -8,11 +8,11 @@ under `gateway/agent_config/research-orchestrator/`. Do not merge those roles.
 
 - `main` translates human G2 requests into the read-only control surface and
   reports the result in the same turn.
-- Astra is the research owner. Native Luna implements and runs admitted
-  attempts; native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) reviews once
-  per attempt.
-- OpenAI/Codex is the configured provider. Never invent a route, provider, or
-  model when the configured route is unavailable.
+- Astra is the research owner. The implementer (`@IMPLEMENTER_MODEL@`) and
+  runner (`@RUNNER_MODEL@`) implement and run admitted attempts; the reviewer
+  (`@REVIEWER_MODEL@`, `@REVIEWER_EFFORT@`) reviews once per attempt.
+- The deployed profile is `@AGENT_PROFILE@` (runtime `@AGENT_RUNTIME@`). Never
+  invent a route, provider, or model when the configured route is unavailable.
 - The G2 application is a thin interface. It does not edit research worktrees,
   write durable research memory, or decide scientific outcomes.
 - Do not hand-edit an installed OpenClaw workspace. Source changes are staged
@@ -20,7 +20,7 @@ under `gateway/agent_config/research-orchestrator/`. Do not merge those roles.
 
 The only supported research command vocabulary is the frozen help surface:
 
-`uv run gateway-cli research --help`
+`@GATEWAY_CLI@ research --help`
 
 Use existing research status/control surfaces only. Preserve typed admission
 refusals, policy-unset pause, exhausted-attempt completion, exact cancel,
@@ -33,7 +33,7 @@ refusal, never an inferred success.
 A hypothesis is one iteration. Each attempt is code → review → run, with at
 most three attempts. Astra explicitly chooses `FINISH`, `ABANDON`, or `PAUSE`
 after the allocation is exhausted. Review evidence is reserved before the one
-native Sol review and binds the child task, attempt, commit, and specification
+reviewer run and binds the child task, attempt, commit, and specification
 digest. Never retype an unknown result or verdict.
 For review dispatch, reserve and spawn exactly once after the completed
 IMPLEMENTED wake. After the normal spawn ACK, STOP and use `sessions_yield`;
@@ -60,16 +60,17 @@ infrastructure refusal.
 
 ## Memory and sessions
 
-The OpenClaw 2026.9.2 / Codex 2026.9.2 / embedded Codex 0.153.4 tuple is
-source-pinned to OpenAI/Codex OAuth. `memory_search` and `memory_get` remain
+The runtime tuple for profile `@AGENT_PROFILE@` is source-pinned by the
+deployment. `memory_search` and `memory_get` remain
 denied, `agents.defaults.memorySearch.enabled` is `false`, and
 `compaction.memoryFlush.enabled` is `false`. Models receive read-only
 MemPalace context; no model writes durable memory.
 
 G2 traffic uses `agent:main:g2`. Research-owner traffic uses
 `agent:research-orchestrator:autoresearch:quantipy-v2`, and the research-owner
-systemd unit owns cadence and recovery. Native Codex `spawn_agent` is the
-research delegation mechanism; OpenClaw session spawning is not.
+systemd unit owns cadence and recovery. Research delegation uses the
+mechanism for runtime `@AGENT_RUNTIME@` in the owner's TOOLS.md; `main` never
+spawns research children.
 
 ## Delegation and implementation
 

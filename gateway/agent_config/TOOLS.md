@@ -10,12 +10,12 @@ completion announcements. Return the control result to the requesting human.
 ## Research-owner boundary
 
 Astra owns the bounded research loop in the separate
-`research-orchestrator` workspace. Native Luna is the approved implementer and
-runner; native OpenAI/Codex Sol (`gpt-5.6-sol`, xhigh, fast) is the one reviewer
-per attempt. Delegation is
-through native Codex `spawn_agent` with the configured roles, never an ad-hoc
-provider or route. Read the frozen `research --help` surface before using a
-research operation.
+`research-orchestrator` workspace. The implementer (`@IMPLEMENTER_MODEL@`) and
+runner (`@RUNNER_MODEL@`) are approved; the reviewer (`@REVIEWER_MODEL@`,
+`@REVIEWER_EFFORT@`) is the one reviewer per attempt. Delegation is performed
+by the owner with the configured roles of profile `@AGENT_PROFILE@` (runtime
+`@AGENT_RUNTIME@`), never an ad-hoc provider or route. Read the frozen
+`research --help` surface before using a research operation.
 
 Each completion-required child handoff receives a non-empty normal owner
 acknowledgement, even while another required child is pending. Do not silently

@@ -110,10 +110,12 @@ or model.
   guarded no-op when the block is in shared state; stop and escalate to the
   operator with a protected backup rather than retrying or importing internal
   module helpers as a public CLI.
-- Astra (`openai/gpt-6-astra`), Luna (`openai/gpt-5.6-luna`), and native Sol
-  (`openai/gpt-5.6-sol`) are OpenAI/Codex routes. Sol is the read-only
-  reviewer with xhigh reasoning and fast requested tier; do not add an
-  Anthropic/ACP fallback or alternate provider.
+- Under the `codex` profile, Astra (`openai/gpt-6-astra`), Luna
+  (`openai/gpt-5.6-luna`), and native Sol (`openai/gpt-5.6-sol`) are
+  OpenAI/Codex routes. Sol is the read-only reviewer with xhigh reasoning and
+  fast requested tier. The `claude` profile is a separate deployed profile
+  (`scripts/switch-agent-profile.sh`); never add an Anthropic/ACP fallback or
+  alternate provider inside the `codex` profile.
 - Keep `agents.defaults.compaction.mode` at `default` for Codex. OpenClaw
   2026.9.2 and its native Codex runtime own automatic compaction; do not add a
   compatibility shim or generic OpenAI API-key fallback. This repo uses Codex
@@ -131,7 +133,7 @@ or model.
   explicit start gate. It writes and enables the unit, then restarts
   the service so it points at the current package.
 - Prefer canonical `openai/*` model refs in OpenClaw config. OpenClaw coding
-  and research worker routes use native Codex subagents, including the
+  and research worker routes use native Codex subagents under the `codex` profile, including the
   read-only Sol reviewer; never reintroduce the retired ACP route.
 - If Codex inspection fails after an upgrade, rerun `bash scripts/bootstrap.sh`;
   do not fall back to another plugin, provider, or app-server binary.
