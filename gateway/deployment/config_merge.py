@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeAlias, cast
 
+from ..agent_profiles import AgentProfile, AgentProfileError, load_profile
+from .agent_guard import guard_config, guard_plugin_dir
 from .guarded_fs import guard_destination_path_chain
 
 
@@ -76,6 +78,48 @@ OPENAI_ALTERNATE_MODEL_REFS = frozenset(
     }
 )
 
+# Claude profile roster: the three OpenClaw child agents that replace the Codex-native roles
+# (implementer, experiment_runner, reviewer). The owner spawns them with sessions_spawn.
+CLAUDE_RUNTIME_ID = "claude-cli"
+CLAUDE_PLUGIN_ID = "anthropic"
+OWNER_AGENT_ID = "research-orchestrator"
+CLAUDE_CHILD_AGENTS: tuple[tuple[str, str], ...] = (
+    ("research-implementer", "implementer"),
+    ("research-runner", "runner"),
+    ("research-reviewer", "reviewer"),
+)
+CLAUDE_CHILD_AGENT_IDS: tuple[str, ...] = tuple(agent_id for agent_id, _ in CLAUDE_CHILD_AGENTS)
+# Children are leaves: they never orchestrate. These are OpenClaw-owned tools. Claude's native
+# Write/Edit/Bash are not reachable through tools.deny; they are confined by the
+# g2-agent-guard plugin and the dedicated CLAUDE_CONFIG_DIR settings (claude_runtime).
+CLAUDE_CHILD_BASE_DENY: tuple[str, ...] = (
+    "sessions_spawn",
+    "sessions_yield",
+    "sessions_send",
+    "sessions_list",
+    "sessions_history",
+    "agents_list",
+)
+GUARD_PLUGIN_ID = "g2-agent-guard"
+# claude-cli ignores the per-server ``codex.agents`` projection, so the managed MCP servers
+# would otherwise reach every agent whose tool profile is "full". Only main may use them
+# (through its explicit allow list); everyone else gets these server-wide denies.
+CLAUDE_MCP_DENY: tuple[str, ...] = ("g2-control__*", "mempalace-readonly__*")
+CLAUDE_OWNER_TOOLS: dict[str, JsonValue] = {
+    "profile": "full",
+    "deny": cast(JsonValue, list(CLAUDE_MCP_DENY)),
+}
+CLAUDE_CHILD_TOOL_DENY: tuple[str, ...] = (*CLAUDE_CHILD_BASE_DENY, *CLAUDE_MCP_DENY)
+MAIN_TOOL_DENY_IDS: tuple[str, ...] = (
+    "exec",
+    "sessions_spawn",
+    "sessions_yield",
+    "sessions_send",
+    "sessions_list",
+    "sessions_history",
+    "agents_list",
+)
+
 # These are the exact paths rejected by the OpenClaw 8.1 runtime schema.  The
 # migration intentionally does not walk by key name: similarly named nested
 # settings must survive the candidate unchanged.
@@ -116,6 +160,11 @@ class AssemblyInputs:
     model_provider: str
     model_id: str
     orchestrator_model_primary: str
+    # None selects the repository codex profile, which keeps the pre-profile assembly bytes.
+    profile: AgentProfile | None = None
+    hypothesis_worktrees_root: str = ""
+    owner_workspace_root: str = ""
+    gateway_cli: str = ""
 
 
 _NUMBER_RE = re.compile(
@@ -576,45 +625,251 @@ def _is_approved_openai_model_route(model_ref: str) -> bool:
     return model_ref.startswith("openai/") or model_ref in OPENAI_ALTERNATE_MODEL_REFS
 
 
+def _check_codex_routes(merged: JsonObject, inputs: AssemblyInputs) -> None:
+    """Fail closed unless every native Codex route is declared and approved."""
+
+    if not _model_declared(merged, inputs.model_provider, inputs.model_id):
+        raise ConfigMergeError(
+            f"ERROR: Selected model '{inputs.model_primary}' is not declared in repo config.\n"
+            "       Add it to gateway/openclaw_config/openclaw.json or choose a configured model."
+        )
+
+    if not inputs.orchestrator_model_primary:
+        raise ConfigMergeError(
+            "ERROR: Repo config must pin agents.entries.research-orchestrator "
+            '"research-orchestrator" to a model.primary.'
+        )
+    if not inputs.orchestrator_model_primary.startswith("openai/"):
+        raise ConfigMergeError(
+            f"ERROR: Research orchestrator model '{inputs.orchestrator_model_primary}' "
+            "must use the OpenAI/Codex provider."
+        )
+    orchestrator_model_id = inputs.orchestrator_model_primary.removeprefix("openai/")
+    if not _model_declared(merged, "openai", orchestrator_model_id):
+        raise ConfigMergeError(
+            f"ERROR: Research orchestrator model '{inputs.orchestrator_model_primary}' "
+            "is not declared in repo config.\n"
+            "       Add it to gateway/openclaw_config/openclaw.json before pushing."
+        )
+    if not _model_declared(merged, "openai", NATIVE_LUNA_MODEL_REF.removeprefix("openai/")):
+        raise ConfigMergeError(
+            f"ERROR: Native research model '{NATIVE_LUNA_MODEL_REF}' is not declared in "
+            "repo config.\n"
+            "       Add it to gateway/openclaw_config/openclaw.json before pushing."
+        )
+    if not _model_declared(merged, "openai", NATIVE_SOL_MODEL_REF.removeprefix("openai/")):
+        raise ConfigMergeError(
+            f"ERROR: Native research model '{NATIVE_SOL_MODEL_REF}' is not declared in "
+            "repo config.\n"
+            "       Add it to gateway/openclaw_config/openclaw.json before pushing."
+        )
+    if not _is_approved_openai_model_route(inputs.model_primary):
+        raise ConfigMergeError(
+            f"ERROR: Active model '{inputs.model_primary}' must be an approved OpenAI model "
+            "route; refusing a provider fallback."
+        )
+    if not _is_approved_openai_model_route(inputs.orchestrator_model_primary):
+        raise ConfigMergeError(
+            f"ERROR: Research orchestrator model '{inputs.orchestrator_model_primary}' "
+            "must be an approved OpenAI model route."
+        )
+
+
+def _profile_for(inputs: AssemblyInputs) -> AgentProfile:
+    try:
+        profile = inputs.profile if inputs.profile is not None else load_profile("codex")
+    except AgentProfileError as exc:
+        raise ConfigMergeError(f"ERROR: {exc}") from exc
+    if profile.runtime == "codex":
+        expected_provider = "openai"
+    elif profile.runtime == CLAUDE_RUNTIME_ID:
+        expected_provider = CLAUDE_PLUGIN_ID
+    else:
+        raise ConfigMergeError(f"ERROR: Unsupported agent profile runtime '{profile.runtime}'.")
+    for role_name, spec in profile.roles.items():
+        if spec.provider != expected_provider:
+            raise ConfigMergeError(
+                f"ERROR: Agent profile '{profile.name}' role '{role_name}' uses "
+                f"'{spec.model_ref}'; the {profile.runtime} runtime only runs "
+                f"{expected_provider}/* models."
+            )
+    return profile
+
+
+def _check_claude_routes(profile: AgentProfile) -> None:
+    """Claude models are not catalogued in models.providers; the profile is the contract."""
+
+    for role_name, spec in profile.roles.items():
+        if spec.effort is None:
+            raise ConfigMergeError(
+                f"ERROR: Agent profile '{profile.name}' role '{role_name}' must declare an effort."
+            )
+
+
+def profile_model_refs(profile: AgentProfile) -> list[str]:
+    """Every distinct model ref of the profile, in role order."""
+
+    refs: list[str] = []
+    for role_name in ("main", "owner", "implementer", "runner", "reviewer"):
+        ref = profile.role(role_name).model_ref
+        if ref not in refs:
+            refs.append(ref)
+    return refs
+
+
+def _apply_claude_plugins(merged: JsonObject, plugins: JsonObject, entries: JsonObject) -> None:
+    """Enable the bundled anthropic plugin and keep the Codex/OpenAI surface out."""
+
+    for stale in ("codex", "openai"):
+        entries.pop(stale, None)
+    # The claude surface is exactly anthropic plus the guard (added by _apply_guard_plugin).
+    plugins["allow"] = [CLAUDE_PLUGIN_ID]
+    deny = plugins.get("deny")
+    if isinstance(deny, list):
+        kept = [item for item in deny if item not in (CLAUDE_PLUGIN_ID, GUARD_PLUGIN_ID)]
+        if kept:
+            plugins["deny"] = kept
+        else:
+            plugins.pop("deny")
+    if plugins.get("enabled") is False:
+        plugins.pop("enabled")
+    anthropic = entries.get(CLAUDE_PLUGIN_ID)
+    if not isinstance(anthropic, dict):
+        anthropic = {}
+        entries[CLAUDE_PLUGIN_ID] = anthropic
+    anthropic["enabled"] = True
+    # The openai provider block pins agentRuntime codex; it has no role under claude.
+    models = _get_object(merged, "models")
+    providers = _get_object(models if models is not None else {}, "providers")
+    if providers is not None:
+        providers.pop("openai", None)
+
+
+def _apply_guard_plugin(
+    plugins: JsonObject,
+    entries: JsonObject,
+    profile: AgentProfile,
+    paths: tuple[Path, Path, Path],
+    research_root: str,
+) -> None:
+    """Load g2-agent-guard, the per-agent tool and CLI policy for Claude's native tools."""
+
+    allow = cast(list[JsonValue], plugins.setdefault("allow", []))
+    if GUARD_PLUGIN_ID not in allow:
+        allow.append(GUARD_PLUGIN_ID)
+    load = _object(plugins.setdefault("load", {}), "plugins.load")
+    load["paths"] = [str(guard_plugin_dir())]
+    entries[GUARD_PLUGIN_ID] = {
+        "enabled": True,
+        "config": expected_guard_config(profile, paths, research_root),
+    }
+
+
+def claude_child_workspace(state_root: str | Path, agent_id: str) -> str:
+    """Dedicated workspace of one claude child agent (never the worktrees root)."""
+
+    return str(Path(state_root) / f"workspace-{agent_id}")
+
+
+def claude_child_entries(profile: AgentProfile, state_root: str | Path) -> dict[str, JsonValue]:
+    """The OpenClaw child agents the claude-profile owner delegates to.
+
+    Each child owns a dedicated workspace under the state root so OpenClaw bootstrap files
+    are per role. The attempt checkout arrives as the spawn ``cwd``. There is deliberately
+    no OpenClaw ``sandbox`` key: it cannot reach Claude's native tools.
+    """
+
+    if not Path(state_root).is_absolute():
+        raise ConfigMergeError("ERROR: OpenClaw state root must be an absolute path.")
+    children: dict[str, JsonValue] = {}
+    for agent_id, role_name in CLAUDE_CHILD_AGENTS:
+        spec = profile.role(role_name)
+        children[agent_id] = {
+            "workspace": claude_child_workspace(state_root, agent_id),
+            "model": {"primary": spec.model_ref},
+            "thinkingDefault": spec.effort,
+            # tools.fs.workspaceOnly is deliberately omitted: it does not confine Claude's native
+            # Write/Edit/Bash. The g2-agent-guard plugin does.
+            "tools": {"profile": "full", "deny": cast(JsonValue, list(CLAUDE_CHILD_TOOL_DENY))},
+        }
+    return children
+
+
+def _require_claude_paths(inputs: AssemblyInputs) -> tuple[Path, Path, Path]:
+    named = (
+        ("--owner-workspace-root", inputs.owner_workspace_root),
+        ("--hypothesis-worktrees-root", inputs.hypothesis_worktrees_root),
+        ("--gateway-cli", inputs.gateway_cli),
+    )
+    for flag, value in named:
+        if not value or not Path(value).is_absolute():
+            raise ConfigMergeError(
+                f"ERROR: The claude profile requires {flag} as an absolute path."
+            )
+    return (
+        Path(inputs.owner_workspace_root),
+        Path(inputs.hypothesis_worktrees_root),
+        Path(inputs.gateway_cli),
+    )
+
+
+def expected_guard_config(
+    profile: AgentProfile, paths: tuple[Path, Path, Path], root: str
+) -> JsonValue:
+    owner_ws, worktrees, cli = paths
+    return cast(
+        JsonValue,
+        guard_config(
+            profile,
+            owner_workspace_root=owner_ws,
+            hypothesis_worktrees_root=worktrees,
+            research_root=Path(root),
+            gateway_cli=cli,
+        ),
+    )
+
+
 def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs) -> JsonObject:
     """Apply every managed jq assembly operation to two decoded configs."""
 
+    profile = _profile_for(inputs)
+    is_codex = profile.runtime == "codex"
     merged = _object(deep_merge(local, repo), "merged config")
     merged.pop("mcp", None)
 
-    merged["mcp"] = {
-        "servers": {
-            "mempalace-readonly": {
-                "command": inputs.mempalace_python,
-                "args": [inputs.mempalace_wrapper, "--palace", inputs.mempalace_palace],
-                "codex": {
-                    "agents": list(inputs.mempalace_readonly_agents),
-                    "defaultToolsApprovalMode": "approve",
-                },
-                "env": {
-                    "FASTEMBED_CACHE_PATH": inputs.fastembed_cache,
-                    "MEMPALACE_EMBEDDING_MODEL": inputs.mempalace_embedding_model,
-                    "HF_HUB_OFFLINE": inputs.hf_hub_offline,
-                },
-            },
-            "g2-control": {
-                "command": inputs.python_bin,
-                "args": ["-m", inputs.g2_module],
-                "codex": {
-                    "agents": list(inputs.g2_agents),
-                    "defaultToolsApprovalMode": "approve",
-                },
-                "env": {
-                    "PYTHONPATH": inputs.repo_root,
-                    "RESEARCH_V2_ROOT": inputs.research_v2_root,
-                    "RESEARCH_CORE_DATABASE": inputs.research_core_database,
-                    "OPENCLAW_HOST": inputs.openclaw_host,
-                    "OPENCLAW_PORT": inputs.openclaw_port,
-                    "G2_OWNER_ENV_FILE": inputs.owner_env_file,
-                },
-            },
-        }
+    mempalace_server: JsonObject = {
+        "command": inputs.mempalace_python,
+        "args": [inputs.mempalace_wrapper, "--palace", inputs.mempalace_palace],
     }
+    g2_server: JsonObject = {
+        "command": inputs.python_bin,
+        "args": ["-m", inputs.g2_module],
+    }
+    if is_codex:
+        # The codex.agents projection is a Codex app-server concept; the claude profile
+        # has no equivalent key and keeps the servers without it.
+        mempalace_server["codex"] = {
+            "agents": list(inputs.mempalace_readonly_agents),
+            "defaultToolsApprovalMode": "approve",
+        }
+        g2_server["codex"] = {
+            "agents": list(inputs.g2_agents),
+            "defaultToolsApprovalMode": "approve",
+        }
+    mempalace_server["env"] = {
+        "FASTEMBED_CACHE_PATH": inputs.fastembed_cache,
+        "MEMPALACE_EMBEDDING_MODEL": inputs.mempalace_embedding_model,
+        "HF_HUB_OFFLINE": inputs.hf_hub_offline,
+    }
+    g2_server["env"] = {
+        "PYTHONPATH": inputs.repo_root,
+        "RESEARCH_V2_ROOT": inputs.research_v2_root,
+        "RESEARCH_CORE_DATABASE": inputs.research_core_database,
+        "OPENCLAW_HOST": inputs.openclaw_host,
+        "OPENCLAW_PORT": inputs.openclaw_port,
+        "G2_OWNER_ENV_FILE": inputs.owner_env_file,
+    }
+    merged["mcp"] = {"servers": {"mempalace-readonly": mempalace_server, "g2-control": g2_server}}
 
     for key in ("tools", "memory"):
         value = repo.get(key)
@@ -684,68 +939,36 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
             if value.get("apiKey") is None or value.get("apiKey") == "":
                 value["apiKey"] = _copy(azure_key)
 
-    if not _model_declared(merged, inputs.model_provider, inputs.model_id):
-        raise ConfigMergeError(
-            f"ERROR: Selected model '{inputs.model_primary}' is not declared in repo config.\n"
-            "       Add it to gateway/openclaw_config/openclaw.json or choose a configured model."
-        )
-
-    if not inputs.orchestrator_model_primary:
-        raise ConfigMergeError(
-            "ERROR: Repo config must pin agents.entries.research-orchestrator "
-            '"research-orchestrator" to a model.primary.'
-        )
-    if not inputs.orchestrator_model_primary.startswith("openai/"):
-        raise ConfigMergeError(
-            f"ERROR: Research orchestrator model '{inputs.orchestrator_model_primary}' "
-            "must use the OpenAI/Codex provider."
-        )
-    orchestrator_model_id = inputs.orchestrator_model_primary.removeprefix("openai/")
-    if not _model_declared(merged, "openai", orchestrator_model_id):
-        raise ConfigMergeError(
-            f"ERROR: Research orchestrator model '{inputs.orchestrator_model_primary}' "
-            "is not declared in repo config.\n"
-            "       Add it to gateway/openclaw_config/openclaw.json before pushing."
-        )
-    if not _model_declared(merged, "openai", NATIVE_LUNA_MODEL_REF.removeprefix("openai/")):
-        raise ConfigMergeError(
-            f"ERROR: Native research model '{NATIVE_LUNA_MODEL_REF}' is not declared in "
-            "repo config.\n"
-            "       Add it to gateway/openclaw_config/openclaw.json before pushing."
-        )
-    if not _model_declared(merged, "openai", NATIVE_SOL_MODEL_REF.removeprefix("openai/")):
-        raise ConfigMergeError(
-            f"ERROR: Native research model '{NATIVE_SOL_MODEL_REF}' is not declared in "
-            "repo config.\n"
-            "       Add it to gateway/openclaw_config/openclaw.json before pushing."
-        )
-    if not _is_approved_openai_model_route(inputs.model_primary):
-        raise ConfigMergeError(
-            f"ERROR: Active model '{inputs.model_primary}' must be an approved OpenAI model "
-            "route; refusing a provider fallback."
-        )
-    if not _is_approved_openai_model_route(inputs.orchestrator_model_primary):
-        raise ConfigMergeError(
-            f"ERROR: Research orchestrator model '{inputs.orchestrator_model_primary}' "
-            "must be an approved OpenAI model route."
-        )
+    if is_codex:
+        _check_codex_routes(merged, inputs)
+    else:
+        _check_claude_routes(profile)
 
     defaults["model"] = _get_object(defaults, "model") or {}
-    cast(JsonObject, defaults["model"])["primary"] = inputs.model_primary
-    model_policy_allow: list[JsonValue] = []
-    for model_ref in (
-        inputs.model_primary,
-        inputs.orchestrator_model_primary,
-        NATIVE_LUNA_MODEL_REF,
-        NATIVE_SOL_MODEL_REF,
-    ):
-        if model_ref not in model_policy_allow:
-            model_policy_allow.append(model_ref)
-    defaults["modelPolicy"] = {"allow": model_policy_allow}
-    # OpenClaw 8.1 treats defaults.models as a legacy override restriction until
-    # it is migrated.  The native policy above is authoritative, so retaining
-    # the legacy map would reintroduce migration and stale fallback semantics.
-    defaults.pop("models", None)
+    if is_codex:
+        cast(JsonObject, defaults["model"])["primary"] = inputs.model_primary
+        model_policy_allow: list[JsonValue] = []
+        for model_ref in (
+            inputs.model_primary,
+            inputs.orchestrator_model_primary,
+            NATIVE_LUNA_MODEL_REF,
+            NATIVE_SOL_MODEL_REF,
+        ):
+            if model_ref not in model_policy_allow:
+                model_policy_allow.append(model_ref)
+        defaults["modelPolicy"] = {"allow": model_policy_allow}
+        # OpenClaw 8.1 treats defaults.models as a legacy override restriction until
+        # it is migrated.  The native policy above is authoritative, so retaining
+        # the legacy map would reintroduce migration and stale fallback semantics.
+        defaults.pop("models", None)
+    else:
+        profile_refs = profile_model_refs(profile)
+        cast(JsonObject, defaults["model"])["primary"] = profile.role("main").model_ref
+        defaults["modelPolicy"] = {"allow": cast(JsonValue, list(profile_refs))}
+        # The claude-cli runtime is selected per model, not per provider.
+        defaults["models"] = {
+            ref: {"agentRuntime": {"id": CLAUDE_RUNTIME_ID}} for ref in profile_refs
+        }
 
     agents = _object(merged.get("agents"), "merged agents")
     managed_entries = _get_object(agents, "entries")
@@ -760,8 +983,9 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
     if not isinstance(model, dict):
         model = {}
         owner_entry["model"] = model
-    model["primary"] = inputs.orchestrator_model_primary
-    owner_entry["thinkingDefault"] = "high"
+    owner_spec = profile.role("owner")
+    model["primary"] = inputs.orchestrator_model_primary if is_codex else owner_spec.model_ref
+    owner_entry["thinkingDefault"] = owner_spec.effort or "high"
     owner_workspace = owner_entry.get("workspace")
     if not isinstance(owner_workspace, str) or not owner_workspace:
         owner_workspace = "workspace-research-orchestrator"
@@ -784,6 +1008,33 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
     owner_tools["profile"] = "full"
     owner_tools.pop("allow", None)
     owner_tools.pop("deny", None)
+    if not is_codex:
+        owner_tools["deny"] = cast(JsonValue, list(CLAUDE_MCP_DENY))
+        if Path(str(owner_entry["workspace"])) != Path(inputs.owner_workspace_root or "/"):
+            raise ConfigMergeError(
+                f"ERROR: Owner workspace '{owner_entry['workspace']}' differs from "
+                f"--owner-workspace-root '{inputs.owner_workspace_root}'."
+            )
+
+    if not is_codex:
+        main_entry = managed_entries.get("main")
+        if not isinstance(main_entry, dict):
+            raise ConfigMergeError("ERROR: Assembled config must contain agents.entries.main.")
+        main_spec = profile.role("main")
+        main_model = main_entry.get("model")
+        if not isinstance(main_model, dict):
+            main_model = {}
+            main_entry["model"] = main_model
+        main_model["primary"] = main_spec.model_ref
+        main_entry["thinkingDefault"] = main_spec.effort
+        children = claude_child_entries(profile, state_root)
+        owner_subagents = owner_entry.get("subagents")
+        if not isinstance(owner_subagents, dict):
+            owner_subagents = {}
+            owner_entry["subagents"] = owner_subagents
+        owner_subagents["allowAgents"] = cast(JsonValue, list(CLAUDE_CHILD_AGENT_IDS))
+        for child_id, child_entry in children.items():
+            managed_entries[child_id] = child_entry
 
     merged = _object(
         _walk_remove_keys(
@@ -823,7 +1074,409 @@ def _assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs
     ]
     if not plugins["allow"]:
         plugins.pop("allow", None)
+    if not is_codex:
+        _apply_claude_plugins(merged, plugins, entries)
+        guard_paths = _require_claude_paths(inputs)
+        _apply_guard_plugin(plugins, entries, profile, guard_paths, inputs.research_v2_root)
     return merged
+
+
+@dataclass(frozen=True)
+class ValidationExpectations:
+    """Resolved push values the assembled config must reproduce exactly."""
+
+    repo_root: str
+    python_bin: str
+    mempalace_python: str
+    mempalace_palace: str
+    mempalace_wrapper: str
+    fastembed_cache: str
+    mempalace_embedding_model: str
+    hf_hub_offline: str
+    g2_module: str
+    research_v2_root: str
+    research_core_database: str
+    owner_env_file: str
+    openclaw_host: str
+    openclaw_port: str
+    readonly_server_agents: tuple[str, ...]
+    g2_server_agents: tuple[str, ...]
+    main_tool_allow: tuple[str, ...]
+    hypothesis_worktrees_root: str = ""
+    openclaw_state_root: str = ""
+    owner_workspace_root: str = ""
+    gateway_cli: str = ""
+    # Codex only: the repo-pinned owner model; defaults to the profile owner model.
+    owner_model_primary: str = ""
+
+
+def _at(root: object, *path: str) -> object:
+    """jq-style optional path read: any missing step yields None."""
+
+    current = root
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _alt(value: object, default: object) -> object:
+    """jq's `//` operator."""
+
+    return default if value is None or value is False else value
+
+
+def _str_list(value: object) -> list[str] | None:
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return cast(list[str], value)
+    return None
+
+
+def _num_is(value: object, expected: int) -> bool:
+    """jq-style numeric equality that does not let a boolean pass as a number."""
+
+    return isinstance(value, int | float) and not isinstance(value, bool) and value == expected
+
+
+def _has_all(value: object, required: Sequence[str]) -> bool:
+    items = _str_list(_alt(value, []))
+    return items is not None and all(item in items for item in required)
+
+
+def _mcp_violations(
+    config: dict[str, object], expect: ValidationExpectations, codex: bool
+) -> list[str]:
+    problems: list[str] = []
+    servers = _at(config, "mcp", "servers")
+    if not isinstance(servers, dict) or sorted(servers) != ["g2-control", "mempalace-readonly"]:
+        return ["mcp.servers must be exactly g2-control and mempalace-readonly"]
+    mempalace = servers["mempalace-readonly"]
+    g2_control = servers["g2-control"]
+    if _at(mempalace, "command") != expect.mempalace_python:
+        problems.append("mempalace-readonly command is not the MemPalace venv python")
+    if _at(mempalace, "args") != [expect.mempalace_wrapper, "--palace", expect.mempalace_palace]:
+        problems.append("mempalace-readonly args do not bind the wrapper and palace")
+    if _at(mempalace, "env") != {
+        "FASTEMBED_CACHE_PATH": expect.fastembed_cache,
+        "MEMPALACE_EMBEDDING_MODEL": expect.mempalace_embedding_model,
+        "HF_HUB_OFFLINE": expect.hf_hub_offline,
+    }:
+        problems.append("mempalace-readonly env is not the managed embedding contract")
+    if _at(g2_control, "command") != expect.python_bin:
+        problems.append("g2-control command is not the repo python")
+    if _at(g2_control, "args") != ["-m", expect.g2_module]:
+        problems.append("g2-control args are not the managed module")
+    if _at(g2_control, "env") != {
+        "PYTHONPATH": expect.repo_root,
+        "RESEARCH_V2_ROOT": expect.research_v2_root,
+        "RESEARCH_CORE_DATABASE": expect.research_core_database,
+        "OPENCLAW_HOST": expect.openclaw_host,
+        "OPENCLAW_PORT": expect.openclaw_port,
+        "G2_OWNER_ENV_FILE": expect.owner_env_file,
+    }:
+        problems.append("g2-control env is not the managed bounded contract")
+    if codex:
+        if _alt(_at(mempalace, "codex", "agents"), []) != list(expect.readonly_server_agents):
+            problems.append("mempalace-readonly codex.agents projection drifted")
+        if _alt(_at(g2_control, "codex", "agents"), []) != list(expect.g2_server_agents):
+            problems.append("g2-control codex.agents projection drifted")
+        if _at(g2_control, "codex", "defaultToolsApprovalMode") != "approve":
+            problems.append("g2-control codex.defaultToolsApprovalMode must be approve")
+    else:
+        for name in ("mempalace-readonly", "g2-control"):
+            if isinstance(servers[name], dict) and "codex" in servers[name]:
+                problems.append(f"{name} must not carry a codex.agents projection under claude")
+    return problems
+
+
+def _main_entry_violations(
+    entry: object, expect: ValidationExpectations, main_model: str, main_effort: str | None
+) -> list[str]:
+    problems: list[str] = []
+    allow = _alt(_at(entry, "tools", "allow"), [])
+    deny = _alt(_at(entry, "tools", "deny"), [])
+    if not (
+        _at(entry, "tools", "profile") == "minimal"
+        and allow == list(expect.main_tool_allow)
+        and _has_all(deny, MAIN_TOOL_DENY_IDS)
+    ):
+        problems.append("main tools must keep the minimal profile, bounded allow list, and denies")
+    skills = _alt(_at(entry, "skills"), [])
+    if not (
+        _at(entry, "model", "primary") == main_model
+        and _at(entry, "thinkingDefault") == main_effort
+        and skills == ["mempalace-readonly"]
+        and _alt(_at(entry, "subagents", "allowAgents"), []) == []
+    ):
+        problems.append("main must use the profile model/effort, mempalace-readonly, no subagents")
+    return problems
+
+
+def validate_config(
+    config: object, profile: AgentProfile, expect: ValidationExpectations
+) -> list[str]:
+    """Return every violated managed-route invariant (empty means valid).
+
+    Replaces the hard-coded jq program of scripts/push-openclaw-config.sh; the codex
+    profile enforces the same invariants and the claude profile their equivalents.
+    """
+
+    if not isinstance(config, dict):
+        return ["config must be a JSON object"]
+    codex = profile.runtime == "codex"
+    problems: list[str] = []
+    agents = _at(config, "agents")
+    entries = _at(config, "agents", "entries")
+    defaults = _at(config, "agents", "defaults")
+
+    if codex and _at(defaults, "thinkingDefault") != "high":
+        problems.append("agents.defaults.thinkingDefault must be high")
+    if _at(agents, "ownership") != "explicit":
+        problems.append("agents.ownership must be explicit")
+    if isinstance(agents, dict) and "list" in agents:
+        problems.append("agents.list must not exist; the roster is agents.entries")
+    if not isinstance(entries, dict):
+        problems.append("agents.entries must be an object")
+        entries = {}
+    entries = cast(dict[str, object], entries)
+    for agent_id, entry in entries.items():
+        if not isinstance(entry, dict) or "id" in entry:
+            problems.append(f"agents.entries.{agent_id} must be an object without an id field")
+
+    plugins_allow = _alt(_at(config, "plugins", "allow"), [])
+    plugin_entries = _at(config, "plugins", "entries")
+    if "acpx" in cast(list[object], plugins_allow if isinstance(plugins_allow, list) else []):
+        problems.append("plugins.allow must not contain acpx")
+    if codex and _at(config, "plugins", "load", "paths") is not None:
+        problems.append("plugins.load.paths must not exist")
+    if _at(plugin_entries, "acpx") is not None:
+        problems.append("plugins.entries.acpx must not exist")
+    if _at(config, "acp") is not None:
+        problems.append("acp must not exist")
+    if codex:
+        codex_config = _at(plugin_entries, "codex", "config")
+        if not _has_all(plugins_allow, ["codex", "openai"]):
+            problems.append("plugins.allow must contain codex and openai")
+        if _at(plugin_entries, "codex", "enabled") is not True:
+            problems.append("plugins.entries.codex.enabled must be true")
+        if _at(codex_config, "nativeToolSurfaceEnabled") is not None:
+            problems.append("codex nativeToolSurfaceEnabled must be absent")
+        if _at(codex_config, "codexDynamicToolsExclude") is not None:
+            problems.append("codex codexDynamicToolsExclude must be absent")
+        sandbox = _at(codex_config, "appServer", "sandbox")
+        if sandbox != "workspace-write":
+            problems.append("codex appServer.sandbox must be workspace-write")
+        if _at(codex_config, "appServer", "defaultWorkspaceDir") == (
+            "/home/dev/.openclaw/autoresearch/model-workspaces"
+        ):
+            problems.append("codex appServer.defaultWorkspaceDir must not be the retired root")
+        if _at(codex_config, "appServer", "networkProxy") is not None:
+            problems.append("codex appServer.networkProxy must be absent")
+    else:
+        if not _has_all(plugins_allow, [CLAUDE_PLUGIN_ID]):
+            problems.append("plugins.allow must contain anthropic")
+        if any(
+            plugin in ("codex", "openai")
+            for plugin in cast(
+                list[object], plugins_allow if isinstance(plugins_allow, list) else []
+            )
+        ):
+            problems.append("plugins.allow must not contain codex or openai under claude")
+        managed = {CLAUDE_PLUGIN_ID, GUARD_PLUGIN_ID}
+        if not (
+            isinstance(plugins_allow, list)
+            and len(plugins_allow) == len(managed)
+            and all(isinstance(item, str) and item in managed for item in plugins_allow)
+            and len(set(plugins_allow)) == len(managed)
+        ):
+            problems.append(
+                f"plugins.allow must be exactly {CLAUDE_PLUGIN_ID} and {GUARD_PLUGIN_ID} "
+                "under claude"
+            )
+        plugins_deny = _at(config, "plugins", "deny")
+        if isinstance(plugins_deny, list) and any(
+            item in (CLAUDE_PLUGIN_ID, GUARD_PLUGIN_ID) for item in plugins_deny
+        ):
+            problems.append("plugins.deny must not contain anthropic or g2-agent-guard")
+        elif plugins_deny is not None and not isinstance(plugins_deny, list):
+            problems.append("plugins.deny must be a list")
+        if _at(config, "plugins", "enabled") is False:
+            problems.append("plugins.enabled must not be false")
+        if _at(plugin_entries, CLAUDE_PLUGIN_ID, "enabled") is not True:
+            problems.append("plugins.entries.anthropic.enabled must be true")
+        for stale in ("codex", "openai"):
+            if _at(plugin_entries, stale) is not None:
+                problems.append(f"plugins.entries.{stale} must not exist under claude")
+
+    if not _num_is(_at(defaults, "maxConcurrent"), 2):
+        problems.append("agents.defaults.maxConcurrent must be 2")
+    if not _num_is(_at(defaults, "subagents", "maxConcurrent"), 1):
+        problems.append("agents.defaults.subagents.maxConcurrent must be 1")
+    if not _num_is(_at(defaults, "subagents", "maxSpawnDepth"), 1):
+        problems.append("agents.defaults.subagents.maxSpawnDepth must be 1")
+    if not _num_is(_at(defaults, "subagents", "runTimeoutSeconds"), 1800):
+        problems.append("agents.defaults.subagents.runTimeoutSeconds must be 1800")
+    if _at(config, "memory", "search", "enabled") is not False:
+        problems.append("memory.search.enabled must be false")
+    if _at(defaults, "compaction", "mode") != "default":
+        problems.append("agents.defaults.compaction.mode must be default")
+    if _at(defaults, "compaction", "memoryFlush", "enabled") is not False:
+        problems.append("agents.defaults.compaction.memoryFlush.enabled must be false")
+    if not _has_all(_at(config, "tools", "deny"), ["memory_search", "memory_get"]):
+        problems.append("tools.deny must contain memory_search and memory_get")
+    problems.extend(_mcp_violations(config, expect, codex))
+
+    owner_spec = profile.role("owner")
+    main_spec = profile.role("main")
+    owner_model = (
+        (expect.owner_model_primary or owner_spec.model_ref) if codex else owner_spec.model_ref
+    )
+    expected_models: dict[str, tuple[str, str | None]] = {
+        "main": (main_spec.model_ref, main_spec.effort),
+        OWNER_AGENT_ID: (owner_model, owner_spec.effort),
+    }
+    if not codex:
+        for agent_id, role_name in CLAUDE_CHILD_AGENTS:
+            spec = profile.role(role_name)
+            expected_models[agent_id] = (spec.model_ref, spec.effort)
+    if sorted(entries) != sorted(expected_models):
+        problems.append(
+            f"agents.entries must be exactly {sorted(expected_models)}, got {sorted(entries)}"
+        )
+    for agent_id, (model_ref, effort) in expected_models.items():
+        entry = entries.get(agent_id)
+        if entry is None:
+            continue
+        if not codex and isinstance(entry, dict):
+            for forbidden in ("models", "agentRuntime"):
+                if forbidden in entry:
+                    problems.append(
+                        f"agents.entries.{agent_id} must not carry {forbidden}; "
+                        "the runtime is selected in agents.defaults.models"
+                    )
+        if _at(entry, "model", "primary") != model_ref or _at(entry, "thinkingDefault") != effort:
+            problems.append(f"agents.entries.{agent_id} must use {model_ref} at effort {effort}")
+        if not model_ref.startswith(f"{profile.provider}/"):
+            problems.append(f"agents.entries.{agent_id} model is not a {profile.provider} route")
+
+    problems.extend(
+        _main_entry_violations(entries.get("main"), expect, main_spec.model_ref, main_spec.effort)
+    )
+    owner = entries.get(OWNER_AGENT_ID)
+    allow_agents = _alt(_at(owner, "subagents", "allowAgents"), [])
+    expected_allow = [] if codex else list(CLAUDE_CHILD_AGENT_IDS)
+    if not (
+        _at(owner, "skills") == ["research-loop"]
+        and _at(owner, "tools") == (CLAUDE_OWNER_TOOLS if not codex else {"profile": "full"})
+        and allow_agents == expected_allow
+    ):
+        problems.append(
+            "research-orchestrator must keep the research-loop skill, the native full tool "
+            "profile without local filters (claude: only the managed MCP server denies), "
+            "and the profile's subagent allow list"
+        )
+
+    if not codex:
+        problems.extend(_claude_violations(config, defaults, entries, profile, expect))
+    return problems
+
+
+def _guard_violations(
+    config: object, profile: AgentProfile, expect: ValidationExpectations
+) -> list[str]:
+    plugins_allow = _alt(_at(config, "plugins", "allow"), [])
+    if not _has_all(plugins_allow, [GUARD_PLUGIN_ID]):
+        return [f"plugins.allow must contain {GUARD_PLUGIN_ID}"]
+    problems: list[str] = []
+    if _at(config, "plugins", "load", "paths") != [str(guard_plugin_dir())]:
+        problems.append(f"plugins.load.paths must be exactly [{guard_plugin_dir()}]")
+    entry = _at(config, "plugins", "entries", GUARD_PLUGIN_ID)
+    if _at(entry, "enabled") is not True:
+        problems.append(f"plugins.entries.{GUARD_PLUGIN_ID}.enabled must be true")
+    paths = (expect.owner_workspace_root, expect.hypothesis_worktrees_root, expect.gateway_cli)
+    if not all(path and Path(path).is_absolute() for path in paths):
+        problems.append(
+            "validate needs absolute --owner-workspace-root, --hypothesis-worktrees-root and "
+            "--gateway-cli to check the guard config"
+        )
+        return problems
+    if not Path(expect.research_v2_root).is_absolute():
+        problems.append("--research-v2-root must be absolute to check the guard config")
+        return problems
+    if paths[2] != str(Path(expect.repo_root) / ".venv/bin/gateway-cli"):
+        problems.append("--gateway-cli must be <repo root>/.venv/bin/gateway-cli")
+    expected = expected_guard_config(
+        profile,
+        (Path(paths[0]), Path(paths[1]), Path(paths[2])),
+        expect.research_v2_root,
+    )
+    if _at(entry, "config") != expected:
+        problems.append(
+            f"plugins.entries.{GUARD_PLUGIN_ID}.config does not match the profile guard config"
+        )
+    return problems
+
+
+def _claude_violations(
+    config: object,
+    defaults: object,
+    entries: dict[str, object],
+    profile: AgentProfile,
+    expect: ValidationExpectations,
+) -> list[str]:
+    problems: list[str] = []
+    refs = profile_model_refs(profile)
+    if _at(defaults, "model", "primary") != profile.role("main").model_ref:
+        problems.append("agents.defaults.model.primary must be the profile main model")
+    if _at(defaults, "modelPolicy", "allow") != refs:
+        problems.append("agents.defaults.modelPolicy.allow must list exactly the profile models")
+    models = _at(defaults, "models")
+    if not isinstance(models, dict) or sorted(models) != sorted(refs):
+        problems.append("agents.defaults.models must list exactly the profile models")
+    else:
+        for ref in refs:
+            if _at(models, ref, "agentRuntime", "id") != CLAUDE_RUNTIME_ID:
+                problems.append(f"agents.defaults.models.{ref}.agentRuntime.id must be claude-cli")
+    state_root = expect.openclaw_state_root
+    if not state_root or not Path(state_root).is_absolute():
+        problems.append("validate needs an absolute --openclaw-state-root under claude")
+        state_root = ""
+    if expect.owner_workspace_root and (
+        _at(entries.get(OWNER_AGENT_ID), "workspace") != expect.owner_workspace_root
+    ):
+        problems.append(
+            f"agents.entries.{OWNER_AGENT_ID}.workspace must be {expect.owner_workspace_root}"
+        )
+    for agent_id, _role_name in CLAUDE_CHILD_AGENTS:
+        child = entries.get(agent_id)
+        if child is None:
+            continue
+        workspace = _at(child, "workspace")
+        if state_root and workspace != claude_child_workspace(state_root, agent_id):
+            problems.append(
+                f"agents.entries.{agent_id}.workspace must be the dedicated "
+                f"{claude_child_workspace(state_root, agent_id)}"
+            )
+        if expect.hypothesis_worktrees_root and workspace == expect.hypothesis_worktrees_root:
+            problems.append(
+                f"agents.entries.{agent_id}.workspace must not be the hypothesis worktrees root"
+            )
+        if isinstance(child, dict) and "sandbox" in child:
+            problems.append(f"agents.entries.{agent_id} must not carry an OpenClaw sandbox key")
+        if (
+            _at(child, "tools", "profile") != "full"
+            or _str_list(_at(child, "tools", "deny")) != list(CLAUDE_CHILD_TOOL_DENY)
+            or _at(child, "tools", "allow") is not None
+            or _at(child, "skills") is not None
+            or _at(child, "subagents") is not None
+        ):
+            problems.append(
+                f"agents.entries.{agent_id} must be a leaf agent: full tool profile, "
+                "orchestration tools and the managed MCP servers denied, no skills or subagents"
+            )
+    problems.extend(_guard_violations(config, profile, expect))
+    return problems
 
 
 def assemble_config_with_migration(
@@ -856,12 +1509,12 @@ def assemble_config(local: JsonObject, repo: JsonObject, inputs: AssemblyInputs)
     return config
 
 
-def _json_object_arg(raw: str, name: str) -> JsonObject | list[str]:
+def _json_object_arg(raw: str, name: str, *, array: bool = False) -> JsonObject | list[str]:
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise ConfigMergeError(f"invalid {name} JSON: {exc}") from exc
-    if name.endswith("agents"):
+    if array:
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             raise ConfigMergeError(f"{name} must be a JSON string array")
         return cast(list[str], value)
@@ -870,18 +1523,42 @@ def _json_object_arg(raw: str, name: str) -> JsonObject | list[str]:
     return cast(JsonObject, value)
 
 
+def _load_profile_arg(name: str | None) -> AgentProfile:
+    # An omitted --profile is the codex profile (never the environment) so that callers
+    # predating profiles keep their exact assembly.
+    try:
+        return load_profile(name or "codex")
+    except AgentProfileError as exc:
+        raise ConfigMergeError(f"ERROR: {exc}") from exc
+
+
 def _assemble_from_files(args: argparse.Namespace) -> bytes:
     local = _object(load_json(args.local_config), "local config")
     repo = _object(load_json(args.repo_config), "repo config")
-    readonly_agents = _json_object_arg(args.readonly_agents_json, "readonly agents")
-    g2_agents = _json_object_arg(args.g2_agents_json, "g2 agents")
-    provider = os.environ.get("OPENCLAW_PROVIDER") or "codex"
-    model_primary, model_provider, model_id = _provider_selection(
-        provider,
-        os.environ.get("OPENAI_MODEL", "gpt-5.4"),
-        os.environ.get("OPENROUTER_MODEL", ""),
-    )
-    orchestrator_primary = orchestrator_model_primary(repo)
+    readonly_agents = _json_object_arg(args.readonly_agents_json, "readonly agents", array=True)
+    g2_agents = _json_object_arg(args.g2_agents_json, "g2 agents", array=True)
+    profile = _load_profile_arg(getattr(args, "profile", None))
+    if profile.runtime == "codex":
+        provider = os.environ.get("OPENCLAW_PROVIDER") or "codex"
+        model_primary, model_provider, model_id = _provider_selection(
+            provider,
+            os.environ.get("OPENAI_MODEL", "gpt-5.4"),
+            os.environ.get("OPENROUTER_MODEL", ""),
+        )
+        orchestrator_primary = orchestrator_model_primary(repo)
+    else:
+        ignored = os.environ.get("OPENCLAW_PROVIDER", "")
+        if ignored:
+            print(
+                f"WARNING: OPENCLAW_PROVIDER={ignored} is ignored under the {profile.name} "
+                "agent profile; the profile selects every model.",
+                file=sys.stderr,
+            )
+        provider = profile.name
+        model_primary = profile.role("main").model_ref
+        model_provider = profile.role("main").provider
+        model_id = profile.role("main").model_id
+        orchestrator_primary = profile.role("owner").model_ref
     owner_env_file = os.environ.get("G2_OWNER_ENV_FILE", "")
     research_core_database = os.environ.get("RESEARCH_CORE_DATABASE", "")
     openclaw_host = os.environ.get("OPENCLAW_HOST", "127.0.0.1")
@@ -929,12 +1606,66 @@ def _assemble_from_files(args: argparse.Namespace) -> bytes:
         model_provider=model_provider,
         model_id=model_id,
         orchestrator_model_primary=orchestrator_primary,
+        profile=profile,
+        hypothesis_worktrees_root=getattr(args, "hypothesis_worktrees_root", None) or "",
+        owner_workspace_root=getattr(args, "owner_workspace_root", None) or "",
+        gateway_cli=getattr(args, "gateway_cli", None) or "",
     )
     config, migration_record = assemble_config_with_migration(local, repo, inputs)
     migration_record_path = getattr(args, "migration_record", None)
     if migration_record_path is not None:
         write_migration_record(migration_record_path, migration_record)
     return serialize_json(config)
+
+
+_VALIDATE_STRING_FLAGS = (
+    "repo_root",
+    "python_bin",
+    "mempalace_python",
+    "mempalace_palace",
+    "mempalace_wrapper",
+    "fastembed_cache",
+    "mempalace_embedding_model",
+    "hf_hub_offline",
+    "g2_module",
+    "research_v2_root",
+    "research_core_database",
+    "owner_env_file",
+    "openclaw_host",
+    "openclaw_port",
+)
+_VALIDATE_JSON_FLAGS = ("readonly_server_agents", "g2_server_agents", "main_tool_allow")
+
+
+def _validate_from_args(args: argparse.Namespace) -> list[str]:
+    profile = _load_profile_arg(args.profile)
+    if args.config == "-":
+        raw = sys.stdin.read()
+    else:
+        try:
+            raw = Path(args.config).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise ConfigMergeError(f"could not read config {args.config}: {exc}") from exc
+    try:
+        config = json.loads(raw)
+    except ValueError as exc:
+        raise ConfigMergeError(f"config is not valid JSON: {exc}") from exc
+    lists: dict[str, tuple[str, ...]] = {}
+    for name in _VALIDATE_JSON_FLAGS:
+        parsed = _json_object_arg(getattr(args, f"{name}_json"), name.replace("_", " "), array=True)
+        lists[name] = tuple(cast(list[str], parsed))
+    expect = ValidationExpectations(
+        **{name: getattr(args, name) for name in _VALIDATE_STRING_FLAGS},
+        readonly_server_agents=lists["readonly_server_agents"],
+        g2_server_agents=lists["g2_server_agents"],
+        main_tool_allow=lists["main_tool_allow"],
+        hypothesis_worktrees_root=args.hypothesis_worktrees_root,
+        openclaw_state_root=args.openclaw_state_root,
+        owner_workspace_root=args.owner_workspace_root,
+        gateway_cli=args.gateway_cli,
+        owner_model_primary=args.owner_model_primary,
+    )
+    return validate_config(config, profile, expect)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -961,6 +1692,37 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="write the private 8.1 schema migration record with mode 0600",
     )
+    assemble.add_argument(
+        "--profile",
+        help="agent profile (codex or claude); defaults to codex, never the environment",
+    )
+    assemble.add_argument(
+        "--hypothesis-worktrees-root",
+        help="hypothesis worktrees root fed to the guard plugin (required under claude)",
+    )
+    assemble.add_argument(
+        "--owner-workspace-root", help="owner agent workspace for the guard (required under claude)"
+    )
+    assemble.add_argument(
+        "--gateway-cli", help="absolute gateway-cli path for the guard (required under claude)"
+    )
+
+    validate = subparsers.add_parser(
+        "validate", help="check an assembled config against the managed route invariants"
+    )
+    validate.add_argument("--profile", required=True)
+    validate.add_argument("--config", required=True, help="config file, or - for stdin")
+    for name in _VALIDATE_STRING_FLAGS:
+        validate.add_argument(f"--{name.replace('_', '-')}", required=True, dest=name)
+    validate.add_argument("--hypothesis-worktrees-root", default="")
+    validate.add_argument("--owner-workspace-root", default="")
+    validate.add_argument("--gateway-cli", default="")
+    validate.add_argument("--openclaw-state-root", default="")
+    validate.add_argument("--owner-model-primary", default="")
+    for name in _VALIDATE_JSON_FLAGS:
+        validate.add_argument(
+            f"--{name.replace('_', '-')}-json", required=True, dest=f"{name}_json"
+        )
 
     orchestrator_parser = subparsers.add_parser("orchestrator-model")
     orchestrator_parser.add_argument("repo_config")
@@ -972,6 +1734,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "assemble":
             sys.stdout.buffer.write(_assemble_from_files(args))
+        elif args.command == "validate":
+            problems = _validate_from_args(args)
+            if problems:
+                for problem in problems:
+                    print(f"INVARIANT: {problem}", file=sys.stderr)
+                return 1
         elif args.command == "orchestrator-model":
             repo = _object(load_json(args.repo_config), "repo config")
             primary = orchestrator_model_primary(repo)

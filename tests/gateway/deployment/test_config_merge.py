@@ -2,26 +2,34 @@
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import json
 import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
+from gateway.agent_profiles import load_profile
+from gateway.deployment.agent_guard import guard_config, guard_plugin_dir
 from gateway.deployment.config_merge import (
     AssemblyInputs,
     ConfigMergeError,
     JsonNumber,
     JsonObject,
     JsonValue,
+    ValidationExpectations,
+    _profile_for,
     assemble_config,
     assemble_config_with_migration,
     deep_merge,
     load_json,
     serialize_json,
+    validate_config,
     write_migration_record,
 )
 
@@ -1071,3 +1079,770 @@ def test_python_serializer_uses_jq_style_unicode_and_newline() -> None:
             '{\n  "unicode": "café 中",\n  "control": "line\\nfeed",\n  "number": 1.0\n}\n'
         ).encode()
     )
+
+
+# ---------------------------------------------------------------------------
+# Claude profile assembly and validation
+# ---------------------------------------------------------------------------
+
+Cfg = dict[str, Any]
+CLAUDE = load_profile("claude")
+CODEX = load_profile("codex")
+CHILD_IDS = ("research-implementer", "research-runner", "research-reviewer")
+
+
+def _claude_inputs(tmp_path: Path) -> AssemblyInputs:
+    base = _assembly_inputs(
+        tmp_path,
+        provider="claude",
+        model_primary=CLAUDE.role("main").model_ref,
+        model_provider="anthropic",
+        model_id=CLAUDE.role("main").model_id,
+        orchestrator_model_primary=CLAUDE.role("owner").model_ref,
+    )
+    state = Path(base.openclaw_state_root)
+    return dataclasses.replace(
+        base,
+        profile=CLAUDE,
+        owner_workspace_root=str(state / "workspace-research-orchestrator"),
+        hypothesis_worktrees_root=str(Path(base.research_v2_root) / "hypothesis-worktrees"),
+        gateway_cli=str(REPO_ROOT / ".venv/bin/gateway-cli"),
+    )
+
+
+def _expectations(inputs: AssemblyInputs) -> ValidationExpectations:
+    return ValidationExpectations(
+        repo_root=inputs.repo_root,
+        python_bin=inputs.python_bin,
+        mempalace_python=inputs.mempalace_python,
+        mempalace_palace=inputs.mempalace_palace,
+        mempalace_wrapper=inputs.mempalace_wrapper,
+        fastembed_cache=inputs.fastembed_cache,
+        mempalace_embedding_model=inputs.mempalace_embedding_model,
+        hf_hub_offline=inputs.hf_hub_offline,
+        g2_module=inputs.g2_module,
+        research_v2_root=inputs.research_v2_root,
+        research_core_database=inputs.research_core_database,
+        owner_env_file=inputs.owner_env_file,
+        openclaw_host=inputs.openclaw_host,
+        openclaw_port=inputs.openclaw_port,
+        readonly_server_agents=inputs.mempalace_readonly_agents,
+        g2_server_agents=inputs.g2_agents,
+        main_tool_allow=tuple(
+            json.loads(REPO_CONFIG.read_text(encoding="utf-8"))["agents"]["entries"]["main"][
+                "tools"
+            ]["allow"]
+        ),
+        hypothesis_worktrees_root=inputs.hypothesis_worktrees_root,
+        openclaw_state_root=inputs.openclaw_state_root,
+        owner_workspace_root=inputs.owner_workspace_root,
+        gateway_cli=inputs.gateway_cli,
+    )
+
+
+def _assemble_claude(tmp_path: Path) -> tuple[JsonObject, AssemblyInputs]:
+    inputs = _claude_inputs(tmp_path)
+    config = assemble_config(cast(JsonObject, {}), cast(JsonObject, load_json(REPO_CONFIG)), inputs)
+    return config, inputs
+
+
+def test_codex_profile_assembly_is_unchanged_by_explicit_profile(tmp_path: Path) -> None:
+    repo = cast(JsonObject, load_json(REPO_CONFIG))
+    implicit = _assembly_inputs(tmp_path)
+    explicit = dataclasses.replace(implicit, profile=CODEX)
+    first = serialize_json(assemble_config({}, repo, implicit))
+    assert first == serialize_json(assemble_config({}, repo, explicit))
+    assert b"g2-agent-guard" not in first
+    assert b"claude-cli" not in first
+
+
+def test_codex_validate_accepts_codex_assembly_and_rejects_drift(tmp_path: Path) -> None:
+    inputs = _assembly_inputs(tmp_path)
+    config = assemble_config({}, cast(JsonObject, load_json(REPO_CONFIG)), inputs)
+    expect = _expectations(inputs)
+    plain = json.loads(serialize_json(config))
+    assert validate_config(plain, CODEX, expect) == []
+    plain["plugins"]["allow"] = ["codex"]
+    plain["plugins"]["load"] = {"paths": ["/x"]}
+    problems = validate_config(plain, CODEX, expect)
+    assert any("codex and openai" in problem for problem in problems)
+    assert any("plugins.load.paths" in problem for problem in problems)
+
+
+def test_claude_assembly_from_real_repo_overlay(tmp_path: Path) -> None:
+    config, inputs = _assemble_claude(tmp_path)
+    plain = json.loads(serialize_json(config))
+    state = Path(inputs.openclaw_state_root)
+    agents = plain["agents"]
+    defaults = agents["defaults"]
+    refs = [
+        CLAUDE.role(name).model_ref
+        for name in ("main", "owner", "implementer", "runner", "reviewer")
+    ]
+    distinct = list(dict.fromkeys(refs))
+    assert defaults["model"]["primary"] == CLAUDE.role("main").model_ref
+    assert defaults["modelPolicy"]["allow"] == distinct
+    assert defaults["models"] == {ref: {"agentRuntime": {"id": "claude-cli"}} for ref in distinct}
+    entries = agents["entries"]
+    assert sorted(entries) == sorted(["main", "research-orchestrator", *CHILD_IDS])
+    assert entries["main"]["model"]["primary"] == CLAUDE.role("main").model_ref
+    assert entries["main"]["thinkingDefault"] == CLAUDE.role("main").effort
+    owner = entries["research-orchestrator"]
+    assert owner["model"]["primary"] == CLAUDE.role("owner").model_ref
+    assert owner["thinkingDefault"] == CLAUDE.role("owner").effort
+    assert owner["subagents"]["allowAgents"] == list(CHILD_IDS)
+    assert owner["tools"] == {"profile": "full", "deny": ["g2-control__*", "mempalace-readonly__*"]}
+    assert (
+        entries["main"]["tools"]["allow"]
+        == json.loads(REPO_CONFIG.read_text())["agents"]["entries"]["main"]["tools"]["allow"]
+    )
+    for agent_id, role in zip(CHILD_IDS, ("implementer", "runner", "reviewer"), strict=True):
+        child = entries[agent_id]
+        assert child["workspace"] == str(state / f"workspace-{agent_id}")
+        assert child["workspace"] != inputs.hypothesis_worktrees_root
+        assert "sandbox" not in child
+        assert child["model"] == {"primary": CLAUDE.role(role).model_ref}
+        assert child["thinkingDefault"] == CLAUDE.role(role).effort
+        assert child["tools"]["deny"] == [
+            "sessions_spawn",
+            "sessions_yield",
+            "sessions_send",
+            "sessions_list",
+            "sessions_history",
+            "agents_list",
+            "g2-control__*",
+            "mempalace-readonly__*",
+        ]
+        assert child["tools"]["profile"] == "full"
+    plugins = plain["plugins"]
+    assert sorted(plugins["allow"]) == ["anthropic", "g2-agent-guard"]
+    assert "codex" not in plugins["allow"]
+    assert "openai" not in plugins["allow"]
+    assert plugins["entries"]["anthropic"]["enabled"] is True
+    assert "codex" not in plugins["entries"]
+    assert plugins["load"]["paths"] == [str(guard_plugin_dir())]
+    assert "g2-agent-guard" in plugins["allow"]
+    assert plugins["entries"]["g2-agent-guard"] == {
+        "enabled": True,
+        "config": json.loads(
+            json.dumps(
+                guard_config(
+                    CLAUDE,
+                    owner_workspace_root=Path(inputs.owner_workspace_root),
+                    hypothesis_worktrees_root=Path(inputs.hypothesis_worktrees_root),
+                    research_root=Path(inputs.research_v2_root),
+                    gateway_cli=Path(inputs.gateway_cli),
+                )
+            )
+        ),
+    }
+    for server in plain["mcp"]["servers"].values():
+        assert "codex" not in server
+    assert sorted(plain["mcp"]["servers"]) == ["g2-control", "mempalace-readonly"]
+    assert validate_config(plain, CLAUDE, _expectations(inputs)) == []
+
+
+def test_claude_assembly_requires_guard_paths(tmp_path: Path) -> None:
+    inputs = dataclasses.replace(_claude_inputs(tmp_path), gateway_cli="")
+    with pytest.raises(ConfigMergeError, match="--gateway-cli"):
+        assemble_config({}, cast(JsonObject, load_json(REPO_CONFIG)), inputs)
+
+
+def _plain_claude(tmp_path: Path) -> tuple[Cfg, ValidationExpectations]:
+    config, inputs = _assemble_claude(tmp_path)
+    return json.loads(serialize_json(config)), _expectations(inputs)
+
+
+def _mutate_child_sandbox(c: Cfg) -> None:
+    c["agents"]["entries"]["research-runner"]["sandbox"] = {"mode": "all"}
+
+
+def _mutate_guard_config(c: Cfg) -> None:
+    c["plugins"]["entries"]["g2-agent-guard"]["config"]["agents"] = {}
+
+
+def _mutate_guard_missing(c: Cfg) -> None:
+    del c["plugins"]["entries"]["g2-agent-guard"]
+
+
+def _mutate_guard_not_allowed(c: Cfg) -> None:
+    c["plugins"]["allow"].remove("g2-agent-guard")
+
+
+def _mutate_guard_path(c: Cfg) -> None:
+    c["plugins"]["load"]["paths"] = ["/elsewhere"]
+
+
+def _mutate_no_anthropic(c: Cfg) -> None:
+    c["plugins"]["allow"].remove("anthropic")
+
+
+def _mutate_codex_allowed(c: Cfg) -> None:
+    c["plugins"]["allow"].append("codex")
+
+
+def _mutate_openai_allowed(c: Cfg) -> None:
+    c["plugins"]["allow"].append("openai")
+
+
+def _mutate_policy(c: Cfg) -> None:
+    c["agents"]["defaults"]["modelPolicy"]["allow"] = ["anthropic/other"]
+
+
+def _mutate_runtime(c: Cfg) -> None:
+    models = c["agents"]["defaults"]["models"]
+    del models[next(iter(models))]
+
+
+def _mutate_runtime_id(c: Cfg) -> None:
+    models = c["agents"]["defaults"]["models"]
+    models[next(iter(models))]["agentRuntime"]["id"] = "codex"
+
+
+def _mutate_worktrees_workspace(c: Cfg) -> None:
+    entries = c["agents"]["entries"]
+    root = c["mcp"]["servers"]["g2-control"]["env"]["RESEARCH_V2_ROOT"]
+    entries["research-implementer"]["workspace"] = f"{root}/hypothesis-worktrees"
+
+
+def _mutate_missing_child(c: Cfg) -> None:
+    del c["agents"]["entries"]["research-reviewer"]
+
+
+def _mutate_allow_agents(c: Cfg) -> None:
+    c["agents"]["entries"]["research-orchestrator"]["subagents"]["allowAgents"] = []
+
+
+def _mutate_child_model(c: Cfg) -> None:
+    c["agents"]["entries"]["research-reviewer"]["model"]["primary"] = "anthropic/x"
+
+
+def _mutate_codex_projection(c: Cfg) -> None:
+    c["mcp"]["servers"]["g2-control"]["codex"] = {"agents": ["main"]}
+
+
+@pytest.mark.parametrize(
+    ("mutate", "needle"),
+    [
+        (_mutate_child_sandbox, "sandbox key"),
+        (_mutate_guard_config, "guard config"),
+        (_mutate_guard_missing, "g2-agent-guard.enabled"),
+        (_mutate_guard_not_allowed, "plugins.allow must contain g2-agent-guard"),
+        (_mutate_guard_path, "plugins.load.paths"),
+        (_mutate_no_anthropic, "must contain anthropic"),
+        (_mutate_codex_allowed, "must not contain codex or openai"),
+        (_mutate_openai_allowed, "must not contain codex or openai"),
+        (_mutate_policy, "modelPolicy.allow"),
+        (_mutate_runtime, "agents.defaults.models"),
+        (_mutate_runtime_id, "agentRuntime.id must be claude-cli"),
+        (_mutate_worktrees_workspace, "must not be the hypothesis worktrees root"),
+        (_mutate_missing_child, "agents.entries must be exactly"),
+        (_mutate_allow_agents, "subagent allow list"),
+        (_mutate_child_model, "research-reviewer must use"),
+        (_mutate_codex_projection, "codex.agents projection"),
+    ],
+)
+def test_claude_validate_rejects_violation(
+    tmp_path: Path, mutate: Callable[[Cfg], None], needle: str
+) -> None:
+    plain, expect = _plain_claude(tmp_path)
+    broken = copy.deepcopy(plain)
+    mutate(broken)
+    problems = validate_config(broken, CLAUDE, expect)
+    assert any(needle in problem for problem in problems), problems
+
+
+def test_claude_validate_requires_guard_flags(tmp_path: Path) -> None:
+    plain, expect = _plain_claude(tmp_path)
+    problems = validate_config(plain, CLAUDE, dataclasses.replace(expect, gateway_cli=""))
+    assert any("--gateway-cli" in problem for problem in problems)
+
+
+def _cli_args(tmp_path: Path, inputs: AssemblyInputs, local: Path) -> list[str]:
+    return [
+        str(local),
+        str(REPO_CONFIG),
+        inputs.repo_root,
+        inputs.openclaw_state_root,
+        inputs.python_bin,
+        inputs.mempalace_python,
+        inputs.mempalace_palace,
+        inputs.mempalace_wrapper,
+        inputs.fastembed_cache,
+        inputs.mempalace_embedding_model,
+        inputs.hf_hub_offline,
+        inputs.g2_module,
+        inputs.research_v2_root,
+        json.dumps(list(READONLY_AGENTS)),
+        json.dumps(list(G2_AGENTS)),
+    ]
+
+
+def _cli_env(inputs: AssemblyInputs, **extra: str) -> dict[str, str]:
+    environment = os.environ.copy()
+    environment.update(
+        G2_OWNER_ENV_FILE=inputs.owner_env_file,
+        RESEARCH_CORE_DATABASE=inputs.research_core_database,
+        OPENCLAW_HOST="127.0.0.1",
+        OPENCLAW_PORT="18789",
+        PYTHONSAFEPATH="1",
+        PYTHONPATH=str(REPO_ROOT),
+    )
+    environment.pop("OPENCLAW_PROVIDER", None)
+    environment.update(extra)
+    return environment
+
+
+def _run_cli(arguments: list[str], environment: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "gateway.deployment.config_merge", *arguments],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+        env=environment,
+    )
+
+
+def test_claude_cli_assemble_then_validate_roundtrip(tmp_path: Path) -> None:
+    inputs = _claude_inputs(tmp_path)
+    local = tmp_path / "live.json"
+    _write_json(local, {})
+    path_flags = [
+        "--hypothesis-worktrees-root",
+        inputs.hypothesis_worktrees_root,
+        "--owner-workspace-root",
+        inputs.owner_workspace_root,
+        "--gateway-cli",
+        inputs.gateway_cli,
+    ]
+    env = _cli_env(inputs, OPENCLAW_PROVIDER="azure")
+    assembled = _run_cli(
+        ["assemble", "--profile", "claude", *path_flags, "--", *_cli_args(tmp_path, inputs, local)],
+        env,
+    )
+    assert assembled.returncode == 0, assembled.stderr
+    assert "OPENCLAW_PROVIDER=azure is ignored" in assembled.stderr
+    published = json.loads(assembled.stdout)
+    assert published["agents"]["defaults"]["model"]["primary"] == CLAUDE.role("main").model_ref
+    config_path = tmp_path / "assembled.json"
+    config_path.write_text(assembled.stdout, encoding="utf-8")
+    expect = _expectations(inputs)
+    validate_args = [
+        "validate",
+        "--profile",
+        "claude",
+        "--config",
+        str(config_path),
+        "--repo-root",
+        inputs.repo_root,
+        "--python-bin",
+        inputs.python_bin,
+        "--mempalace-python",
+        inputs.mempalace_python,
+        "--mempalace-palace",
+        inputs.mempalace_palace,
+        "--mempalace-wrapper",
+        inputs.mempalace_wrapper,
+        "--fastembed-cache",
+        inputs.fastembed_cache,
+        "--mempalace-embedding-model",
+        inputs.mempalace_embedding_model,
+        "--hf-hub-offline",
+        inputs.hf_hub_offline,
+        "--g2-module",
+        inputs.g2_module,
+        "--research-v2-root",
+        inputs.research_v2_root,
+        "--research-core-database",
+        inputs.research_core_database,
+        "--owner-env-file",
+        inputs.owner_env_file,
+        "--openclaw-host",
+        inputs.openclaw_host,
+        "--openclaw-port",
+        inputs.openclaw_port,
+        "--openclaw-state-root",
+        inputs.openclaw_state_root,
+        "--readonly-server-agents-json",
+        json.dumps(list(READONLY_AGENTS)),
+        "--g2-server-agents-json",
+        json.dumps(list(G2_AGENTS)),
+        "--main-tool-allow-json",
+        json.dumps(list(expect.main_tool_allow)),
+        *path_flags,
+    ]
+    ok = _run_cli(validate_args, env)
+    assert ok.returncode == 0, ok.stderr
+    published["agents"]["entries"]["research-runner"]["sandbox"] = {"mode": "all"}
+    config_path.write_text(json.dumps(published), encoding="utf-8")
+    bad = _run_cli(validate_args, env)
+    assert bad.returncode == 1
+    assert "sandbox key" in bad.stderr
+
+
+def test_claude_assembly_strips_codex_acpx_and_plugin_denies_from_local_config(
+    tmp_path: Path,
+) -> None:
+    inputs = _claude_inputs(tmp_path)
+    local = cast(
+        JsonObject,
+        {
+            "acp": {"defaultAgent": "x"},
+            "plugins": {
+                "enabled": False,
+                "allow": ["codex", "openai", "acpx", "other"],
+                "deny": ["anthropic", "g2-agent-guard", "keep-me"],
+                "load": {"paths": ["/stale/plugin"]},
+                "entries": {
+                    "codex": {"enabled": True, "config": {"appServer": {"sandbox": "x"}}},
+                    "openai": {"enabled": True},
+                    "acpx": {"enabled": True},
+                },
+            },
+        },
+    )
+    config = assemble_config(local, cast(JsonObject, load_json(REPO_CONFIG)), inputs)
+    plain = json.loads(serialize_json(config))
+    plugins = plain["plugins"]
+    assert sorted(plugins["allow"]) == ["anthropic", "g2-agent-guard"]
+    assert plugins["deny"] == ["keep-me"]
+    assert "enabled" not in plugins
+    assert plugins["load"]["paths"] == [str(guard_plugin_dir())]
+    assert {"codex", "openai", "acpx"}.isdisjoint(plugins["entries"])
+    assert "acp" not in plain
+    assert validate_config(plain, CLAUDE, _expectations(inputs)) == []
+
+
+def test_claude_plugin_deny_dropped_entirely_when_only_managed_ids(tmp_path: Path) -> None:
+    inputs = _claude_inputs(tmp_path)
+    local = cast(JsonObject, {"plugins": {"deny": ["anthropic", "g2-agent-guard"]}})
+    config = assemble_config(local, cast(JsonObject, load_json(REPO_CONFIG)), inputs)
+    assert "deny" not in cast(JsonObject, config["plugins"])
+
+
+def test_claude_assembly_fails_when_owner_workspace_differs_from_flag(tmp_path: Path) -> None:
+    inputs = dataclasses.replace(
+        _claude_inputs(tmp_path), owner_workspace_root=str(tmp_path / "elsewhere")
+    )
+    with pytest.raises(ConfigMergeError, match="differs from --owner-workspace-root"):
+        assemble_config({}, cast(JsonObject, load_json(REPO_CONFIG)), inputs)
+
+
+def _mutate_plugins_deny(c: Cfg) -> None:
+    c["plugins"]["deny"] = ["anthropic"]
+
+
+def _mutate_plugins_deny_guard(c: Cfg) -> None:
+    c["plugins"]["deny"] = ["g2-agent-guard"]
+
+
+def _mutate_plugins_disabled(c: Cfg) -> None:
+    c["plugins"]["enabled"] = False
+
+
+def _mutate_extra_plugin(c: Cfg) -> None:
+    c["plugins"]["allow"].append("extra")
+
+
+def _mutate_owner_workspace(c: Cfg) -> None:
+    c["agents"]["entries"]["research-orchestrator"]["workspace"] = "/somewhere/else"
+
+
+def _mutate_acpx_entry(c: Cfg) -> None:
+    c["plugins"]["entries"]["acpx"] = {"enabled": True}
+
+
+def _mutate_acpx_allow(c: Cfg) -> None:
+    c["plugins"]["allow"].append("acpx")
+
+
+def _mutate_acp(c: Cfg) -> None:
+    c["acp"] = {"defaultAgent": "x"}
+
+
+def _mutate_main_allow(c: Cfg) -> None:
+    c["agents"]["entries"]["main"]["tools"]["allow"].append("exec")
+
+
+def _mutate_main_deny(c: Cfg) -> None:
+    c["agents"]["entries"]["main"]["tools"]["deny"].remove("exec")
+
+
+def _mutate_owner_mcp_deny(c: Cfg) -> None:
+    del c["agents"]["entries"]["research-orchestrator"]["tools"]["deny"]
+
+
+def _mutate_child_mcp_deny(c: Cfg) -> None:
+    deny = c["agents"]["entries"]["research-runner"]["tools"]["deny"]
+    deny.remove("g2-control__*")
+
+
+def _mutate_child_models_key(c: Cfg) -> None:
+    c["agents"]["entries"]["research-runner"]["models"] = {}
+
+
+def _mutate_entry_agent_runtime(c: Cfg) -> None:
+    c["agents"]["entries"]["main"]["agentRuntime"] = {"id": "codex"}
+
+
+def _mutate_bool_as_number(c: Cfg) -> None:
+    c["agents"]["defaults"]["subagents"]["maxConcurrent"] = True
+
+
+def _mutate_allow_agents_string(c: Cfg) -> None:
+    c["agents"]["entries"]["research-orchestrator"]["subagents"]["allowAgents"] = "x"
+
+
+def _mutate_main_allow_agents_number(c: Cfg) -> None:
+    c["agents"]["entries"]["main"]["subagents"] = {"allowAgents": 5}
+
+
+@pytest.mark.parametrize(
+    ("mutate", "needle"),
+    [
+        (_mutate_plugins_deny, "plugins.deny"),
+        (_mutate_plugins_deny_guard, "plugins.deny"),
+        (_mutate_plugins_disabled, "plugins.enabled"),
+        (_mutate_extra_plugin, "plugins.allow must be exactly"),
+        (_mutate_owner_workspace, "research-orchestrator.workspace"),
+        (_mutate_acpx_entry, "acpx"),
+        (_mutate_acpx_allow, "acpx"),
+        (_mutate_acp, "acp must not exist"),
+        (_mutate_main_allow, "main tools must keep"),
+        (_mutate_main_deny, "main tools must keep"),
+        (_mutate_owner_mcp_deny, "managed MCP server denies"),
+        (_mutate_child_mcp_deny, "research-runner must be a leaf agent"),
+        (_mutate_child_models_key, "must not carry models"),
+        (_mutate_entry_agent_runtime, "must not carry agentRuntime"),
+        (_mutate_bool_as_number, "subagents.maxConcurrent"),
+        (_mutate_allow_agents_string, "subagent allow list"),
+        (_mutate_main_allow_agents_number, "no subagents"),
+    ],
+)
+def test_claude_validate_rejects_more_violations(
+    tmp_path: Path, mutate: Callable[[Cfg], None], needle: str
+) -> None:
+    plain, expect = _plain_claude(tmp_path)
+    broken = copy.deepcopy(plain)
+    mutate(broken)
+    problems = validate_config(broken, CLAUDE, expect)
+    assert any(needle in problem for problem in problems), problems
+
+
+def test_claude_validate_requires_repo_gateway_cli_and_absolute_research_root(
+    tmp_path: Path,
+) -> None:
+    plain, expect = _plain_claude(tmp_path)
+    wrong_cli = dataclasses.replace(expect, gateway_cli="/usr/local/bin/gateway-cli")
+    assert any(
+        ".venv/bin/gateway-cli" in problem for problem in validate_config(plain, CLAUDE, wrong_cli)
+    )
+    relative = dataclasses.replace(expect, research_v2_root="relative/root")
+    problems = validate_config(plain, CLAUDE, relative)
+    assert any("must be absolute" in problem for problem in problems)
+
+
+def test_unsupported_profile_runtime_is_a_config_merge_error(tmp_path: Path) -> None:
+    bogus = dataclasses.replace(CLAUDE, runtime="bogus")
+    with pytest.raises(ConfigMergeError, match="Unsupported agent profile runtime"):
+        _profile_for(dataclasses.replace(_claude_inputs(tmp_path), profile=bogus))
+
+
+def test_cli_labels_main_tool_allow_errors(tmp_path: Path) -> None:
+    inputs = _claude_inputs(tmp_path)
+    config_path = tmp_path / "c.json"
+    config_path.write_text("{}", encoding="utf-8")
+    result = _run_cli(
+        [
+            "validate",
+            "--profile",
+            "codex",
+            "--config",
+            str(config_path),
+            *_validate_string_args(inputs),
+            "--readonly-server-agents-json",
+            "[]",
+            "--g2-server-agents-json",
+            "[]",
+            "--main-tool-allow-json",
+            "{}",
+        ],
+        _cli_env(inputs),
+    )
+    assert result.returncode == 1
+    assert "main tool allow must be a JSON string array" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def _validate_string_args(inputs: AssemblyInputs) -> list[str]:
+    pairs = {
+        "--repo-root": inputs.repo_root,
+        "--python-bin": inputs.python_bin,
+        "--mempalace-python": inputs.mempalace_python,
+        "--mempalace-palace": inputs.mempalace_palace,
+        "--mempalace-wrapper": inputs.mempalace_wrapper,
+        "--fastembed-cache": inputs.fastembed_cache,
+        "--mempalace-embedding-model": inputs.mempalace_embedding_model,
+        "--hf-hub-offline": inputs.hf_hub_offline,
+        "--g2-module": inputs.g2_module,
+        "--research-v2-root": inputs.research_v2_root,
+        "--research-core-database": inputs.research_core_database,
+        "--owner-env-file": inputs.owner_env_file,
+        "--openclaw-host": inputs.openclaw_host,
+        "--openclaw-port": inputs.openclaw_port,
+    }
+    return [item for pair in pairs.items() for item in pair]
+
+
+# ---------------------------------------------------------------------------
+# Codex parity with the push script's jq invariant program
+# ---------------------------------------------------------------------------
+
+
+def _push_script_jq_program() -> str:
+    lines = (REPO_ROOT / "scripts/push-openclaw-config.sh").read_text(encoding="utf-8").split("\n")
+    start = next(
+        i for i, line in enumerate(lines) if line.strip() == "def denies: (.tools.deny // []);"
+    )
+    end = next(
+        i for i in range(start, len(lines)) if lines[i].strip().startswith("' >/dev/null; then")
+    )
+    return "\n".join(lines[start:end])
+
+
+def _jq_verdict(config: object, inputs: AssemblyInputs, expect: ValidationExpectations) -> bool:
+    assert JQ is not None
+    arguments = [
+        ("owner", inputs.orchestrator_model_primary),
+        ("cmd", inputs.mempalace_python),
+        ("palace", inputs.mempalace_palace),
+        ("wrapper", inputs.mempalace_wrapper),
+        ("cache", inputs.fastembed_cache),
+        ("model", inputs.mempalace_embedding_model),
+        ("offline", inputs.hf_hub_offline),
+        ("repo", inputs.repo_root),
+        ("python", inputs.python_bin),
+        ("g2_module", inputs.g2_module),
+        ("research_root", inputs.research_v2_root),
+        ("research_core_database", inputs.research_core_database),
+        ("owner_env_file", inputs.owner_env_file),
+        ("openclaw_host", inputs.openclaw_host),
+        ("openclaw_port", inputs.openclaw_port),
+    ]
+    command = [JQ, "-e"]
+    for name, value in arguments:
+        command += ["--arg", name, value]
+    command += [
+        "--argjson",
+        "readonly_server_agents",
+        json.dumps(list(expect.readonly_server_agents)),
+        "--argjson",
+        "g2_server_agents",
+        json.dumps(list(expect.g2_server_agents)),
+        "--argjson",
+        "main_openclaw_allow",
+        json.dumps(list(expect.main_tool_allow)),
+        _push_script_jq_program(),
+    ]
+    result = subprocess.run(
+        command, input=json.dumps(config), text=True, capture_output=True, check=False
+    )
+    assert result.returncode in (0, 1), result.stderr
+    return result.returncode == 0
+
+
+def _codex_mutations() -> dict[str, Callable[[Cfg], None]]:
+    def at(c: Cfg, *path: str) -> Any:
+        current: Any = c
+        for key in path:
+            current = current[key]
+        return current
+
+    return {
+        "none": lambda c: None,
+        "thinking": lambda c: at(c, "agents", "defaults").update(thinkingDefault="low"),
+        "ownership": lambda c: at(c, "agents").update(ownership="implicit"),
+        "agents-list": lambda c: at(c, "agents").update(list=[]),
+        "entry-id": lambda c: at(c, "agents", "entries", "main").update(id="main"),
+        "extra-entry": lambda c: at(c, "agents", "entries").update(extra={}),
+        "allow-acpx": lambda c: at(c, "plugins", "allow").append("acpx"),
+        "allow-missing-openai": lambda c: at(c, "plugins").update(allow=["codex"]),
+        "load-paths": lambda c: at(c, "plugins").update(load={"paths": ["/x"]}),
+        "codex-disabled": lambda c: at(c, "plugins", "entries", "codex").update(enabled=False),
+        "native-tool-surface": lambda c: at(c, "plugins", "entries", "codex", "config").update(
+            nativeToolSurfaceEnabled=True
+        ),
+        "sandbox": lambda c: at(c, "plugins", "entries", "codex", "config", "appServer").update(
+            sandbox="danger-full-access"
+        ),
+        "proxy": lambda c: at(c, "plugins", "entries", "codex", "config", "appServer").update(
+            networkProxy="x"
+        ),
+        "retired-root": lambda c: at(
+            c, "plugins", "entries", "codex", "config", "appServer"
+        ).update(defaultWorkspaceDir="/home/dev/.openclaw/autoresearch/model-workspaces"),
+        "acpx-entry": lambda c: at(c, "plugins", "entries").update(acpx={}),
+        "acp": lambda c: c.update(acp={}),
+        "max-concurrent": lambda c: at(c, "agents", "defaults").update(maxConcurrent=3),
+        "sub-concurrent": lambda c: at(c, "agents", "defaults", "subagents").update(
+            maxConcurrent=2
+        ),
+        "depth": lambda c: at(c, "agents", "defaults", "subagents").update(maxSpawnDepth=2),
+        "timeout": lambda c: at(c, "agents", "defaults", "subagents").update(runTimeoutSeconds=9),
+        "memory-search": lambda c: at(c, "memory", "search").update(enabled=True),
+        "compaction": lambda c: at(c, "agents", "defaults", "compaction").update(mode="safeguard"),
+        "flush": lambda c: at(c, "agents", "defaults", "compaction", "memoryFlush").update(
+            enabled=True
+        ),
+        "tools-deny": lambda c: at(c, "tools", "deny").remove("memory_get"),
+        "extra-server": lambda c: at(c, "mcp", "servers").update(extra={}),
+        "mempalace-command": lambda c: at(c, "mcp", "servers", "mempalace-readonly").update(
+            command="x"
+        ),
+        "mempalace-agents": lambda c: at(c, "mcp", "servers", "mempalace-readonly", "codex").update(
+            agents=["main", "x"]
+        ),
+        "g2-env": lambda c: at(c, "mcp", "servers", "g2-control", "env").update(OPENCLAW_PORT="1"),
+        "g2-approval": lambda c: at(c, "mcp", "servers", "g2-control", "codex").update(
+            defaultToolsApprovalMode="ask"
+        ),
+        "main-model": lambda c: at(c, "agents", "entries", "main", "model").update(primary="x"),
+        "main-profile": lambda c: at(c, "agents", "entries", "main", "tools").update(
+            profile="full"
+        ),
+        "main-allow": lambda c: at(c, "agents", "entries", "main", "tools", "allow").append("x"),
+        "main-deny": lambda c: at(c, "agents", "entries", "main", "tools", "deny").remove("exec"),
+        "main-skills": lambda c: at(c, "agents", "entries", "main").update(skills=["mempalace"]),
+        "main-subagents": lambda c: at(c, "agents", "entries", "main").update(
+            subagents={"allowAgents": ["x"]}
+        ),
+        "owner-model": lambda c: at(
+            c, "agents", "entries", "research-orchestrator", "model"
+        ).update(primary="openai/gpt-5.4"),
+        "owner-tools": lambda c: at(
+            c, "agents", "entries", "research-orchestrator", "tools"
+        ).update(deny=["exec"]),
+        "owner-subagents": lambda c: at(c, "agents", "entries", "research-orchestrator").update(
+            subagents={"allowAgents": ["main"]}
+        ),
+        "owner-skills": lambda c: at(c, "agents", "entries", "research-orchestrator").update(
+            skills=[]
+        ),
+    }
+
+
+@pytest.mark.skipif(JQ is None, reason="jq is required for the invariant parity test")
+@pytest.mark.parametrize("name", list(_codex_mutations()))
+def test_codex_validate_has_the_same_verdict_as_the_push_script_jq(
+    tmp_path: Path, name: str
+) -> None:
+    inputs = _assembly_inputs(tmp_path)
+    config = assemble_config({}, cast(JsonObject, load_json(REPO_CONFIG)), inputs)
+    plain = json.loads(serialize_json(config))
+    expect = _expectations(inputs)
+    _codex_mutations()[name](plain)
+    jq_ok = _jq_verdict(plain, inputs, expect)
+    python_ok = validate_config(plain, CODEX, expect) == []
+    assert python_ok == jq_ok
+    assert jq_ok == (name == "none")
