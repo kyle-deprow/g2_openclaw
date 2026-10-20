@@ -405,3 +405,8 @@ def test_cli_env_file(tmp_path: Path) -> None:
     assert _cli("resolve", "--env-file", str(env_file)).stdout == "claude\n"
     assert _cli("get", "main", "provider", "--env-file", str(env_file)).stdout == "anthropic\n"
     assert "anthropic/" in _cli("show", "--env-file", str(env_file)).stdout
+
+
+def test_claude_config_dir_is_sibling_of_deployed_profile(tmp_path: Path) -> None:
+    assert ap.claude_config_dir(tmp_path) == tmp_path / "claude-code"
+    assert ap.claude_config_dir(tmp_path).parent == ap.deployed_profile_path(tmp_path).parent

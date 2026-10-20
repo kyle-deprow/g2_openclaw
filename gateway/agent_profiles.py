@@ -26,6 +26,9 @@ _CONFIG_DIR = Path(__file__).resolve().parent / "openclaw_config"
 DEFAULT_PROFILES_PATH: Path = _CONFIG_DIR / "agent-profiles.json"
 DEFAULT_ENV_FILE: Path = _CONFIG_DIR / ".env"
 DEPLOYED_PROFILE_FILENAME = "g2-agent-profile.json"
+# Dedicated Claude Code configuration directory for the OpenClaw gateway (CLAUDE_CONFIG_DIR):
+# keeps the operator's personal Claude Code settings, hooks and plugins out of agent runs.
+CLAUDE_CONFIG_DIRNAME = "claude-code"
 _RUNTIME_PROVIDER = {"codex": "openai", "claude-cli": "anthropic"}
 _NAME = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _FIELDS = ("model", "model_id", "provider", "effort", "service_tier")
@@ -268,6 +271,11 @@ def deployed_profile_path(state_dir: Path | None = None) -> Path:
     if not resolved.is_absolute():
         raise AgentProfileError(f"state dir {str(state_dir)!r} must be an absolute path")
     return resolved / DEPLOYED_PROFILE_FILENAME
+
+
+def claude_config_dir(state_dir: Path | None = None) -> Path:
+    """The gateway's dedicated CLAUDE_CONFIG_DIR, a sibling of the deployed profile file."""
+    return deployed_profile_path(state_dir).parent / CLAUDE_CONFIG_DIRNAME
 
 
 def write_deployed_profile(profile: AgentProfile, state_dir: Path | None = None) -> Path:
