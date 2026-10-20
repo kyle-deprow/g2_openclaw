@@ -1,0 +1,28 @@
+{
+  "contract": "g2-agent-profiles-v1",
+  "default_profile": "codex",
+  "profiles": {
+    "codex": {
+      "runtime": "codex",
+      "provider": "openai",
+      "roles": {
+        "main":        {"model": "openai/gpt-5.4",      "effort": "high"},
+        "owner":       {"model": "openai/gpt-6-astra",  "effort": "high"},
+        "implementer": {"model": "openai/gpt-5.6-luna", "effort": "xhigh", "service_tier": "fast"},
+        "runner":      {"model": "openai/gpt-5.6-luna", "effort": "xhigh", "service_tier": "fast"},
+        "reviewer":    {"model": "openai/gpt-5.6-sol",  "effort": "xhigh", "service_tier": "fast"}
+      }
+    },
+    "claude": {
+      "runtime": "claude-cli",
+      "provider": "anthropic",
+      "roles": {
+        "main":        {"model": "anthropic/claude-sonnet-5-5", "effort": "medium"},
+        "owner":       {"model": "anthropic/claude-opus-5-5",   "effort": "high"},
+        "implementer": {"model": "anthropic/claude-sonnet-5-5", "effort": "xhigh"},
+        "runner":      {"model": "anthropic/claude-sonnet-5-5", "effort": "high"},
+        "reviewer":    {"model": "anthropic/claude-opus-5-5",   "effort": "xhigh"}
+      }
+    }
+  }
+}
