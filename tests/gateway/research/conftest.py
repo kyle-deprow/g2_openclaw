@@ -27,6 +27,13 @@ from gateway.research.contracts import (
 from gateway.research.store import ResearchStore
 
 
+@pytest.fixture(autouse=True)
+def isolated_openclaw_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never read the host's deployed agent profile or live OpenClaw state."""
+    monkeypatch.setenv("OPENCLAW_STATE_DIR", str(tmp_path / "isolated-openclaw-state"))
+    monkeypatch.delenv("RESEARCH_OWNER_SESSION_KEY", raising=False)
+
+
 @pytest.fixture
 def campaign(
     tmp_path: Path, request: pytest.FixtureRequest

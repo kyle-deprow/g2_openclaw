@@ -613,3 +613,262 @@ def test_mismatched_review_cancel_stays_pending_and_incomplete(
             },
         )
     ]
+
+
+class _ClaudeAttemptStore:
+    """Just enough store for the claude implementer check: attempt open time and refusals."""
+
+    def __init__(self, opened_at: str = "2026-10-19T00:00:00Z") -> None:
+        self.opened_at = opened_at
+        self.refusals: list[str] = []
+
+    def get_attempt(self, _attempt_id: str) -> Any:
+        return type("Attempt", (), {"opened_at": self.opened_at})()
+
+    def record_review_event(self, _attempt_id: str, _kind: str, detail: dict[str, str]) -> None:
+        self.refusals.append(detail["reason"])
+
+
+def _claude_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    stores: Any,
+    store: _ClaudeAttemptStore,
+    attempt: str | None = "A0001",
+    *,
+    session: str | None = "default",
+) -> str | None:
+    from gateway.agent_profiles import load_profile
+
+    from tests.gateway.research.test_host_records_claude import OWNER_KEY
+
+    monkeypatch.setattr(readiness, "active_runtime_profile", lambda: load_profile("claude"))
+    return native_execution_ready(
+        cast(Any, store),
+        attempt,
+        claude_state=stores,
+        owner_session_key=OWNER_KEY if session == "default" else session,
+    )
+
+
+def _claude_fixture(tmp_path: Path, effort: str = "xhigh", model: str = "claude-sonnet-5-5") -> Any:
+    from tests.gateway.research.test_host_records_claude import (
+        CHILD_KEY,
+        SESSION_ID,
+        T0,
+        add_node,
+        add_subagent,
+        add_task,
+        api_request,
+        make_stores,
+        write_transcript,
+    )
+
+    stores = make_stores(tmp_path)
+    add_task(stores, "impl-1", created=T0 + 1000)
+    add_subagent(stores, "impl-1", {"task": "t", "model": f"anthropic/{model}"})
+    add_node(
+        stores,
+        "research-implementer",
+        CHILD_KEY,
+        {
+            "model": model,
+            "thinkingLevel": effort,
+            "claudeCliSessionId": SESSION_ID,
+            "lastRunId": "impl-1",
+        },
+    )
+    write_transcript(stores, SESSION_ID, [api_request(model, effort)])
+    return stores
+
+
+# 2026-10-19T00:00:00Z is before T0 (1792463900000 ms == 2026-10-20), so use an earlier open.
+def test_claude_readiness_accepts_exact_implementer_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _ClaudeAttemptStore()
+    assert _claude_ready(monkeypatch, _claude_fixture(tmp_path), store) is None
+    assert store.refusals == []
+
+
+def test_claude_readiness_start_gate_needs_only_readable_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _ClaudeAttemptStore()
+    assert _claude_ready(monkeypatch, _claude_fixture(tmp_path), store, None) is None
+    from gateway.research.host_records_claude import claude_stores
+
+    missing = _claude_ready(monkeypatch, claude_stores(tmp_path / "none"), store, None)
+    assert missing is not None and missing.startswith("native_")
+
+
+@pytest.mark.parametrize(
+    ("effort", "model", "reason"),
+    [
+        ("high", "claude-sonnet-5-5", "native_claude_implementer_effort"),
+        ("xhigh", "claude-opus-5-5", "native_claude_implementer_model"),
+    ],
+)
+def test_claude_readiness_rejects_wrong_model_or_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, effort: str, model: str, reason: str
+) -> None:
+    store = _ClaudeAttemptStore()
+    stores = _claude_fixture(tmp_path, effort=effort, model=model)
+    assert _claude_ready(monkeypatch, stores, store) == reason
+
+
+def test_claude_readiness_fails_closed_without_transcript_or_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stores = _claude_fixture(tmp_path)
+    for transcript in stores.claude_config_dir.rglob("*.jsonl"):
+        transcript.unlink()
+    assert (
+        _claude_ready(monkeypatch, stores, _ClaudeAttemptStore())
+        == "native_claude_implementer_model"
+    )
+    later = _ClaudeAttemptStore(opened_at="2027-01-01T00:00:00Z")
+    assert _claude_ready(monkeypatch, stores, later) == "native_claude_implementer_missing"
+    assert _claude_ready(monkeypatch, stores, later, session="agent:other") == (
+        "native_claude_implementer_missing"
+    )
+    for unset in ("", None):
+        assert _claude_ready(monkeypatch, stores, _ClaudeAttemptStore(), session=unset) == (
+            "native_claude_owner_session_unset"
+        )
+
+
+def test_claude_readiness_requires_ok_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stores = _claude_fixture(tmp_path)
+    with sqlite3.connect(stores.openclaw_state_db) as connection:
+        connection.execute("UPDATE task_runs SET status = 'running'")
+    assert (
+        _claude_ready(monkeypatch, stores, _ClaudeAttemptStore())
+        == "native_claude_implementer_not_ok"
+    )
+
+
+def test_codex_profile_keeps_the_codex_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gateway.agent_profiles import load_profile
+
+    monkeypatch.setattr(readiness, "active_runtime_profile", lambda: load_profile("codex"))
+    monkeypatch.delenv("RESEARCH_CORE_DATABASE", raising=False)
+    store = _ClaudeAttemptStore()
+    assert native_execution_ready(cast(Any, store), None) == "native_core_database_unset"
+
+
+def test_claude_readiness_checks_every_implementer_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.gateway.research.test_host_records_claude import (
+        T0,
+        add_node,
+        add_subagent,
+        add_task,
+        api_request,
+        write_transcript,
+    )
+
+    stores = _claude_fixture(tmp_path)
+    older_key = "agent:research-implementer:subagent:older"
+    add_task(stores, "impl-0", created=T0 + 10, child=older_key)
+    add_subagent(
+        stores, "impl-0", {"task": "t", "model": "anthropic/claude-sonnet-5-5"}, child=older_key
+    )
+    add_node(
+        stores,
+        "research-implementer",
+        older_key,
+        {
+            "model": "claude-sonnet-5-5",
+            "thinkingLevel": "xhigh",
+            "claudeCliSessionId": "older-session",
+            "lastRunId": "impl-0",
+        },
+    )
+    write_transcript(
+        stores, "older-session", [api_request("claude-sonnet-5-5", "low", "older-session")]
+    )
+    assert (
+        _claude_ready(monkeypatch, stores, _ClaudeAttemptStore())
+        == "native_claude_implementer_effort"
+    )
+
+
+def test_claude_readiness_counts_builtin_subagent_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.gateway.research.test_host_records_claude import SESSION_ID, api_request
+
+    stores = _claude_fixture(tmp_path)
+    transcript = next(stores.claude_config_dir.rglob(f"{SESSION_ID}.jsonl"))
+    directory = transcript.parent / SESSION_ID / "subagents"
+    directory.mkdir(parents=True)
+    (directory / "agent-x.jsonl").write_text(
+        api_request("claude-haiku-5", "xhigh") + "\n", encoding="utf-8"
+    )
+    assert (
+        _claude_ready(monkeypatch, stores, _ClaudeAttemptStore())
+        == "native_claude_implementer_model"
+    )
+    (directory / "agent-x.jsonl").write_text(
+        api_request("claude-sonnet-5-5", "low") + "\n", encoding="utf-8"
+    )
+    assert (
+        _claude_ready(monkeypatch, stores, _ClaudeAttemptStore())
+        == "native_claude_implementer_effort"
+    )
+
+
+def test_claude_readiness_requires_explicit_thinking_level(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stores = _claude_fixture(tmp_path)
+    database = stores.agents_dir / "research-implementer" / "agent" / "openclaw-agent.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE session_nodes SET entry_json = json_set(entry_json, '$.thinkingLevel', 'high')"
+        )
+    assert (
+        _claude_ready(monkeypatch, stores, _ClaudeAttemptStore())
+        == "native_claude_implementer_effort"
+    )
+
+
+def test_claude_readiness_ignores_unrelated_child_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.gateway.research.test_host_records_claude import (
+        T0,
+        add_node,
+        add_task,
+        write_transcript,
+    )
+
+    stores = _claude_fixture(tmp_path)
+    key = "agent:research-reviewer:subagent:r"
+    add_task(stores, "rev-1", agent_id="research-reviewer", child=key, created=T0 + 5)
+    add_node(stores, "research-reviewer", key, {"claudeCliSessionId": "rs", "lastRunId": "rev-1"})
+    write_transcript(stores, "rs", ['{"type":"api-request","params":'], slug="-rev")
+    assert _claude_ready(monkeypatch, stores, _ClaudeAttemptStore()) is None
+
+
+def test_claude_readiness_counts_nested_workflow_journals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.gateway.research.test_host_records_claude import SESSION_ID, api_request
+
+    stores = _claude_fixture(tmp_path)
+    transcript = next(stores.claude_config_dir.rglob(f"{SESSION_ID}.jsonl"))
+    journal = transcript.parent / SESSION_ID / "subagents" / "workflows" / "wf_1"
+    journal.mkdir(parents=True)
+    (journal / "journal.jsonl").write_text(
+        api_request("claude-opus-5-5", "xhigh") + "\n", encoding="utf-8"
+    )
+    assert (
+        _claude_ready(monkeypatch, stores, _ClaudeAttemptStore())
+        == "native_claude_implementer_model"
+    )

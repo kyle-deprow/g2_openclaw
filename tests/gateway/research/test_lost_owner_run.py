@@ -528,3 +528,119 @@ def test_old_roots_without_the_invocation_column_migrate_additively(tmp_path: Pa
     store.complete_wake("k", "run-1")
     row = store.wake_row("k")
     assert row is not None and row["gateway_invocation_id"] is None
+
+
+def _claude_profile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, run_status: str | None
+) -> None:
+    """Deploy the claude profile into a scratch state dir and record run-1's task_runs row."""
+    from gateway.agent_profiles import load_profile, write_deployed_profile
+
+    from tests.gateway.research.test_host_records_claude import add_task, make_stores
+
+    state = tmp_path / "openclaw-state"
+    write_deployed_profile(load_profile("claude"), state)
+    monkeypatch.setenv("OPENCLAW_STATE_DIR", str(state))
+    stores = make_stores(state)
+    if run_status is not None:
+        add_task(
+            stores, "run-1", status=run_status, runtime="cli", agent_id="research-orchestrator"
+        )
+
+
+def _lose_with_session(store: ResearchStore, sender: Sender) -> None:
+    assert deliver(store, sender, _plan(store), "owner") is not None
+    poll_owner_turn(store, sender, session_key="owner")
+
+
+@pytest.mark.parametrize(
+    ("run_status", "turn_status"),
+    [("succeeded", "ok"), ("failed", "error"), ("cancelled", "error"), ("lost", "lost")],
+)
+def test_claude_restart_resolves_through_task_runs(
+    campaign: Campaign,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    run_status: str,
+    turn_status: str,
+) -> None:
+    store = campaign[0]
+    _claude_profile(monkeypatch, tmp_path, run_status)
+    _lose_with_session(store, Sender({"runId": "run-1", "status": "timeout"}, started=FUTURE))
+    assert store.wake_rows()[-1]["turn_status"] == turn_status
+    assert store.lost_owner_runs()[0] == (1 if turn_status == "lost" else 0)
+
+
+@pytest.mark.parametrize("run_status", ["running", "queued"])
+def test_claude_restart_with_pending_run_stays_pending(
+    campaign: Campaign, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_status: str
+) -> None:
+    store = campaign[0]
+    _claude_profile(monkeypatch, tmp_path, run_status)
+    _lose_with_session(store, Sender({"runId": "run-1", "status": "timeout"}, started=FUTURE))
+    assert store.wake_rows()[-1]["turn_status"] == "timeout"
+    assert store.lost_owner_runs()[0] == 0
+
+
+def test_claude_restart_without_task_runs_row_is_lost(
+    campaign: Campaign, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = campaign[0]
+    _claude_profile(monkeypatch, tmp_path, None)
+    _lose_with_session(store, Sender({"runId": "run-1", "status": "timeout"}, started=FUTURE))
+    assert store.wake_rows()[-1]["turn_status"] == "lost"
+
+
+def test_claude_no_restart_leaves_pending_run_untouched(
+    campaign: Campaign, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = campaign[0]
+    _claude_profile(monkeypatch, tmp_path, "running")
+    sender = Sender({"runId": "run-1", "status": "timeout"}, started=PAST)
+    _lose_with_session(store, sender)
+    assert store.wake_rows()[-1]["turn_status"] == "timeout"
+
+
+def test_claude_unknown_run_status_uses_durable_outcome(
+    campaign: Campaign, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = campaign[0]
+    _claude_profile(monkeypatch, tmp_path, "succeeded")
+    _lose_with_session(store, Sender({"runId": "run-1", "status": "unknown"}))
+    assert store.wake_rows()[-1]["turn_status"] == "ok"
+
+
+def test_claude_in_process_restart_is_resolved_by_task_runs(
+    campaign: Campaign, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No detectable restart (SIGUSR1): a non-terminal agent.wait still consults task_runs."""
+    store = campaign[0]
+    _claude_profile(monkeypatch, tmp_path, "succeeded")
+    _lose_with_session(store, Sender({"runId": "run-1", "status": "timeout"}, started=PAST))
+    assert store.wake_rows()[-1]["turn_status"] == "ok"
+
+
+def test_claude_in_process_restart_with_lost_row_is_lost(
+    campaign: Campaign, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = campaign[0]
+    _claude_profile(monkeypatch, tmp_path, "lost")
+    _lose_with_session(store, Sender({"runId": "run-1", "status": "timeout"}, started=PAST))
+    assert store.wake_rows()[-1]["turn_status"] == "lost"
+
+
+def test_unreadable_agent_profile_is_an_unavailable_poll_not_codex(
+    campaign: Campaign, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gateway.research.wake import OwnerPollUnavailable
+
+    store = campaign[0]
+    state = tmp_path / "broken-state"
+    state.mkdir()
+    (state / "g2-agent-profile.json").write_text("{not json", encoding="utf-8")
+    monkeypatch.setenv("OPENCLAW_STATE_DIR", str(state))
+    sender = Sender({"runId": "run-1", "status": "timeout"}, started=FUTURE)
+    assert deliver(store, sender, _plan(store), "owner") is not None
+    with pytest.raises(OwnerPollUnavailable, match="profile"):
+        poll_owner_turn(store, sender, session_key="owner")
+    assert store.wake_rows()[-1]["turn_status"] not in ("lost", "ok", "error")

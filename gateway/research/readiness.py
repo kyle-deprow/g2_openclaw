@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from gateway.agent_profiles import AgentProfile, AgentProfileError, active_runtime_profile
+
 from .containment import (
     ContainmentError,
     bwrap_argv,
@@ -36,6 +38,14 @@ from .host_records import (
     _readonly_database,
     read_exact_rollout,
 )
+from .host_records_claude import (
+    ClaudeRecordError,
+    ClaudeStores,
+    child_runs,
+    claude_stores,
+    read_run,
+    run_outcome,
+)
 from .store import StoreConflict
 
 if TYPE_CHECKING:
@@ -47,6 +57,7 @@ NATIVE_CAPABILITY_MODEL = "gpt-5.6-luna"
 NATIVE_CAPABILITY_EFFORT = "xhigh"
 NATIVE_OBSERVED_SERVICE_TIER = "unknown"
 NATIVE_CAPABILITY_IDENTITIES = frozenset({"implementer", "experiment_runner"})
+CLAUDE_IMPLEMENTER_AGENT = "research-implementer"
 
 
 def _record_refusal(store: ResearchStore, attempt_id: str | None, guard: str, reason: str) -> str:
@@ -256,13 +267,82 @@ def _native_failure(store: ResearchStore, attempt_id: str | None, reason: str) -
     return _record_refusal(store, attempt_id, "native", reason)
 
 
+def _claude_implementer_ready(
+    store: ResearchStore,
+    attempt_id: str | None,
+    profile: AgentProfile,
+    stores: ClaudeStores,
+    owner_session_key: str | None,
+) -> str | None:
+    """Verify the implementer child run against the profile implementer (model + efforts)."""
+    spec = profile.role("implementer")
+    if spec.effort is None:
+        return _native_failure(store, attempt_id, "claude_implementer_effort_unpinned")
+    try:
+        with _readonly_database(stores.openclaw_state_db) as connection:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+        if "task_runs" not in tables:
+            return _native_failure(store, attempt_id, "claude_state_schema")
+        if attempt_id is None:
+            return None  # start gate: no implementer run exists yet
+        if not owner_session_key:
+            return _native_failure(store, attempt_id, "claude_owner_session_unset")
+        opened = datetime.fromisoformat(
+            store.get_attempt(attempt_id).opened_at.replace("Z", "+00:00")
+        )
+        if opened.tzinfo is None:
+            opened = opened.replace(tzinfo=UTC)
+        since_ms = int(opened.timestamp() * 1000)
+        listed = child_runs(
+            stores, owner_session_key, since_ms=since_ms, agent_id=CLAUDE_IMPLEMENTER_AGENT
+        )
+        if not listed:
+            return _native_failure(store, attempt_id, "claude_implementer_missing")
+        # Every implementer child since the attempt opened must match the pin; an earlier
+        # wrong-model or wrong-effort child cannot be hidden behind a later correct one.
+        for listed_run in listed:
+            run = read_run(stores, listed_run.run_id)
+            if run_outcome(stores, run.run_id) != "ok":
+                return _native_failure(store, attempt_id, "claude_implementer_not_ok")
+            if run.model != spec.model_id or run.transcript_models != frozenset({spec.model_id}):
+                return _native_failure(store, attempt_id, "claude_implementer_model")
+            if run.thinking_level != spec.effort or run.transcript_efforts != frozenset(
+                {spec.effort}
+            ):
+                return _native_failure(store, attempt_id, "claude_implementer_effort")
+    except (HostRecordError, ClaudeRecordError, OSError, ValueError, sqlite3.Error) as exc:
+        return _native_failure(store, attempt_id, type(exc).__name__.lower())
+    return None
+
+
 def native_execution_ready(
     store: ResearchStore,
     attempt_id: str | None,
     *,
     core_database: Path | None = None,
+    claude_state: ClaudeStores | None = None,
+    owner_session_key: str | None = None,
 ) -> str | None:
-    """Validate the trusted core task surface and registered native receipt."""
+    """Validate the trusted core task surface and registered native receipt.
+
+    Under the ``claude-cli`` profile the implementer child run recorded by the gateway is
+    verified instead (no Codex receipt, TOML or service tier).
+    """
+    try:
+        profile = active_runtime_profile()
+    except AgentProfileError:
+        return _native_failure(store, attempt_id, "profile_unavailable")
+    if profile.runtime == "claude-cli":
+        try:
+            stores = claude_state if claude_state is not None else claude_stores()
+        except ClaudeRecordError as exc:
+            return _native_failure(store, attempt_id, type(exc).__name__.lower())
+        return _claude_implementer_ready(store, attempt_id, profile, stores, owner_session_key)
     database_text = os.environ.get("RESEARCH_CORE_DATABASE") if core_database is None else None
     if core_database is not None:
         database = core_database

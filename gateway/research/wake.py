@@ -502,6 +502,8 @@ def _declare_lost(
 
 def _host_record_outcome(session_key: str, run_id: str, sent_at: str) -> str | None:
     """``ok`` or ``error`` when the native end event proves a finished run, else None (lost)."""
+    if _claude_runtime_active():
+        return _claude_host_record_outcome(run_id)
     configured = os.environ.get("RESEARCH_CORE_DATABASE")
     if not configured:
         return None
@@ -524,12 +526,60 @@ def _host_record_outcome(session_key: str, run_id: str, sent_at: str) -> str | N
     return None  # "interrupted", unknown or missing status
 
 
+def _claude_runtime_active() -> bool:
+    """True when the deployed (or default) agent profile runs on ``claude-cli``.
+
+    An unreadable profile is neither codex nor claude: surface it like an unavailable
+    transport so the serve loop retries within its bounded failure budget.
+    """
+    from gateway.agent_profiles import AgentProfileError, active_runtime_profile
+
+    try:
+        return active_runtime_profile().runtime == "claude-cli"
+    except AgentProfileError as exc:
+        raise OwnerPollUnavailable(f"agent profile unavailable: {exc}") from exc
+
+
+def _claude_run_outcome(run_id: str) -> str | None:
+    """The durable ``task_runs`` outcome (ok|error|lost|pending), None when unreadable."""
+    from .host_records_claude import claude_stores, run_outcome
+
+    try:
+        return run_outcome(claude_stores(), run_id)
+    except (HostRecordError, OSError, sqlite3.Error):
+        return None
+
+
+def _claude_host_record_outcome(run_id: str) -> str | None:
+    """``ok``/``error`` from the durable ``task_runs`` row; lost, pending or unknown is None."""
+    outcome = _claude_run_outcome(run_id)
+    return outcome if outcome in ("ok", "error") else None
+
+
 def _restart_after_send(sender: WakeSender, row: sqlite3.Row) -> str | None:
     """Return a reason when the gateway process is not the one that accepted the wake.
 
     Limitation: an in-process restart (SIGUSR1) keeps systemd's InvocationID and start time,
     so it is invisible here; only a unit restart or the run-unknown responses reveal a loss.
     """
+    reason = _gateway_restart_reason(sender, row)
+    if not _claude_runtime_active():
+        return reason
+    # agent.wait is in-memory only (a restart makes it answer "timeout" for every run, and an
+    # in-process restart is invisible to the gateway identity), so under claude the durable
+    # task_runs row decides whenever agent.wait is non-terminal.  The gateway sweeper turns
+    # orphans into ``lost``; no timeout is invented here.
+    outcome = _claude_run_outcome(str(row["run_id"]))
+    if outcome == "pending":
+        return None
+    if outcome in ("ok", "error"):
+        return f"task_runs records the run as {outcome}"  # _declare_lost records that outcome
+    if outcome == "lost":
+        return "task_runs records the run as lost"
+    return reason
+
+
+def _gateway_restart_reason(sender: WakeSender, row: sqlite3.Row) -> str | None:
     instance_of = getattr(sender, "gateway_instance", None)
     instance = instance_of() if callable(instance_of) else None
     if not isinstance(instance, GatewayInstance):
