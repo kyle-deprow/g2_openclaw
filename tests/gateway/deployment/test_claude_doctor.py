@@ -211,7 +211,8 @@ def test_absent_runtime_module_skips_with_warning(
 
 def test_gateway_requires_anthropic_plugin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_runtime(monkeypatch, lambda path: [])
-    monkeypatch.setattr(claude_doctor, "resolve_openclaw_bin", lambda **kw: "/fake/openclaw")
+    monkeypatch.delenv("OPENCLAW_BIN", raising=False)
+    monkeypatch.setattr(claude_doctor, "resolve_openclaw_bin", lambda *a, **kw: "/fake/openclaw")
     state = _state(tmp_path)
     good = json.dumps({"plugins": {"loaded": ["anthropic"]}})
     codex = json.dumps({"plugins": {"loaded": ["codex", "openai"]}})
@@ -247,6 +248,26 @@ def test_gateway_requires_anthropic_plugin(tmp_path: Path, monkeypatch: pytest.M
         == "fail"
     )
     assert "gateway_plugins" not in _by_name(claude_doctor.run_checks(state, runner=_runner()))
+
+
+def test_gateway_check_honors_openclaw_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_runtime(monkeypatch, lambda path: [])
+    stale = tmp_path / "home" / ".local" / "share" / "pnpm" / "openclaw"
+    pinned = tmp_path / "pinned" / "openclaw"
+    for path in (stale, pinned):
+        path.parent.mkdir(parents=True)
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OPENCLAW_BIN", str(pinned))
+    runner = _runner(health=json.dumps({"plugins": {"loaded": ["anthropic"]}}))
+
+    results = claude_doctor.run_checks(_state(tmp_path), gateway=True, runner=runner)
+
+    assert _by_name(results)["gateway_plugins"] == "pass"
+    argv, env = runner.calls[-1]
+    assert argv[0] == str(pinned)
+    assert env["OPENCLAW_BIN"] == str(pinned)
 
 
 def test_readiness_failures_list(tmp_path: Path) -> None:

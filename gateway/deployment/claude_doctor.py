@@ -95,6 +95,9 @@ def _minimal_env(config_dir: Path, extra: Mapping[str, str] | None = None) -> di
         "HOME": os.environ.get("HOME", ""),
         "CLAUDE_CONFIG_DIR": str(config_dir),
     }
+    # The push script's OPENCLAW_BIN override; without it the stale pnpm shim can win.
+    if os.environ.get("OPENCLAW_BIN"):
+        env["OPENCLAW_BIN"] = os.environ["OPENCLAW_BIN"]
     if extra:
         env.update(extra)
     return env
@@ -176,7 +179,7 @@ def check_settings(config_dir: Path) -> CheckResult:
 def check_gateway(runner: Runner, env: Mapping[str, str]) -> CheckResult:
     name = "gateway_plugins"
     try:
-        openclaw = resolve_openclaw_bin(home=env["HOME"], path=env["PATH"])
+        openclaw = resolve_openclaw_bin(env.get("OPENCLAW_BIN"), home=env["HOME"], path=env["PATH"])
     except RuntimeError as exc:
         return CheckResult(name, FAIL, redact(str(exc)))
     argv = [
