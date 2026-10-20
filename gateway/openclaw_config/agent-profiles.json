@@ -18,7 +18,7 @@
       "provider": "anthropic",
       "roles": {
         "main":        {"model": "anthropic/claude-sonnet-5-5", "effort": "medium"},
-        "owner":       {"model": "anthropic/claude-opus-5-5",   "effort": "high"},
+        "owner":       {"model": "anthropic/claude-fable-5-1",  "effort": "high"},
         "implementer": {"model": "anthropic/claude-sonnet-5-5", "effort": "xhigh"},
         "runner":      {"model": "anthropic/claude-sonnet-5-5", "effort": "high"},
         "reviewer":    {"model": "anthropic/claude-opus-5-5",   "effort": "xhigh"}

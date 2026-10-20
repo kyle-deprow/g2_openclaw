@@ -58,7 +58,7 @@ def test_renders_claude(src: Path, tmp_path: Path) -> None:
     dst = tmp_path / "dst"
     render_tree(load_profile("claude"), src, dst, VARS)
     text = (dst / "TOOLS.md").read_text(encoding="utf-8")
-    assert "anthropic/claude-opus-5-5 high" in text
+    assert "anthropic/claude-fable-5-1 high" in text
     assert "claude: /repo/.venv/bin/gateway-cli x" in text
 
 
