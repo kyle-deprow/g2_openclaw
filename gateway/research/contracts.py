@@ -736,7 +736,7 @@ class SubmissionInput:
     test_evidence_path: str
     reported_coder_model: str
     coder_effort: str
-    coder_service_tier: str
+    coder_service_tier: str | None
     interpreter: str
     target_script: str
     scenarios: tuple[SubmissionScenarioInput, ...]
@@ -755,9 +755,10 @@ class SubmissionInput:
         for value, name in (
             (self.reported_coder_model, "reported_coder_model"),
             (self.coder_effort, "coder_effort"),
-            (self.coder_service_tier, "coder_service_tier"),
         ):
             require_str(value, name)
+        # Optional: the Claude runtime has no service tier.
+        _optional_str(self.coder_service_tier, "coder_service_tier")
         if not Path(require_str(self.interpreter, "interpreter")).is_absolute():
             raise ValueError("interpreter must be an absolute path")
         if not isinstance(self.scenarios, tuple) or not (
@@ -987,7 +988,7 @@ class ImplementationRecord:
     test_evidence_path: str
     reported_coder_model: str
     coder_effort: str
-    coder_service_tier: str
+    coder_service_tier: str | None
     submitted_at: str
 
     def __post_init__(self) -> None:
@@ -1003,9 +1004,10 @@ class ImplementationRecord:
             (self.test_evidence_path, "test_evidence_path"),
             (self.reported_coder_model, "reported_coder_model"),
             (self.coder_effort, "coder_effort"),
-            (self.coder_service_tier, "coder_service_tier"),
         ):
             require_str(value, name)
+        # Optional: the Claude runtime has no service tier.
+        _optional_str(self.coder_service_tier, "coder_service_tier")
         require_utc_iso(self.submitted_at, "submitted_at")
 
     def to_json(self) -> str:

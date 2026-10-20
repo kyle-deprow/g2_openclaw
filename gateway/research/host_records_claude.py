@@ -396,6 +396,20 @@ def _subagent_transcripts(path: Path, session_id: str) -> list[Path]:
     return sorted(found)
 
 
+def transcript_files(stores: ClaudeStores, session_id: str) -> tuple[Path, ...]:
+    """Every transcript file this module reads for ``session_id``: main first, then the rest.
+
+    Uses the same lookup (``_find_transcript``) and walk (``_subagent_transcripts``) as
+    ``read_run``, so a caller digesting evidence covers exactly what was parsed.  Returns
+    ``()`` when the session has no main transcript; raises ``ClaudeRecordError`` when the
+    main transcript is ambiguous, a symlink is found, or a directory is unreadable.
+    """
+    main = _find_transcript(stores.claude_config_dir, session_id)
+    if main is None:
+        return ()
+    return (main, *_subagent_transcripts(main, session_id))
+
+
 def _read_transcript(path: Path, session_id: str) -> _Transcript:
     main = _scan_transcript(path, session_id, want_cwd=True)
     models = set(main.models)

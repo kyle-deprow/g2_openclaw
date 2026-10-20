@@ -18,6 +18,7 @@ from typing import Any
 
 import typer
 
+from gateway.agent_profiles import active_runtime_profile
 from gateway.openclaw_client import OpenClawClient
 
 from .admission import (
@@ -58,6 +59,7 @@ from .contracts import (
     compute_requirements,
 )
 from .host_records import HostRecordError, managed_native_databases
+from .host_records_claude import ClaudeStores, claude_stores
 from .hypothesis import HypothesisDocument, minimum_detectable_effect_bps
 from .jobs import (
     JobError,
@@ -86,6 +88,7 @@ from .receipt_sessions import is_daily_receipt_wire as _is_daily_receipt_wire
 from .receipt_sessions import strict_object as _strict_object
 from .review_evidence import (
     REVIEW_EFFORT,
+    REVIEW_MODEL,
     build_review_bundle,
     cancel_review,
     collect_review,
@@ -154,6 +157,62 @@ def _require_managed_native_paths(
             raise ValueError(f"{flag} does not resolve to an existing path") from exc
         if given != expected or resolved != expected:
             raise ValueError(f"{flag} must equal the managed native database {expected}")
+
+
+def _root_state_dir(root: Path) -> Path:
+    """The managed OpenClaw state directory that contains the research root."""
+
+    return _root(root).resolve().parent
+
+
+def _review_claude_stores(
+    root: Path,
+    openclaw_state_dir: Path | None,
+    openclaw_database: Path | None = None,
+    codex_state_database: Path | None = None,
+) -> ClaudeStores | None:
+    """Return the Claude host stores when the root's deployed profile is claude-cli, else None.
+
+    The state directory and the profile are derived from the research root (like the codex
+    managed-path rule).  ``--openclaw-state-dir`` is optional and, when given, must resolve
+    to that same directory; ``RESEARCH_CORE_DATABASE`` must agree too.  The codex database
+    options do not exist under claude.
+    """
+
+    state_dir = _root_state_dir(root)
+    if active_runtime_profile(state_dir).runtime != "claude-cli":
+        if openclaw_state_dir is not None:
+            raise ValueError("--openclaw-state-dir is only valid under the claude agent profile")
+        return None
+    if openclaw_database is not None or codex_state_database is not None:
+        raise ValueError(
+            "--openclaw-database and --codex-state-database are not valid under the claude profile"
+        )
+    if openclaw_state_dir is not None and openclaw_state_dir.resolve() != state_dir:
+        raise ValueError(f"--openclaw-state-dir must be the managed OpenClaw state {state_dir}")
+    stores = claude_stores(state_dir)
+    configured = os.environ.get("RESEARCH_CORE_DATABASE")
+    if configured and Path(configured).resolve() != stores.openclaw_state_db.resolve():
+        raise ValueError(
+            "RESEARCH_CORE_DATABASE does not match the managed core database "
+            f"{stores.openclaw_state_db} that contains --root"
+        )
+    return stores
+
+
+def _require_service_tier(root: Path, tier: str | None) -> None:
+    """Codex records bind a service tier; only the claude profile may omit it."""
+
+    if tier is None and active_runtime_profile(_root_state_dir(root)).runtime != "claude-cli":
+        raise ValueError("coder_service_tier is required under the codex agent profile")
+
+
+def _require_codex_paths(
+    openclaw_database: Path | None, codex_state_database: Path | None
+) -> tuple[Path, Path]:
+    if openclaw_database is None or codex_state_database is None:
+        raise ValueError("--openclaw-database and --codex-state-database are required (codex)")
+    return openclaw_database, codex_state_database
 
 
 def _fatal_serve_failure(store: ResearchStore | None, exc: Exception) -> None:
@@ -369,6 +428,7 @@ def implementation_submit(
 ) -> None:
     try:
         record = ImplementationRecord.from_json(file.read_text(encoding="utf-8"))
+        _require_service_tier(root, record.coder_service_tier)
         plan = RunPlan.from_json(run_plan.read_text(encoding="utf-8"))
         store = ResearchStore(_root(root))
         provenance = validate_provenance_evidence(store, attempt_id, plan, provenance_evidence)
@@ -436,12 +496,9 @@ def submission_build(
     """Derive the implementation record, run plan and provenance index, then preflight them."""
     try:
         store = _existing_store(root)
-        built = build_submission(
-            store,
-            attempt_id,
-            SubmissionInput.from_json(input_file.read_text(encoding="utf-8")),
-            out_dir,
-        )
+        submission = SubmissionInput.from_json(input_file.read_text(encoding="utf-8"))
+        _require_service_tier(root, submission.coder_service_tier)
+        built = build_submission(store, attempt_id, submission, out_dir)
         typer.echo(f"wrote {built.implementation}")
         typer.echo(f"wrote {built.run_plan}")
         typer.echo(f"wrote {built.provenance}")
@@ -467,7 +524,10 @@ def review_bundle(
     bundle_dir: Path = typer.Option(..., "--bundle-dir"),
 ) -> None:
     try:
-        typer.echo(build_review_bundle(ResearchStore(_root(root)), attempt_id, bundle_dir))
+        claude = active_runtime_profile(_root_state_dir(root)).runtime == "claude-cli"
+        typer.echo(
+            build_review_bundle(ResearchStore(_root(root)), attempt_id, bundle_dir, claude=claude)
+        )
     except Exception as exc:
         _fail(exc)
 
@@ -479,10 +539,17 @@ def review_reserve(
     bundle_dir: Path = typer.Option(..., "--bundle-dir"),
     owner_key: str = typer.Option(..., "--owner-key"),
     wake_key: str = typer.Option(..., "--wake-key"),
-    openclaw_database: Path = typer.Option(..., "--openclaw-database"),
+    openclaw_database: Path | None = typer.Option(None, "--openclaw-database"),
+    openclaw_state_dir: Path | None = typer.Option(None, "--openclaw-state-dir"),
 ) -> None:
     try:
-        _require_managed_native_paths(root, openclaw_database)
+        stores = _review_claude_stores(root, openclaw_state_dir, openclaw_database)
+        if stores is None:
+            if openclaw_database is None:
+                raise ValueError("--openclaw-database is required (codex)")
+            _require_managed_native_paths(root, openclaw_database)
+        else:
+            openclaw_database = stores.openclaw_state_db
         reservation = reserve_review(
             ResearchStore(_root(root)),
             attempt_id,
@@ -490,13 +557,17 @@ def review_reserve(
             owner_key,
             wake_pending_key=wake_key,
             openclaw_database=openclaw_database,
+            claude_stores=stores,
         )
+        arguments = reservation.spawn_arguments
+        # "model" is a bare id under codex ("gpt-5.6-sol") but the full provider/model ref
+        # under claude ("anthropic/claude-opus-5-5"), which is what sessions_spawn takes.
         typer.echo(
             json.dumps(
                 {
                     "cwd": reservation.bundle_dir,
-                    "model": "gpt-5.6-sol",
-                    "effort": REVIEW_EFFORT,
+                    "model": arguments["model"] if stores is not None else REVIEW_MODEL,
+                    "effort": arguments["thinking"] if stores is not None else REVIEW_EFFORT,
                     "label": reservation.label,
                     "prompt_sha256": reservation.prompt_sha256,
                     "spawn_arguments": reservation.spawn_arguments,
@@ -512,13 +583,27 @@ def review_reserve(
 def review_reconcile(
     attempt_id: str,
     root: Path = typer.Option(..., "--root"),
-    openclaw_database: Path = typer.Option(..., "--openclaw-database"),
-    codex_state_database: Path = typer.Option(..., "--codex-state-database"),
+    openclaw_database: Path | None = typer.Option(None, "--openclaw-database"),
+    codex_state_database: Path | None = typer.Option(None, "--codex-state-database"),
+    openclaw_state_dir: Path | None = typer.Option(None, "--openclaw-state-dir"),
 ) -> None:
     try:
-        _require_managed_native_paths(root, openclaw_database, codex_state_database)
+        stores = _review_claude_stores(
+            root, openclaw_state_dir, openclaw_database, codex_state_database
+        )
+        if stores is None:
+            openclaw_database, codex_state_database = _require_codex_paths(
+                openclaw_database, codex_state_database
+            )
+            _require_managed_native_paths(root, openclaw_database, codex_state_database)
+        else:
+            openclaw_database = stores.openclaw_state_db
         ack = reconcile_review(
-            ResearchStore(_root(root)), attempt_id, openclaw_database, codex_state_database
+            ResearchStore(_root(root)),
+            attempt_id,
+            openclaw_database,
+            codex_state_database,
+            claude_stores=stores,
         )
         typer.echo(ack.to_json() if ack is not None else "pending")
     except Exception as exc:
@@ -529,17 +614,28 @@ def review_reconcile(
 def review_collect(
     attempt_id: str,
     root: Path = typer.Option(..., "--root"),
-    openclaw_database: Path = typer.Option(..., "--openclaw-database"),
-    codex_state_database: Path = typer.Option(..., "--codex-state-database"),
+    openclaw_database: Path | None = typer.Option(None, "--openclaw-database"),
+    codex_state_database: Path | None = typer.Option(None, "--codex-state-database"),
+    openclaw_state_dir: Path | None = typer.Option(None, "--openclaw-state-dir"),
 ) -> None:
     try:
-        _require_managed_native_paths(root, openclaw_database, codex_state_database)
+        stores = _review_claude_stores(
+            root, openclaw_state_dir, openclaw_database, codex_state_database
+        )
+        if stores is None:
+            openclaw_database, codex_state_database = _require_codex_paths(
+                openclaw_database, codex_state_database
+            )
+            _require_managed_native_paths(root, openclaw_database, codex_state_database)
+        else:
+            openclaw_database = stores.openclaw_state_db
         typer.echo(
             collect_review(
                 ResearchStore(_root(root)),
                 attempt_id,
                 openclaw_database,
                 codex_state_database,
+                claude_stores=stores,
             ).state.value
         )
     except Exception as exc:
@@ -551,8 +647,9 @@ def review_cancel(
     attempt_id: str,
     reason: str = typer.Option(..., "--reason"),
     root: Path = typer.Option(..., "--root"),
-    openclaw_database: Path = typer.Option(..., "--openclaw-database"),
-    codex_state_database: Path = typer.Option(..., "--codex-state-database"),
+    openclaw_database: Path | None = typer.Option(None, "--openclaw-database"),
+    codex_state_database: Path | None = typer.Option(None, "--codex-state-database"),
+    openclaw_state_dir: Path | None = typer.Option(None, "--openclaw-state-dir"),
 ) -> None:
     async def request(owner_session_key: str, agent_id: str, run_id: str) -> Mapping[str, object]:
         client = OpenClawClient(
@@ -563,7 +660,16 @@ def review_cancel(
         return await request_cancel(client.request_once, owner_session_key, agent_id, run_id)
 
     try:
-        _require_managed_native_paths(root, openclaw_database, codex_state_database)
+        stores = _review_claude_stores(
+            root, openclaw_state_dir, openclaw_database, codex_state_database
+        )
+        if stores is None:
+            openclaw_database, codex_state_database = _require_codex_paths(
+                openclaw_database, codex_state_database
+            )
+            _require_managed_native_paths(root, openclaw_database, codex_state_database)
+        else:
+            openclaw_database = stores.openclaw_state_db
         outcome = cancel_review(
             ResearchStore(_root(root)),
             attempt_id,
@@ -571,6 +677,7 @@ def review_cancel(
             openclaw_database,
             request,
             codex_state_database,
+            claude_stores=stores,
         )
         typer.echo(
             json.dumps(
@@ -1373,8 +1480,10 @@ def _host_execution_ready(store: ResearchStore, attempt_id: str | None) -> str |
     return host_execution_ready(store, attempt_id)
 
 
-def _native_execution_ready(store: ResearchStore, attempt_id: str | None) -> str | None:
-    return native_execution_ready(store, attempt_id)
+def _native_execution_ready(
+    store: ResearchStore, attempt_id: str | None, owner_session_key: str | None = None
+) -> str | None:
+    return native_execution_ready(store, attempt_id, owner_session_key=owner_session_key)
 
 
 def _budget_execution_ready(store: ResearchStore, attempt_id: str | None) -> str | None:
@@ -1481,7 +1590,7 @@ def _launch_arguments(
     return positional, keywords
 
 
-def _dispatch_queued_job(store: ResearchStore) -> str | None:
+def _dispatch_queued_job(store: ResearchStore, session_key: str | None = None) -> str | None:
     """Claim and launch one queue item under the already-held owner authority."""
     if not store.owner_lock_held():
         raise JobError("host queue dispatch requires owner lock")
@@ -1642,7 +1751,7 @@ def _dispatch_queued_job(store: ResearchStore) -> str | None:
         host_reason = _host_execution_ready(store, attempt_id)
         if host_reason is not None:
             return reject(f"host_execution_unavailable:{host_reason}")
-        native_reason = _native_execution_ready(store, attempt_id)
+        native_reason = _native_execution_ready(store, attempt_id, session_key)
         if native_reason is not None:
             return reject(f"native_execution_unavailable:{native_reason}")
         budget_reason = _budget_execution_ready(store, attempt_id)
@@ -2324,7 +2433,7 @@ def serve(
             # leave canonical state untouched and try on the next turn.
             with suppress(OwnerLockHeld):
                 _reconcile_jobs(store)
-            _dispatch_queued_job(store)
+            _dispatch_queued_job(store, session_key)
             plan = compose_wake(store)
             if plan is not None:
                 deliver(store, sender, plan, session_key)

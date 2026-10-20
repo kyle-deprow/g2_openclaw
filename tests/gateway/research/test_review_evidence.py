@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
+from gateway.agent_profiles import load_profile
 from gateway.openclaw_client import OpenClawTransportError
 from gateway.research import review_evidence
 from gateway.research.contracts import AttemptState, HypothesisSpec, ReviewEvidence, RunPlan
@@ -44,6 +45,8 @@ from tests.gateway.research.native_review_fixtures import (
     prepare_review,
     set_owner_node,
 )
+
+CODEX_REVIEWER = load_profile("codex").role("reviewer")
 
 
 def _setup(
@@ -670,8 +673,8 @@ def test_native_collect_pass_is_idempotent_and_records_host_identity(
     )
     assert result.state is AttemptState.REVIEW_PASSED
     host = json.loads(store.evidence(attempt_id, "review_host_evidence"))
-    assert host["model_observed"] == "gpt-5.6-sol"
-    assert host["reasoning_effort_observed"] == "xhigh"
+    assert host["model_observed"] == CODEX_REVIEWER.model_id
+    assert host["reasoning_effort_observed"] == CODEX_REVIEWER.effort
     assert host["child_thread_id"] == native.child_thread_id
     assert host["announce_run_id"] == native.announce_run_id
     assert host["announce_status"] == "succeeded"
@@ -1525,8 +1528,8 @@ def test_self_report_submit_remains_a_tombstone(
         hypothesis.spec_sha256,
         "PASS",
         (),
-        "gpt-5.6-sol",
-        "gpt-5.6-sol",
+        CODEX_REVIEWER.model_id,
+        CODEX_REVIEWER.model_id,
         "child-session",
         "2026-01-01T00:00:00Z",
     )
@@ -1542,8 +1545,8 @@ def test_wake_asks_for_native_sol_xhigh_reviewer(
 
     plan = compose_wake(store)
     assert plan is not None
-    assert "gpt-5.6-sol" in plan.message
-    assert "xhigh" in plan.message
+    assert CODEX_REVIEWER.model_id in plan.message
+    assert str(CODEX_REVIEWER.effort) in plan.message
     assert "spawn_agent" in plan.message
 
 

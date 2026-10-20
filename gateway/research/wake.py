@@ -13,8 +13,10 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Protocol
 
+from gateway.agent_profiles import AgentProfile, active_runtime_profile
 from gateway.openclaw_client import OpenClawClient, OpenClawError, OpenClawTransportError
 
 from .contracts import AttemptDecision, AttemptState, HypothesisState, compute_requirements
@@ -161,6 +163,30 @@ def _managed_native_review_paths() -> tuple[str, str] | None:
     except HostRecordError:
         return None
     return str(stores.openclaw_database), str(stores.codex_state_database)
+
+
+def _claude_wake_profile() -> tuple[AgentProfile, str | None] | None:
+    """Return the active profile and managed state directory when it runs claude-cli."""
+
+    configured = os.environ.get("RESEARCH_CORE_DATABASE")
+    state_dir: Path | None = None
+    if configured:
+        core = Path(configured)
+        if core.is_absolute() and core.name == "openclaw.sqlite" and core.parent.name == "state":
+            state_dir = core.parent.parent
+    profile = active_runtime_profile(state_dir)
+    if profile.runtime != "claude-cli":
+        return None
+    return profile, str(state_dir) if state_dir is not None else None
+
+
+def _claude_spawn_text(profile: AgentProfile, role: str, agent_id: str, cwd: str) -> str:
+    spec = profile.role(role)
+    return (
+        f"call `mcp__openclaw__sessions_spawn` with agentId={agent_id}, "
+        f"model={spec.model_ref}, thinking={spec.effort}, cwd={cwd}, a unique taskName and the "
+        "task text, then call `sessions_yield` immediately and end this owner turn"
+    )
 
 
 _FREEZE_SEQUENCE = (
@@ -322,9 +348,15 @@ def _compose_base_wake(store: ResearchStore) -> WakePlan | None:
     state = attempt.state.value
     if attempt.state in {AttemptState.RUN_QUEUED, AttemptState.RUNNING}:
         return None
+    claude = _claude_wake_profile()
     if attempt.state == AttemptState.OPENED:
+        dispatch = "dispatch coder"
+        if claude is not None:
+            dispatch = "dispatch the implementer: " + _claude_spawn_text(
+                claude[0], "implementer", "research-implementer", attempt.worktree_path
+            )
         action = (
-            f"dispatch coder; submit with `gateway-cli research implementation-submit "
+            f"{dispatch}; submit with `gateway-cli research implementation-submit "
             f"{attempt.attempt_id} --root ROOT --file impl.json --run-plan run-plan.json "
             "--provenance-evidence provenance.json`; on the completion callback, "
             "verify the submitted implementation and stop this owner turn. Do not "
@@ -334,7 +366,33 @@ def _compose_base_wake(store: ResearchStore) -> WakePlan | None:
     elif attempt.state == AttemptState.IMPLEMENTED:
         wake_key = _key(frozen.hypothesis_id, attempt.attempt_id, state, resume_seq)
         native_paths = _managed_native_review_paths()
-        if native_paths is None:
+        if claude is not None:
+            reviewer = claude[0].role("reviewer")
+            state_dir = claude[1]
+            if state_dir is None:
+                action = (
+                    f"native review reviewer model={reviewer.model_ref} effort={reviewer.effort} "
+                    "is unavailable: RESEARCH_CORE_DATABASE must resolve to the managed "
+                    "<state>/state/openclaw.sqlite; pause instead of rendering a guessed state "
+                    "directory; do not invoke sessions_spawn"
+                )
+            else:
+                state_flag = f"--openclaw-state-dir {state_dir}"
+                action = (
+                    f"reserve a committed review bundle with `gateway-cli research review-reserve {attempt.attempt_id} --root ROOT --bundle-dir BUNDLE --wake-key {wake_key} --owner-key OWNER {state_flag}`, "
+                    "then call mcp__openclaw__sessions_spawn with the returned `spawn_arguments` "
+                    "object verbatim (agentId, model, thinking, cwd, taskName, task; do not edit "
+                    "or add keys), then mcp__openclaw__sessions_yield and end the turn "
+                    f"(expected agentId=research-reviewer, model={reviewer.model_ref}, "
+                    f"thinking={reviewer.effort}; the child's model and effort are observed from "
+                    "its Claude transcript, not self-reported); never respawn from the same turn. "
+                    "After the completion "
+                    "callback has started a new owner turn, "
+                    f"ACK with `gateway-cli research review-reconcile {attempt.attempt_id} --root ROOT {state_flag}`, "
+                    "then collect host evidence with "
+                    f"`gateway-cli research review-collect {attempt.attempt_id} --root ROOT {state_flag}`"
+                )
+        elif native_paths is None:
             action = (
                 "native review reviewer model=gpt-5.6-sol effort=xhigh is unavailable: "
                 "RESEARCH_CORE_DATABASE must resolve to the managed "
@@ -356,6 +414,10 @@ def _compose_base_wake(store: ResearchStore) -> WakePlan | None:
             )
     elif attempt.state == AttemptState.REVIEW_PASSED:
         action = f"run with `gateway-cli research run {attempt.attempt_id} --root ROOT`"
+        if claude is not None:
+            action += "; to delegate the command, " + _claude_spawn_text(
+                claude[0], "runner", "research-runner", attempt.worktree_path
+            )
     else:
         action = f"ask Astra for close decision using `gateway-cli research attempt-close {attempt.attempt_id} --root ROOT --decision RETRY|FINISH|PAUSE --reason TEXT`"
     refusal = store.latest_admission_refusal(frozen.hypothesis_id)

@@ -16,10 +16,12 @@ from typing import Protocol
 
 from dotenv import dotenv_values
 
+from gateway.agent_profiles import AgentProfileError, active_runtime_profile
 from gateway.openclaw_client import OpenClawClient
 
 from .contracts import Attempt
 from .host_records import HostRecordError, managed_native_databases
+from .host_records_claude import ClaudeRecordError, ClaudeStores, claude_stores
 from .jobs import JobRecord
 from .jobs import cancel as cancel_job
 from .readiness import build_readiness_gate
@@ -217,8 +219,10 @@ class OpenClawReviewCanceller:
         openclaw_database: Path,
         request_once: Callable[..., Awaitable[Mapping[str, object]]],
         codex_state_database: Path | None = None,
+        claude_stores: ClaudeStores | None = None,
     ) -> None:
         self._openclaw_database = openclaw_database
+        self._claude_stores = claude_stores
         self._codex_state_database = codex_state_database or (
             openclaw_database.parent / "codex-home" / "state_5.sqlite"
         )
@@ -237,6 +241,7 @@ class OpenClawReviewCanceller:
             self._openclaw_database,
             request,
             self._codex_state_database,
+            claude_stores=self._claude_stores,
         )
         if outcome.pending:
             return ReviewCancellation("pending", outcome.status)
@@ -619,7 +624,21 @@ def production_owner_control(root: Path | None = None) -> OwnerControl:
     review_canceller: ReviewCanceller | None = None
     codex_state_database: Path | None = None
     managed_openclaw_database: Path | None = None
+    review_claude_stores: ClaudeStores | None = None
+    claude_runtime = False
     if core_database is not None:
+        try:
+            claude_runtime = (
+                active_runtime_profile(core_database.parent.parent).runtime == "claude-cli"
+            )
+            if claude_runtime:
+                review_claude_stores = claude_stores(core_database.parent.parent)
+                managed_openclaw_database = review_claude_stores.openclaw_state_db
+        except (AgentProfileError, ClaudeRecordError) as exc:
+            claude_runtime = True  # no Codex stores to derive; the refusal below is typed
+            if environment.refusal is None:
+                environment = _owner_environment_refusal(f"agent_profile:{type(exc).__name__}")
+    if core_database is not None and not claude_runtime:
         try:
             managed = managed_native_databases(core_database)
             managed_openclaw_database = managed.openclaw_database
@@ -637,6 +656,7 @@ def production_owner_control(root: Path | None = None) -> OwnerControl:
             managed_openclaw_database or core_database,
             client.request_once,
             codex_state_database,
+            review_claude_stores,
         )
 
     return OwnerControl(

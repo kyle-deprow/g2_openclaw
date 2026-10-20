@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import cast
 
+from gateway.agent_profiles import AgentProfile, RoleSpec, active_runtime_profile, load_profile
 from gateway.openclaw_client import OpenClawError, OpenClawTransportError
 
 from .codec import to_json
@@ -51,13 +52,29 @@ from .host_records import (
     read_exact_native_owner,
     read_native_owner_writer,
 )
+from .host_records_claude import (
+    MAX_CLAUDE_TRANSCRIPT_BYTES,
+    ClaudeRecordError,
+    ClaudeRecordNotRecorded,
+    ClaudeRun,
+    ClaudeStores,
+    child_runs,
+    read_run,
+    run_outcome,
+    transcript_files,
+)
 from .store import ResearchStore, StoreConflict, canonical_wake_key, now_utc
 
 MAX_BUNDLE_FILE_BYTES = 8 * 1024 * 1024
 MAX_BUNDLE_BYTES = 512 * 1024 * 1024
 MAX_TEST_EVIDENCE_BYTES = 8 * 1024 * 1024
-REVIEW_MODEL = "gpt-5.6-sol"
-REVIEW_EFFORT = "xhigh"
+# The codex reviewer comes from the profile, never a literal.
+_CODEX_REVIEWER = load_profile("codex").role("reviewer")
+REVIEW_MODEL = _CODEX_REVIEWER.model_id
+REVIEW_EFFORT = cast(str, _CODEX_REVIEWER.effort)
+CLAUDE_REVIEW_AGENT = "research-reviewer"
+_CLAUDE_SPAWN_KEYS = frozenset({"agentId", "cwd", "model", "task", "taskName", "thinking"})
+_CODEX_SPAWN_KEYS = frozenset({"agent_type", "fork_turns", "message", "task_name"})
 REVIEW_TASK_RUNTIME = "native"
 REVIEW_TASK_SCOPE = "session"
 REVIEW_AGENT = "reviewer"
@@ -115,6 +132,12 @@ class ReviewReservation:
     task_name: str | None = None
     prompt_sha256: str | None = None
     spawn_arguments_json: str | None = None
+
+    @property
+    def is_claude(self) -> bool:
+        """True for a reservation whose spawn arguments are a Claude ``sessions_spawn`` call."""
+
+        return self.spawn_arguments_json is not None and "agentId" in self.spawn_arguments
 
     @property
     def spawn_arguments(self) -> dict[str, str]:
@@ -498,6 +521,7 @@ def _prepare_bundle(
     *,
     instructions: str | None,
     candidate: BundleCandidate | None,
+    claude: bool = False,
 ) -> _BundleParts:
     """Gather and bound-check bundle inputs from the store (or from a candidate)."""
 
@@ -580,8 +604,12 @@ def _prepare_bundle(
         "each string, or use [] when there are no findings.\n"
         "containment-provenance.json is the host-verified in-sandbox import provenance "
         f"for the tested commit. The immutable bundle is at bundle_dir={bundle_dir.resolve()}; "
-        "the native spawn has no cwd, so use that absolute path exactly.\n"
-        f"Valid JSON example:\n{verdict_example}"
+        + (
+            "the spawn cwd is this bundle directory, and absolute paths under it are exact.\n"
+            if claude
+            else "the native spawn has no cwd, so use that absolute path exactly.\n"
+        )
+        + f"Valid JSON example:\n{verdict_example}"
     )
     if tracked.excluded and instructions is None:
         text += (
@@ -637,6 +665,7 @@ def build_review_bundle(
     bundle_dir: Path,
     *,
     instructions: str | None = None,
+    claude: bool = False,
 ) -> str:
     """Build and freeze a review bundle from the committed implementation.
 
@@ -647,7 +676,7 @@ def build_review_bundle(
     """
 
     parts = _prepare_bundle(
-        store, attempt_id, bundle_dir, instructions=instructions, candidate=None
+        store, attempt_id, bundle_dir, instructions=instructions, candidate=None, claude=claude
     )
     target_exists = bundle_dir.exists() or bundle_dir.is_symlink()
     if target_exists:
@@ -887,8 +916,14 @@ def reserve_review(
     instructions: str | None = None,
     wake_pending_key: str,
     openclaw_database: Path,
+    claude_stores: ClaudeStores | None = None,
+    profile: AgentProfile | None = None,
 ) -> ReviewReservation:
-    """Build/verify a bundle and reserve one unique reviewer label."""
+    """Build/verify a bundle and reserve one unique reviewer label.
+
+    ``claude_stores`` selects the Claude path (``research-reviewer`` child verified through
+    the Claude host records); without it the Codex path runs unchanged.
+    """
 
     if not owner_session_key:
         raise ReviewEvidenceError("owner session key must be non-empty")
@@ -929,6 +964,17 @@ def reserve_review(
     # now only if the run's boundary events happen to be flushed already, and
     # is otherwise deferred to reconcile/verify/cancel.
     owner_run_id = wake_run_id
+    if claude_stores is not None:
+        return _reserve_claude(
+            store,
+            attempt_id,
+            bundle_dir,
+            owner_session_key,
+            instructions=instructions,
+            owner_run_id=owner_run_id,
+            stores=claude_stores,
+            spec=_claude_reviewer(profile, claude_stores),
+        )
     owner: NativeOwnerHostRecord | None
     try:
         owner = read_exact_native_owner(
@@ -1123,6 +1169,8 @@ def reconcile_review(
     attempt_id: str,
     openclaw_database: Path,
     codex_state_database: Path | None = None,
+    claude_stores: ClaudeStores | None = None,
+    profile: AgentProfile | None = None,
 ) -> ReviewAck | None:
     """Recover one lost spawn ACK; ambiguous correlation pauses the campaign."""
 
@@ -1130,6 +1178,8 @@ def reconcile_review(
     existing = _stored_json(store, attempt_id, "review_ack")
     if existing is not None:
         return _ack_from_payload(existing)
+    if reservation.is_claude:
+        return _reconcile_claude(store, attempt_id, reservation, claude_stores, profile)
     if reservation.spawn_arguments_json is not None:
         if reservation.owner_run_id is None or codex_state_database is None:
             store.pause(f"review_unresolved:{attempt_id}")
@@ -1266,7 +1316,9 @@ def _reservation_from_payload(payload: Mapping[str, object]) -> ReviewReservatio
         not isinstance(key, str) or not isinstance(value, str) for key, value in arguments.items()
     ):
         raise StoreConflict("native spawn arguments are malformed")
-    if set(arguments) != {"agent_type", "fork_turns", "message", "task_name"}:
+    if set(arguments) == _CLAUDE_SPAWN_KEYS:
+        return _claude_reservation_from_payload(payload, optional, arguments)
+    if set(arguments) != _CODEX_SPAWN_KEYS:
         raise StoreConflict("native spawn arguments have an unexpected key set")
     canonical_arguments = json.dumps(arguments, sort_keys=True, separators=(",", ":"))
     message = arguments.get("message")
@@ -1324,7 +1376,8 @@ def _ack_from_payload(payload: Mapping[str, object]) -> ReviewAck:
         "child_thread_id",
     }
     keys = set(payload)
-    if keys not in (historical, native):
+    claude = native - {"owner_thread_id"}
+    if keys not in (historical, native, claude):
         raise StoreConflict("review ACK payload is malformed")
     mode = payload["mode"]
     timeout = payload["run_timeout_seconds"]
@@ -1352,7 +1405,7 @@ def _ack_from_payload(payload: Mapping[str, object]) -> ReviewAck:
         at,
         str(payload["owner_session_key"]),
         str(payload["owner_run_id"]),
-        str(payload["owner_thread_id"]),
+        str(payload["owner_thread_id"]) if "owner_thread_id" in payload else None,
         str(payload["child_thread_id"]),
     )
 
@@ -1552,11 +1605,19 @@ def verify_review(
     store: ResearchStore,
     attempt_id: str,
     openclaw_database: Path,
-    codex_state_database: Path,
+    codex_state_database: Path | None,
+    claude_stores: ClaudeStores | None = None,
+    profile: AgentProfile | None = None,
 ) -> ReviewVerification:
-    """Verify native Sol evidence from official OpenClaw/Codex stores."""
+    """Verify native reviewer evidence from official OpenClaw/Codex or Claude stores."""
 
-    if not codex_state_database.is_file() or codex_state_database.is_symlink():
+    if claude_stores is not None:
+        return verify_claude_review(store, attempt_id, claude_stores, profile)
+    if (
+        codex_state_database is None
+        or not codex_state_database.is_file()
+        or codex_state_database.is_symlink()
+    ):
         raise ReviewUnresolved("native Codex state database is missing or unsafe")
     try:
         return verify_native_review(store, attempt_id, openclaw_database, codex_state_database)
@@ -1639,6 +1700,8 @@ def cancel_review(
     openclaw_database: Path,
     request_once: CancelTransport,
     codex_state_database: Path | None = None,
+    claude_stores: ClaudeStores | None = None,
+    profile: AgentProfile | None = None,
 ) -> CancelOutcome:
     """Pause, abort one exact native owner run, and reread child evidence."""
     store.pause(f"review_cancel:{attempt_id}")
@@ -1647,6 +1710,17 @@ def cancel_review(
     if reservation.spawn_arguments_json is None:
         store.record_review_event(attempt_id, "review_unresolved", {"reason": "legacy_review"})
         return CancelOutcome(attempt_id, None, "unresolved", True, "not_requested")
+    if reservation.is_claude:
+        return _cancel_claude(
+            store,
+            attempt_id,
+            reason,
+            reservation,
+            request_once,
+            claude_stores,
+            profile,
+            existing_cancel,
+        )
     if (
         codex_state_database is None
         or reservation.owner_run_id is None
@@ -1834,7 +1908,9 @@ def collect_review(
     store: ResearchStore,
     attempt_id: str,
     openclaw_database: Path,
-    codex_state_database: Path,
+    codex_state_database: Path | None = None,
+    claude_stores: ClaudeStores | None = None,
+    profile: AgentProfile | None = None,
 ) -> Attempt:
     """Verify and atomically persist host evidence plus review transition."""
 
@@ -1865,5 +1941,656 @@ def collect_review(
         attempt_id,
         openclaw_database,
         codex_state_database,
+        claude_stores,
+        profile,
     )
     return store.collect_review_evidence(attempt_id, verification.review, verification.host_payload)
+
+
+# ---------------------------------------------------------------------------
+# Claude (claude-cli) reviewer path.  The reviewer is the OpenClaw agent
+# ``research-reviewer`` spawned by the owner with ``sessions_spawn``; evidence comes
+# from the Claude host records (AP3a) instead of Codex threads.
+# ---------------------------------------------------------------------------
+
+
+class _ClaudeChildRejected(ReviewEvidenceError):
+    """A Claude child run failed one identity rule; ``reason`` names the rule."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _claude_reviewer(profile: AgentProfile | None, stores: ClaudeStores) -> RoleSpec:
+    # Default to the profile deployed under the state directory that holds the stores.
+    chosen = (
+        profile
+        if profile is not None
+        else active_runtime_profile(stores.openclaw_state_db.parent.parent)
+    )
+    if chosen.runtime != "claude-cli":
+        raise ReviewEvidenceError("Claude review path requires a claude-cli agent profile")
+    spec = chosen.role("reviewer")
+    if spec.effort is None:
+        raise ReviewEvidenceError("profile reviewer role has no effort")
+    return spec
+
+
+def _reserve_claude(
+    store: ResearchStore,
+    attempt_id: str,
+    bundle_dir: Path,
+    owner_session_key: str,
+    *,
+    instructions: str | None,
+    owner_run_id: str,
+    stores: ClaudeStores,
+    spec: RoleSpec,
+) -> ReviewReservation:
+    attempt = store.get_attempt(attempt_id)
+    try:
+        owner = read_run(stores, owner_run_id)
+    except ClaudeRecordNotRecorded as exc:
+        raise ReviewUnresolved("native review owner run is not recorded") from exc
+    except HostRecordError as exc:
+        raise ReviewUnresolved("native review owner run/thread is unresolved") from exc
+    if owner.session_key != owner_session_key:
+        raise ReviewUnresolved("native review owner run belongs to a different session")
+    if not bundle_dir.is_absolute():
+        raise BundleError("bundle directory must be absolute")
+    reserved = now_utc()
+    if owner.started_at_ms is not None and owner.started_at_ms > _epoch_ms(reserved):
+        raise ReviewUnresolved("native review owner run starts after the reservation")
+    existing = _stored_json(store, attempt_id, "review_reservation")
+    if existing is None:
+        # A new reservation must be made from inside the still-open wake run.
+        if owner.ended_at_ms is not None:
+            raise ReviewUnresolved("native review owner run has already ended")
+        try:
+            outcome = run_outcome(stores, owner_run_id)
+        except HostRecordError as exc:
+            raise ReviewUnresolved("native review owner run/thread is unresolved") from exc
+        if outcome != "pending":
+            raise ReviewUnresolved("native review owner run is not the active running writer")
+    else:
+        reservation = _reservation_from_payload(existing)
+        if (
+            reservation.owner_session_key != owner_session_key
+            or Path(reservation.bundle_dir) != bundle_dir.resolve()
+        ):
+            raise StoreConflict("review reservation differs from the stored reservation")
+        if not reservation.is_claude or reservation.owner_run_id != owner_run_id:
+            raise StoreConflict(
+                "review reservation owner run/thread differs from stored reservation"
+            )
+        if owner.started_at_ms is not None and owner.started_at_ms > _epoch_ms(
+            reservation.reserved_at
+        ):
+            raise ReviewUnresolved("native review owner run starts after the reservation")
+        _validate_bundle(
+            store,
+            attempt_id,
+            Path(reservation.bundle_dir),
+            expected_digest=reservation.bundle_sha256,
+        )
+        return reservation
+    digest = build_review_bundle(
+        store, attempt_id, bundle_dir, instructions=instructions, claude=True
+    )
+    hypothesis = store.get_hypothesis(attempt.hypothesis_id)
+    nonce = secrets.token_hex(12)
+    task_name = f"review_{attempt_id.lower().replace('-', '_')}_{nonce}"
+    if _NATIVE_TASK_NAME.fullmatch(task_name) is None:
+        raise ReviewEvidenceError("native review task name is not canonical")
+    prompt = (bundle_dir / "instructions.md").read_text(encoding="utf-8")
+    if str(bundle_dir.resolve()) not in prompt:
+        raise BundleError("native review prompt must contain the immutable absolute bundle path")
+    # The child task text is recorded by the host; the unique label binds it to this reservation.
+    task = f"{prompt}\n\nReview label: {task_name}\n"
+    reservation = ReviewReservation(
+        attempt_id=attempt_id,
+        commit=cast(str, attempt.commit),
+        hypothesis_spec_sha256=hypothesis.spec_sha256,
+        bundle_dir=str(bundle_dir.resolve()),
+        bundle_sha256=digest,
+        reserved_at=reserved,
+        owner_session_key=owner_session_key,
+        label=task_name,
+        reservation_nonce=nonce,
+        owner_run_id=owner_run_id,
+        owner_thread_id=None,
+        task_name=task_name,
+        prompt_sha256=hashlib.sha256(task.encode("utf-8")).hexdigest(),
+        spawn_arguments_json=to_json(
+            {
+                "agentId": CLAUDE_REVIEW_AGENT,
+                "cwd": str(bundle_dir.resolve()),
+                "model": spec.model_ref,
+                "task": task,
+                "taskName": task_name,
+                "thinking": cast(str, spec.effort),
+            }
+        ),
+    )
+    store.insert_review_evidence(
+        attempt_id, "review_reservation", reservation.to_json(), "review_reserved"
+    )
+    return reservation
+
+
+def _claude_reservation_from_payload(
+    payload: Mapping[str, object],
+    optional: Mapping[str, object],
+    arguments: Mapping[str, object],
+) -> ReviewReservation:
+    canonical_arguments = json.dumps(arguments, sort_keys=True, separators=(",", ":"))
+    task = arguments.get("task")
+    if (
+        not isinstance(task, str)
+        or hashlib.sha256(task.encode()).hexdigest() != optional["prompt_sha256"]
+    ):
+        raise StoreConflict("native spawn prompt digest is malformed")
+    if (
+        arguments.get("agentId") != CLAUDE_REVIEW_AGENT
+        or arguments.get("taskName") != optional["task_name"]
+        or arguments.get("cwd") != payload["bundle_dir"]
+        or str(payload["bundle_dir"]) not in task
+        or f"Review label: {optional['task_name']}" not in task
+        or _NATIVE_TASK_NAME.fullmatch(str(optional["task_name"])) is None
+        or optional["owner_thread_id"] is not None
+        or not isinstance(optional["owner_run_id"], str)
+    ):
+        raise StoreConflict("native spawn arguments do not match reservation")
+    return ReviewReservation(
+        attempt_id=str(payload["attempt_id"]),
+        commit=str(payload["commit"]),
+        hypothesis_spec_sha256=str(payload["hypothesis_spec_sha256"]),
+        bundle_dir=str(payload["bundle_dir"]),
+        bundle_sha256=str(payload["bundle_sha256"]),
+        reserved_at=str(payload["reserved_at"]),
+        owner_session_key=str(payload["owner_session_key"]),
+        label=str(payload["label"]),
+        reservation_nonce=str(payload["reservation_nonce"]),
+        owner_run_id=str(optional["owner_run_id"]),
+        owner_thread_id=None,
+        task_name=str(optional["task_name"]),
+        prompt_sha256=str(optional["prompt_sha256"]),
+        spawn_arguments_json=canonical_arguments,
+    )
+
+
+class _ClaudeChildIncomplete(ReviewEvidenceError):
+    """A running child's evidence is not complete yet; ``reason`` names the missing rule."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _check_claude_child(
+    run: ClaudeRun,
+    reservation: ReviewReservation,
+    spec: RoleSpec,
+    outcome: str,
+    *,
+    correlation_only: bool = False,
+) -> None:
+    """Apply the Claude reviewer acceptance rules; raise with the failed rule's name.
+
+    Positive mismatches always reject.  Missing evidence (no start time, no model, empty
+    transcript sets, no task or cwd) is ``_ClaudeChildIncomplete`` while the run is still
+    pending, and a rejection once the run has finished.  ``correlation_only`` (used by
+    cancel) checks only that this is the reserved child (agent, requester, exact task, cwd),
+    so a correlated child is aborted even if its model or effort is wrong.
+    """
+
+    arguments = reservation.spawn_arguments
+    if run.agent_id != CLAUDE_REVIEW_AGENT:
+        raise _ClaudeChildRejected("wrong_agent")
+    if run.requester_session_key != reservation.owner_session_key:
+        raise _ClaudeChildRejected("wrong_requester")
+    # The owner could append text (or a canned verdict) to the task: require the exact task.
+    if run.task_text is not None and run.task_text != arguments["task"]:
+        raise _ClaudeChildRejected("task_mismatch")
+    if run.cwd is not None and run.cwd != reservation.bundle_dir:
+        raise _ClaudeChildRejected("cwd_mismatch")
+    if correlation_only:
+        return
+    if run.model is not None and run.model != spec.model_id:
+        raise _ClaudeChildRejected("wrong_model")
+    if run.transcript_models and run.transcript_models != frozenset({spec.model_id}):
+        raise _ClaudeChildRejected("transcript_model_drift")
+    if run.transcript_efforts and run.transcript_efforts != frozenset({spec.effort}):
+        raise _ClaudeChildRejected("effort_mismatch")
+    if run.started_at_ms is not None and run.started_at_ms < _epoch_ms(reservation.reserved_at):
+        raise _ClaudeChildRejected("started_before_reservation")
+    missing = [
+        reason
+        for reason, absent in (
+            ("wrong_model", run.model is None),
+            ("task_mismatch", run.task_text is None),
+            ("cwd_mismatch", run.cwd is None),
+            ("transcript_model_drift", not run.transcript_models),
+            ("effort_mismatch", not run.transcript_efforts),
+            ("started_before_reservation", run.started_at_ms is None),
+        )
+        if absent
+    ]
+    if missing:
+        if outcome == "pending":
+            raise _ClaudeChildIncomplete(missing[0])
+        raise _ClaudeChildRejected(missing[0])
+
+
+def _unresolved_claude(
+    store: ResearchStore, attempt_id: str, reason: str, message: str, cause: Exception | None
+) -> ReviewUnresolved:
+    store.pause(f"review_unresolved:{attempt_id}")
+    store.record_review_event(attempt_id, "review_unresolved", {"reason": reason})
+    error = ReviewUnresolved(message)
+    error.__cause__ = cause
+    return error
+
+
+def _gate_claude_child(
+    store: ResearchStore,
+    attempt_id: str,
+    run: ClaudeRun,
+    reservation: ReviewReservation,
+    spec: RoleSpec,
+    outcome: str,
+) -> None:
+    try:
+        _check_claude_child(run, reservation, spec, outcome)
+    except _ClaudeChildIncomplete as exc:
+        raise ReviewPending(f"native review child evidence is incomplete: {exc.reason}") from exc
+    except _ClaudeChildRejected as exc:
+        raise _unresolved_claude(
+            store,
+            attempt_id,
+            "correlation",
+            f"native review child rejected: {exc.reason}",
+            exc,
+        ) from exc
+
+
+def _find_claude_child(stores: ClaudeStores, reservation: ReviewReservation) -> ClaudeRun | None:
+    """Return the single reviewer child carrying the reservation label, else None.
+
+    The label only locates the child; ``_check_claude_child`` requires its recorded task to
+    equal the reserved task exactly.
+    """
+
+    label = f"Review label: {reservation.task_name}"
+    runs = child_runs(
+        stores,
+        reservation.owner_session_key,
+        since_ms=_epoch_ms(reservation.reserved_at),
+        agent_id=CLAUDE_REVIEW_AGENT,
+    )
+    matches = [run for run in runs if run.task_text is not None and label in run.task_text]
+    if len(matches) > 1:
+        raise ClaudeRecordError("more than one child carries the review label")
+    return matches[0] if matches else None
+
+
+def _reconcile_claude(
+    store: ResearchStore,
+    attempt_id: str,
+    reservation: ReviewReservation,
+    stores: ClaudeStores | None,
+    profile: AgentProfile | None,
+) -> ReviewAck | None:
+    if reservation.owner_run_id is None or stores is None:
+        raise _unresolved_claude(
+            store,
+            attempt_id,
+            "owner_identity",
+            "native owner run/thread identity is unresolved",
+            None,
+        )
+    spec = _claude_reviewer(profile, stores)
+    try:
+        child = _find_claude_child(stores, reservation)
+        outcome = run_outcome(stores, child.run_id) if child is not None else "pending"
+    except HostRecordError as exc:
+        raise _unresolved_claude(
+            store, attempt_id, "correlation", "native review correlation is unresolved", exc
+        ) from exc
+    if child is None:
+        raise ReviewPending("native review child is not yet recorded")
+    _gate_claude_child(store, attempt_id, child, reservation, spec, outcome)
+    return acknowledge_review(
+        store,
+        attempt_id,
+        REVIEW_NATIVE_MODE,
+        None,
+        owner_session_key=reservation.owner_session_key,
+        owner_run_id=reservation.owner_run_id,
+        owner_thread_id=None,
+        child_thread_id=child.run_id,
+        _verified_native=True,
+    )
+
+
+def _transcript_digest(
+    stores: ClaudeStores, session_id: str | None
+) -> tuple[str | None, str | None]:
+    """Return ``(sha256, None)`` over the transcript files the host reader parses, else
+    ``(None, reason)``.
+
+    The files come from ``transcript_files`` (main plus every nested ``*.jsonl``); the digest
+    covers sorted POSIX paths relative to ``<claude_config_dir>/projects`` and file bytes.
+    """
+
+    if not session_id:
+        return None, "no_claude_session_id"
+    try:
+        files = transcript_files(stores, session_id)
+    except ClaudeRecordError as exc:
+        return None, f"host_record_error: {exc}"
+    except OSError as exc:
+        return None, f"unreadable: {type(exc).__name__}"
+    if not files:
+        return None, "transcript_not_found"
+    projects = stores.claude_config_dir / "projects"
+    entries: list[tuple[str, Path]] = []
+    for path in files:
+        try:
+            entries.append((path.relative_to(projects).as_posix(), path))
+        except ValueError:
+            return None, "transcript_outside_projects"
+    outer = hashlib.sha256()
+    total = 0
+    for relative, path in sorted(entries):
+        inner = hashlib.sha256()
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    return None, f"not_a_regular_file: {relative}"
+                for chunk in iter(lambda: handle.read(1 << 20), b""):
+                    total += len(chunk)
+                    if total > MAX_CLAUDE_TRANSCRIPT_BYTES:
+                        return None, "transcripts_exceed_the_size_limit"
+                    inner.update(chunk)
+        except OSError as exc:
+            return None, f"unreadable: {relative}: {type(exc).__name__}"
+        outer.update(f"{relative}\0{inner.hexdigest()}\n".encode())
+    return outer.hexdigest(), None
+
+
+def _failed_claude_verification(
+    reservation: ReviewReservation, spec: RoleSpec, run: ClaudeRun, reason: str, verdict_json: str
+) -> ReviewVerification:
+    collected = now_utc()
+    host: dict[str, object] = {
+        "child_thread_id": run.run_id,
+        "task_status": "unresolved",
+        "verdict_json": verdict_json,
+        "bound_commit": reservation.commit,
+        "bound_spec_sha256": reservation.hypothesis_spec_sha256,
+        "collected_at": collected,
+        "verdict": "FAIL",
+        "reason": reason,
+        "detail": reason[:256],
+        "owner_session_key": reservation.owner_session_key,
+        "owner_run_id": reservation.owner_run_id,
+        "task_name": reservation.task_name,
+        "child_session_key": run.session_key,
+        "child_terminal_state": run.status,
+        "model_observed": run.model,
+        "reasoning_effort_observed": sorted(run.transcript_efforts),
+        "agent_role_observed": run.agent_id,
+        "claude_session_id": run.claude_session_id,
+        "thinking_level": run.thinking_level,
+    }
+    review = ReviewEvidence(
+        reservation.attempt_id,
+        reservation.commit,
+        reservation.hypothesis_spec_sha256,
+        "FAIL",
+        (reason,),
+        spec.model_ref,
+        spec.model_ref,
+        run.run_id,
+        collected,
+    )
+    return ReviewVerification(review, to_json(host))
+
+
+def verify_claude_review(
+    store: ResearchStore,
+    attempt_id: str,
+    stores: ClaudeStores,
+    profile: AgentProfile | None = None,
+) -> ReviewVerification:
+    """Verify one exact ``research-reviewer`` child from the Claude host records."""
+
+    spec = _claude_reviewer(profile, stores)
+    reservation = _reservation(store, attempt_id)
+    if not reservation.is_claude:
+        raise ReviewEvidenceError("review reservation is not a Claude spawn")
+    if reservation.owner_run_id is None or reservation.task_name is None:
+        raise ReviewUnresolved("native review reservation is missing owner identity")
+    ack_payload = _stored_json(store, attempt_id, "review_ack")
+    if ack_payload is None:
+        raise ReviewPending("review ACK is pending")
+    ack = _ack_from_payload(ack_payload)
+    if (
+        ack.owner_session_key != reservation.owner_session_key
+        or ack.owner_run_id != reservation.owner_run_id
+        or not ack.child_thread_id
+    ):
+        raise _unresolved_claude(
+            store,
+            attempt_id,
+            "ack_identity",
+            "native review ACK identity does not match reservation",
+            None,
+        )
+    try:
+        run = read_run(stores, ack.child_thread_id)
+    except ClaudeRecordNotRecorded as exc:
+        raise _unresolved_claude(
+            store,
+            attempt_id,
+            "owner_missing",
+            "native review child vanished after the review ACK",
+            exc,
+        ) from exc
+    except HostRecordError as exc:
+        raise _unresolved_claude(
+            store, attempt_id, "correlation", "native review correlation is unresolved", exc
+        ) from exc
+    try:
+        located = _find_claude_child(stores, reservation)
+        outcome = run_outcome(stores, run.run_id)
+    except HostRecordError as exc:
+        raise _unresolved_claude(
+            store, attempt_id, "correlation", "native review correlation is unresolved", exc
+        ) from exc
+    if located is None or located.run_id != run.run_id:
+        raise _unresolved_claude(
+            store,
+            attempt_id,
+            "correlation",
+            "native review child differs from ACK",
+            None,
+        )
+    _gate_claude_child(store, attempt_id, run, reservation, spec, outcome)
+    if outcome == "pending":
+        raise ReviewPending("native review completion is pending")
+    if outcome != "ok":
+        return _failed_claude_verification(reservation, spec, run, outcome, "")
+    if run.result_text is None:
+        return _failed_claude_verification(reservation, spec, run, "terminal_verdict_missing", "")
+    try:
+        verdict, findings, verdict_json = _final_verdict_text(run.result_text, reservation)
+        _verify_reserved_bundle(Path(reservation.bundle_dir), reservation.bundle_sha256)
+    except BundleError as exc:
+        reason = (
+            "bundle_mutated"
+            if str(exc) == "reserved review bundle was modified"
+            else f"bundle_invalid: {exc}"
+        )
+        return _failed_claude_verification(reservation, spec, run, reason, run.result_text)
+    except ReviewEvidenceError as exc:
+        reason = str(exc) or "review_evidence_invalid"
+        return _failed_claude_verification(reservation, spec, run, reason, run.result_text)
+    digest, unavailable = _transcript_digest(stores, run.claude_session_id)
+    host: dict[str, object] = {
+        "owner_session_key": reservation.owner_session_key,
+        "owner_run_id": reservation.owner_run_id,
+        "child_thread_id": run.run_id,
+        "child_session_key": run.session_key,
+        "task_name": reservation.task_name,
+        "task_status": "succeeded",
+        "runtime": "claude-cli",
+        "model_observed": run.model,
+        "transcript_models_observed": sorted(run.transcript_models),
+        "reasoning_effort_observed": sorted(run.transcript_efforts),
+        "agent_role_observed": run.agent_id,
+        "claude_session_id": run.claude_session_id,
+        "thinking_level": run.thinking_level,
+        "transcript_sha256": digest,
+        **({"transcript_digest_unavailable": unavailable} if unavailable else {}),
+        "verdict_json": verdict_json,
+        "bound_commit": reservation.commit,
+        "bound_spec_sha256": reservation.hypothesis_spec_sha256,
+        "collected_at": now_utc(),
+        "verdict": verdict,
+    }
+    stored_plan = _stored_json(store, reservation.attempt_id, "run_plan")
+    if stored_plan is not None:
+        host["bound_run_plan_sha256"] = hashlib.sha256(
+            json.dumps(stored_plan, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+    review = ReviewEvidence(
+        attempt_id,
+        reservation.commit,
+        reservation.hypothesis_spec_sha256,
+        verdict,
+        findings,
+        spec.model_ref,
+        spec.model_ref,
+        run.run_id,
+        str(host["collected_at"]),
+    )
+    return ReviewVerification(review, to_json(host))
+
+
+def _claude_cancel_state(
+    stores: ClaudeStores, reservation: ReviewReservation
+) -> tuple[ClaudeRun | None, str]:
+    """Return the labelled child and its outcome (``pending`` when still running)."""
+
+    child = _find_claude_child(stores, reservation)
+    if child is None:
+        return None, "missing"
+    return child, run_outcome(stores, child.run_id)
+
+
+def _claude_status(child: ClaudeRun, outcome: str) -> str:
+    return child.status if outcome != "pending" else "pending"
+
+
+def _cancel_claude(
+    store: ResearchStore,
+    attempt_id: str,
+    reason: str,
+    reservation: ReviewReservation,
+    request_once: CancelTransport,
+    stores: ClaudeStores | None,
+    profile: AgentProfile | None,
+    existing_cancel: Mapping[str, object] | None,
+) -> CancelOutcome:
+    """Cancel a Claude review.
+
+    Known limitation: ``chat.abort`` is sent for the *owner* run (the same RPC the codex path
+    uses); whether OpenClaw can abort a running ``claude-cli`` child session by its own run id
+    is not verified, so the child ends on its own terminal record, which is re-read afterwards.
+    """
+
+    if stores is None or reservation.owner_run_id is None or reservation.task_name is None:
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_identity"})
+        return CancelOutcome(attempt_id, None, "unresolved", True, "not_requested")
+    spec = _claude_reviewer(profile, stores)
+
+    def reread(task_id: str, result: str) -> CancelOutcome:
+        try:
+            after, outcome = _claude_cancel_state(stores, reservation)
+        except ClaudeRecordNotRecorded:
+            store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_missing"})
+            return CancelOutcome(attempt_id, task_id, "unresolved", True, result)
+        except HostRecordError:
+            return CancelOutcome(attempt_id, task_id, "pending", True, result)
+        if after is None or after.run_id != task_id or outcome == "pending":
+            return CancelOutcome(attempt_id, task_id, "pending", True, result)
+        return CancelOutcome(attempt_id, task_id, _claude_status(after, outcome), False, result)
+
+    if existing_cancel is not None:
+        task_value = existing_cancel.get("task_id")
+        result_value = existing_cancel.get("rpc_result")
+        task_id = task_value if isinstance(task_value, str) else None
+        rpc_result = result_value if isinstance(result_value, str) else "UNKNOWN_RESPONSE"
+        pending = rpc_result in {
+            "UNKNOWN_RESPONSE",
+            "pending",
+            "accepted",
+            "MALFORMED_RESPONSE",
+            "MISMATCHED_RESPONSE",
+            "RPC_REJECTED",
+            CANCEL_ABORTED,
+            CANCEL_OWNER_INACTIVE,
+        } or rpc_result.startswith("RPC_ERROR:")
+        if pending and task_id is not None:
+            return reread(task_id, rpc_result)
+        return CancelOutcome(
+            attempt_id, task_id, "pending" if pending else rpc_result, pending, rpc_result
+        )
+    requested_task = store.review_cancel_requested(attempt_id)
+    if requested_task is not None:
+        if requested_task[1] != reason:
+            raise StoreConflict("review cancellation reason differs from stored request")
+        return reread(requested_task[0], "UNKNOWN_RESPONSE")
+    try:
+        child, outcome = _claude_cancel_state(stores, reservation)
+        if child is not None:
+            _check_claude_child(child, reservation, spec, outcome, correlation_only=True)
+    except ClaudeRecordNotRecorded:
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_missing"})
+        return CancelOutcome(attempt_id, None, "unresolved", True, "not_requested")
+    except (HostRecordError, ReviewEvidenceError):
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "cancel_correlation"})
+        return CancelOutcome(attempt_id, None, "unresolved", True, "not_requested")
+    if child is None:
+        store.record_review_event(attempt_id, "review_unresolved", {"reason": "owner_missing"})
+        return CancelOutcome(attempt_id, None, "unresolved", True, "not_requested")
+    task_id = child.run_id
+    if outcome != "pending":
+        result = "terminal:" + child.status
+        store.record_review_cancel(attempt_id, task_id, reason, result)
+        return CancelOutcome(attempt_id, task_id, child.status, False, result)
+    if not store.record_review_cancel_request(attempt_id, task_id, reason):
+        return CancelOutcome(attempt_id, task_id, "pending", True, "UNKNOWN_RESPONSE")
+    owner_parts = reservation.owner_session_key.split(":")
+    if len(owner_parts) < 2 or owner_parts[0] != "agent" or not owner_parts[1]:
+        raise ReviewUnresolved("owner session key has no canonical agent id")
+    owner_run_id = reservation.owner_run_id
+
+    async def invoke_cancel() -> Mapping[str, object]:
+        return await request_once(reservation.owner_session_key, owner_parts[1], owner_run_id)
+
+    try:
+        response = asyncio.run(invoke_cancel())
+        result = _safe_rpc_result(response, reservation.owner_run_id)
+    except (OpenClawTransportError, TimeoutError, OSError):
+        result = "UNKNOWN_RESPONSE"
+    except OpenClawError:
+        result = "RPC_REJECTED"
+    except Exception as exc:
+        result = f"RPC_ERROR:{type(exc).__name__}"
+    store.record_review_cancel(attempt_id, task_id, reason, result)
+    return reread(task_id, result)
