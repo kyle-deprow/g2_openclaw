@@ -1,0 +1,82 @@
+{
+  "id": "g2-agent-guard",
+  "name": "G2 Agent Guard",
+  "description": "Per-agent policy for Claude Code native tools: blocked tools and file-write roots.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "agents": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "denyTools": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "writeRoots": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "cliGate": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "cli",
+                "mode",
+                "allow"
+              ],
+              "properties": {
+                "cli": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "mode": {
+                  "enum": [
+                    "cli-calls-only",
+                    "gated"
+                  ]
+                },
+                "allow": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "research_root": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "required_flags": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "required": [
+      "agents"
+    ]
+  }
+}
